@@ -18,17 +18,16 @@
  *   APP_STORE_CONNECT_ISSUER_ID       - App Store Connect Issuer ID
  *   APP_STORE_CONNECT_API_KEY_CONTENT - API private key (base64 encoded)
  *   GH_TOKEN                          - GitHub token for PR comments (used by gh CLI)
+ *   APP_BUNDLE_ID                     - Your app's bundle identifier
+ *   APP_NAME                          - App name (must match App Store Connect)
+ *   GITHUB_REPO_OWNER                 - GitHub org/user
+ *   GITHUB_REPO_NAME                  - GitHub repo name
  *
  * Optional environment variables:
+ *   APP_ID                            - App Store Connect app ID (if bundle ID matches multiple apps)
+ *   XCODE_WORKFLOW_ID                 - Xcode Cloud workflow ID to filter builds
  *   IOS_REPO_PATH                     - Path to iOS git repo (only needed for release sync tagging)
  *   DRY_RUN=true                      - Run without making changes
- *
- * App configuration (override defaults for other apps):
- *   APP_BUNDLE_ID                     - Bundle ID (default: com.deepdesai.runningorder)
- *   APP_NAME                          - App name for logging (default: Running Order)
- *   GITHUB_REPO_OWNER                 - GitHub org/user (default: desai-deep)
- *   GITHUB_REPO_NAME                  - GitHub repo name (default: runningorder-ios)
- *   XCODE_WORKFLOW_ID                 - Xcode Cloud workflow ID to filter builds
  */
 
 // Suppress dotenv logging
@@ -80,19 +79,23 @@ async function main() {
     'APP_STORE_CONNECT_API_KEY_ID',
     'APP_STORE_CONNECT_ISSUER_ID',
     'APP_STORE_CONNECT_API_KEY_CONTENT',
+    'APP_BUNDLE_ID',
+    'APP_NAME',
+    'GITHUB_REPO_OWNER',
+    'GITHUB_REPO_NAME',
   ];
-
-  // IOS_REPO_PATH is only required for sync mode
-  if (mode === 'sync' || mode === 'all') {
-    if (!process.env.IOS_REPO_PATH) {
-      log('Warning: IOS_REPO_PATH not set - release sync will be skipped');
-    }
-  }
 
   for (const varName of requiredVars) {
     if (!process.env[varName]) {
       log(`ERROR: Missing required environment variable: ${varName}`);
       process.exit(1);
+    }
+  }
+
+  // IOS_REPO_PATH is only required for sync mode
+  if (mode === 'sync' || mode === 'all') {
+    if (!process.env.IOS_REPO_PATH) {
+      log('Warning: IOS_REPO_PATH not set - release sync will be skipped');
     }
   }
 

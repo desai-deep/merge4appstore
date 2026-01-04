@@ -95,18 +95,19 @@ npm run sync:dry       # Dry run sync
 | `APP_STORE_CONNECT_ISSUER_ID` | App Store Connect Issuer ID |
 | `APP_STORE_CONNECT_API_KEY_CONTENT` | API private key (base64 encoded) |
 | `GH_TOKEN` | GitHub token for PR comments |
+| `APP_BUNDLE_ID` | Your app's bundle identifier |
+| `APP_NAME` | App name (must match App Store Connect) |
+| `GITHUB_REPO_OWNER` | GitHub org/user |
+| `GITHUB_REPO_NAME` | GitHub repo name |
 
 ### Optional
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `IOS_REPO_PATH` | - | Path to iOS git repo (only needed for release sync tagging) |
-| `APP_BUNDLE_ID` | `com.deepdesai.runningorder` | Your app's bundle identifier |
-| `APP_NAME` | `Running Order` | App name (for logging) |
-| `GITHUB_REPO_OWNER` | `desai-deep` | GitHub org/user |
-| `GITHUB_REPO_NAME` | `runningorder-ios` | GitHub repo name |
-| `XCODE_WORKFLOW_ID` | - | Xcode Cloud workflow ID to filter builds |
-| `DRY_RUN` | `false` | Run without making changes |
+| Variable | Description |
+|----------|-------------|
+| `APP_ID` | App Store Connect app ID (use if bundle ID matches multiple apps) |
+| `XCODE_WORKFLOW_ID` | Xcode Cloud workflow ID to filter builds |
+| `IOS_REPO_PATH` | Path to iOS git repo (only needed for release sync tagging) |
+| `DRY_RUN` | Set to `true` to run without making changes |
 
 ## Requirements
 
