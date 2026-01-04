@@ -17,10 +17,10 @@
  *   APP_STORE_CONNECT_API_KEY_ID      - App Store Connect API Key ID
  *   APP_STORE_CONNECT_ISSUER_ID       - App Store Connect Issuer ID
  *   APP_STORE_CONNECT_API_KEY_CONTENT - API private key (base64 encoded)
- *   IOS_REPO_PATH                     - Path to iOS git repository (for tagging)
+ *   GH_TOKEN                          - GitHub token for PR comments (used by gh CLI)
  *
  * Optional environment variables:
- *   GH_TOKEN / GITHUB_TOKEN           - GitHub token for PR comments (used by gh CLI)
+ *   IOS_REPO_PATH                     - Path to iOS git repo (only needed for release sync tagging)
  *   DRY_RUN=true                      - Run without making changes
  *
  * App configuration (override defaults for other apps):
