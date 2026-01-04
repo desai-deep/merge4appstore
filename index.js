@@ -4,7 +4,7 @@
  * merge2fly - iOS App Store Deployment & Release Sync
  *
  * Combined script that:
- * 1. Monitors TestFlight builds and submits them to App Store review (deploy)
+ * 1. Monitors TestFlight builds on Xcode Cloud and submits them to App Store review (deploy)
  * 2. Tags releases when they go live in the App Store (release sync)
  *
  * Usage:
