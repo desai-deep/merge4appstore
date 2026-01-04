@@ -1,12 +1,15 @@
 {
   "name": "merge2fly",
   "version": "1.0.0",
-  "description": "Automated iOS App Store deployment - monitors TestFlight and submits to App Store review",
+  "description": "Automated iOS App Store deployment and release sync",
   "main": "ios-deploy.js",
   "type": "module",
   "scripts": {
-    "start": "node ios-deploy.js",
-    "dry-run": "DRY_RUN=true node ios-deploy.js"
+    "deploy": "node ios-deploy.js",
+    "deploy:dry": "DRY_RUN=true node ios-deploy.js",
+    "sync": "node ios-release-sync.js",
+    "sync:dry": "DRY_RUN=true node ios-release-sync.js",
+    "start": "npm run deploy && npm run sync"
   },
   "keywords": [
     "ios",
