@@ -106,7 +106,6 @@ npm run sync:dry       # Dry run sync
 |----------|-------------|
 | `APP_ID` | App Store Connect app ID (use if bundle ID matches multiple apps) |
 | `XCODE_WORKFLOW_ID` | Xcode Cloud workflow ID to filter builds |
-| `IOS_REPO_PATH` | Path to iOS git repo (only needed for release sync tagging) |
 | `DRY_RUN` | Set to `true` to run without making changes |
 
 ## Requirements

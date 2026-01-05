@@ -26,7 +26,6 @@
  * Optional environment variables:
  *   APP_ID                            - App Store Connect app ID (if bundle ID matches multiple apps)
  *   XCODE_WORKFLOW_ID                 - Xcode Cloud workflow ID to filter builds
- *   IOS_REPO_PATH                     - Path to iOS git repo (only needed for release sync tagging)
  *   DRY_RUN=true                      - Run without making changes
  */
 
@@ -47,7 +46,7 @@ dotenv.config({ path: path.join(__dirname, '.env') });
 import { CONFIG, log } from './lib/config.js';
 import { AppStoreConnectAPI } from './lib/app-store-connect.js';
 import { GitHubAPI } from './lib/github.js';
-import { GitOperations } from './lib/git.js';
+import { GitHubTags } from './lib/git.js';
 import { acquireLock, releaseLock } from './lib/lock.js';
 import { runDeployCheck } from './lib/deploy.js';
 import { runReleaseSync } from './lib/sync.js';
@@ -92,13 +91,6 @@ async function main() {
     }
   }
 
-  // IOS_REPO_PATH is only required for sync mode
-  if (mode === 'sync' || mode === 'all') {
-    if (!process.env.IOS_REPO_PATH) {
-      log('Warning: IOS_REPO_PATH not set - release sync will be skipped');
-    }
-  }
-
   // Initialize clients
   const asc = new AppStoreConnectAPI(
     process.env.APP_STORE_CONNECT_API_KEY_ID,
@@ -106,8 +98,8 @@ async function main() {
     process.env.APP_STORE_CONNECT_API_KEY_CONTENT
   );
 
-  const github = new GitHubAPI(CONFIG.iosRepoOwner, CONFIG.iosRepoName);
-  const git = CONFIG.iosRepoPath ? new GitOperations(CONFIG.iosRepoPath) : null;
+  const github = new GitHubAPI(CONFIG.repoOwner, CONFIG.repoName);
+  const tags = new GitHubTags(CONFIG.repoOwner, CONFIG.repoName);
 
   try {
     // Run deploy check
@@ -117,9 +109,7 @@ async function main() {
 
     // Run release sync
     if (mode === 'sync' || mode === 'all') {
-      if (git) {
-        await runReleaseSync(asc, git, github, DRY_RUN);
-      }
+      await runReleaseSync(asc, tags, github, DRY_RUN);
     }
 
     log('=== Done ===');
