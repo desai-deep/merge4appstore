@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { GitHubAPI } from '../lib/github.js';
 
-test('automated release PRs use the PR title for release notes', () => {
+test('release notes always use the PR title', () => {
   const github = new GitHubAPI('desai-deep', 'merge4appstore');
   const prDetails = {
     title: 'Minor bug fixes',
@@ -22,7 +22,7 @@ Merging it triggers the production release path for this repository.
   assert.equal(github.extractReleaseNotes(prDetails), 'Minor bug fixes');
 });
 
-test('manual PRs still honor an explicit release notes section', () => {
+test('release notes ignore a manual PR release notes section', () => {
   const github = new GitHubAPI('desai-deep', 'merge4appstore');
   const prDetails = {
     title: 'Skip non-publish TestFlight builds during deploy',
@@ -42,6 +42,6 @@ Bug fixes and review handling improvements
 
   assert.equal(
     github.extractReleaseNotes(prDetails),
-    'Bug fixes and review handling improvements'
+    'Skip non-publish TestFlight builds during deploy'
   );
 });
