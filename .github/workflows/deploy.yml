@@ -30,16 +30,6 @@ jobs:
           ssh -i ~/.ssh/deploy_key "$VPS_USER@$VPS_HOST" "DEPLOY_DIR='$DEPLOY_DIR' bash -s" <<'ENDSSH'
             set -e
 
-            get_file_hash() {
-              if command -v md5sum >/dev/null 2>&1; then
-                md5sum "$1" 2>/dev/null | cut -d' ' -f1 || echo "none"
-              elif command -v sha256sum >/dev/null 2>&1; then
-                sha256sum "$1" 2>/dev/null | cut -d' ' -f1 || echo "none"
-              else
-                echo "none"
-              fi
-            }
-
             echo "Starting merge4appstore deployment..."
 
             if [ -z "$DEPLOY_DIR" ]; then
@@ -52,8 +42,6 @@ jobs:
             node --version || { echo "Node.js not found"; exit 1; }
             npm --version || { echo "npm not found"; exit 1; }
 
-            OLD_LOCK_HASH=$(get_file_hash package-lock.json)
-
             git fetch origin main
             git reset --hard origin/main
 
@@ -61,12 +49,7 @@ jobs:
             COMMIT_MSG=$(git log -1 --pretty=%B | head -1)
             echo "Deployed commit: $COMMIT_SHA - $COMMIT_MSG"
 
-            NEW_LOCK_HASH=$(get_file_hash package-lock.json)
-            if [ "$OLD_LOCK_HASH" != "$NEW_LOCK_HASH" ]; then
-              npm ci --omit=dev
-            else
-              echo "Dependencies unchanged, skipping npm ci"
-            fi
+            npm ci --omit=dev
 
             node --test tests/github.test.js
 
