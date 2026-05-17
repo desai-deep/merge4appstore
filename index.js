@@ -42,78 +42,16 @@ const __dirname = path.dirname(__filename);
 // Load environment variables from .env file
 dotenv.config({ path: path.join(__dirname, '.env') });
 
-// Import modules
-import { CONFIG, log } from './lib/config.js';
-import { AppStoreConnectAPI } from './lib/app-store-connect.js';
-import { GitHubAPI } from './lib/github.js';
-import { GitHubTags } from './lib/git.js';
-import { acquireLock, releaseLock } from './lib/lock.js';
-import { runDeployCheck } from './lib/deploy.js';
-import { runReleaseSync } from './lib/sync.js';
+import { log } from './lib/config.js';
+import { runMode } from './lib/runner.js';
 
 async function main() {
   const DRY_RUN = process.env.DRY_RUN === 'true';
   const args = process.argv.slice(2);
   const mode = args[0] || 'all'; // 'deploy', 'sync', or 'all'
 
-  // Acquire lock
-  if (!acquireLock()) {
-    log('Another instance is already running, exiting');
-    process.exit(0);
-  }
-
-  // Ensure lock is released on exit
-  process.on('exit', releaseLock);
-  process.on('SIGINT', () => { releaseLock(); process.exit(0); });
-  process.on('SIGTERM', () => { releaseLock(); process.exit(0); });
-
-  log('=== merge4appstore ===');
-  log(`Mode: ${mode}`);
-  if (DRY_RUN) {
-    log('DRY RUN MODE - No actual changes will be made');
-  }
-
-  // Validate required environment variables
-  const requiredVars = [
-    'APP_STORE_CONNECT_API_KEY_ID',
-    'APP_STORE_CONNECT_ISSUER_ID',
-    'APP_STORE_CONNECT_API_KEY_CONTENT',
-    'APP_BUNDLE_ID',
-    'APP_NAME',
-    'GITHUB_REPO_OWNER',
-    'GITHUB_REPO_NAME',
-  ];
-
-  for (const varName of requiredVars) {
-    if (!process.env[varName]) {
-      log(`ERROR: Missing required environment variable: ${varName}`);
-      process.exit(1);
-    }
-  }
-
-  // Initialize clients
-  const asc = new AppStoreConnectAPI(
-    process.env.APP_STORE_CONNECT_API_KEY_ID,
-    process.env.APP_STORE_CONNECT_ISSUER_ID,
-    process.env.APP_STORE_CONNECT_API_KEY_CONTENT
-  );
-
-  const github = new GitHubAPI(CONFIG.repoOwner, CONFIG.repoName);
-  const tags = new GitHubTags(CONFIG.repoOwner, CONFIG.repoName);
-
   try {
-    // Run deploy check
-    if (mode === 'deploy' || mode === 'all') {
-      await runDeployCheck(asc, github, DRY_RUN);
-    }
-
-    // Run release sync
-    if (mode === 'sync' || mode === 'all') {
-      await runReleaseSync(asc, tags, github, DRY_RUN);
-    }
-
-    log('=== Done ===');
-
+    await runMode(mode, { dryRun: DRY_RUN });
   } catch (error) {
     log(`ERROR: ${error.message}`);
     if (error.stack) {

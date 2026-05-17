@@ -14,21 +14,26 @@ Automated iOS App Store deployment and release sync. Monitors TestFlight builds 
 - 10x faster than Fastlane-based solutions (~8s vs ~60s)
 - Configurable for multiple apps via environment variables
 - Single combined script for both operations
+- Optional webhook server for Xcode Cloud build completion events
 
 ## How It Works
 
-```
+```text
 Xcode Cloud                          Your VPS
-┌─────────────────┐                  ┌─────────────────────────┐
-│ Build Workflow  │                  │  merge4appstore (cron)  │
-│ "Publish to     │──► TestFlight ──►│                         │
-│  App Store"     │                  │  1. Check new builds    │
-└─────────────────┘                  │  2. Find merged PR      │
-                                     │  3. Extract release notes│
-                                     │  4. Submit for review   │
-                                     │  5. Tag when live       │
-                                     │  6. Comment on PR       │
-                                     └─────────────────────────┘
+┌─────────────────┐                  ┌────────────────────────────┐
+│ Build Workflow  │                  │ merge4appstore             │
+│ "Publish to     │──► webhook ────► │ webhook server (deploy)    │
+│  App Store"     │                  │ 1. Receive BUILD_COMPLETED │
+└─────────────────┘                  │ 2. Trigger deploy check    │
+                                     └────────────────────────────┘
+
+App Store Connect                    Your VPS
+┌─────────────────┐                  ┌────────────────────────────┐
+│ Production live │                  │ cron / manual sync         │
+│ status changes  │────────────────► │ 1. Check READY_FOR_SALE    │
+└─────────────────┘                  │ 2. Tag release             │
+                                     │ 3. Comment on PR           │
+                                     └────────────────────────────┘
 ```
 
 ## Setup
@@ -58,6 +63,9 @@ node index.js
 # Run only deployment check
 node index.js deploy
 
+# Run webhook server for Xcode Cloud build completions
+node server.js
+
 # Run only release sync
 node index.js sync
 
@@ -72,17 +80,45 @@ Or use npm scripts:
 ```bash
 npm start              # Run both
 npm run deploy         # Deploy only
+npm run server         # Webhook server
 npm run sync           # Sync only
 npm run start:dry      # Dry run both
 npm run deploy:dry     # Dry run deploy
+npm run server:dry     # Dry run webhook server
 npm run sync:dry       # Dry run sync
 ```
 
-### 4. Schedule (cron)
+### 4. Webhook server
+
+Configure Xcode Cloud to send `BUILD_COMPLETED` events to this service:
 
 ```bash
-# Run every 5 minutes
-*/5 * * * * cd /path/to/merge4appstore && node index.js >> logs/cron.log 2>&1
+WEBHOOK_PORT=3000
+WEBHOOK_PATH=/webhooks/xcode-cloud
+WEBHOOK_SECRET_TOKEN=replace-with-a-random-token
+npm run server
+```
+
+The webhook endpoint path becomes:
+
+```text
+/webhooks/xcode-cloud/replace-with-a-random-token
+```
+
+The server responds immediately and runs the existing deploy flow in the background. It only triggers for successful `BUILD_COMPLETED` events, and if `XCODE_WORKFLOW_ID` is set it will ignore other workflows.
+
+Apple requires an HTTPS endpoint for Xcode Cloud webhooks. In production, run this behind a reverse proxy such as Nginx or Caddy and publish the proxied HTTPS URL in App Store Connect.
+
+### 5. Schedule (cron)
+
+The webhook server can replace frequent deploy polling. Keep cron for the release sync path, or as a low-frequency fallback:
+
+```bash
+# Run release sync every 15 minutes
+*/15 * * * * cd /path/to/merge4appstore && node index.js sync >> logs/cron.log 2>&1
+
+# Optional: fallback deploy check every hour
+0 * * * * cd /path/to/merge4appstore && node index.js deploy >> logs/cron.log 2>&1
 ```
 
 ## Automatic VPS Deploy
@@ -122,6 +158,10 @@ The deploy workflow SSHes into the VPS, hard-resets the checkout to `origin/main
 | `APP_ID` | App Store Connect app ID (use if bundle ID matches multiple apps) |
 | `XCODE_WORKFLOW_ID` | Xcode Cloud workflow ID to filter builds |
 | `DRY_RUN` | Set to `true` to run without making changes |
+| `WEBHOOK_HOST` | Host interface for the webhook server (default: `0.0.0.0`) |
+| `WEBHOOK_PORT` | Port for the webhook server (default: `3000`) |
+| `WEBHOOK_PATH` | Base path for the Xcode Cloud webhook (default: `/webhooks/xcode-cloud`) |
+| `WEBHOOK_SECRET_TOKEN` | Appended path token used to make the webhook URL unguessable |
 
 ## Requirements
 
@@ -132,6 +172,14 @@ The deploy workflow SSHes into the VPS, hard-resets the checkout to `origin/main
 ## How It Filters Builds
 
 The script only processes builds from the specified Xcode Cloud workflow (default: "Publish to App Store"). Other workflows like "Public Beta" or "UAT" are skipped - they're for TestFlight distribution only, not App Store submission.
+
+## Webhook setup in App Store Connect
+
+1. Start the webhook server behind HTTPS.
+2. In App Store Connect, choose your app and open `Xcode Cloud > Settings > Webhooks`.
+3. Add a webhook that points to `https://your-domain.example/webhooks/xcode-cloud/<token>`.
+4. Trigger a test build from the publish workflow and inspect the delivery report in App Store Connect.
+5. Keep `XCODE_WORKFLOW_ID` set so non-publish workflows are ignored.
 
 ## License
 

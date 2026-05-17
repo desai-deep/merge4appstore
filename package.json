@@ -9,8 +9,11 @@
     "start:dry": "DRY_RUN=true node index.js",
     "deploy": "node index.js deploy",
     "deploy:dry": "DRY_RUN=true node index.js deploy",
+    "server": "node server.js",
+    "server:dry": "DRY_RUN=true node server.js",
     "sync": "node index.js sync",
-    "sync:dry": "DRY_RUN=true node index.js sync"
+    "sync:dry": "DRY_RUN=true node index.js sync",
+    "test": "node --test"
   },
   "keywords": [
     "ios",
