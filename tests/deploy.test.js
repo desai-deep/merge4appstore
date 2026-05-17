@@ -3,6 +3,21 @@ import assert from 'node:assert/strict';
 
 import { runDeployCheck } from '../lib/deploy.js';
 
+async function withWorkflowId(workflowId, fn) {
+  const previousWorkflowId = process.env.XCODE_WORKFLOW_ID;
+  process.env.XCODE_WORKFLOW_ID = workflowId;
+
+  try {
+    await fn();
+  } finally {
+    if (previousWorkflowId === undefined) {
+      delete process.env.XCODE_WORKFLOW_ID;
+    } else {
+      process.env.XCODE_WORKFLOW_ID = previousWorkflowId;
+    }
+  }
+}
+
 function createASC(overrides = {}) {
   return {
     checkBuildInReview: async () => ({ inReview: false }),
@@ -42,58 +57,58 @@ function createGitHub(overrides = {}) {
 }
 
 test('does not resubmit the same rejected build on cron runs', async () => {
-  process.env.XCODE_WORKFLOW_ID = 'workflow-1';
+  await withWorkflowId('workflow-1', async () => {
+    let submitted = false;
+    const asc = createASC({
+      checkRejectedVersion: async () => ({
+        rejected: true,
+        version: '1.2.3',
+        state: 'REJECTED',
+        buildNumber: '100',
+        versionId: 'version-123',
+      }),
+      getTestFlightReadyBuilds: async () => ([
+        { buildNumber: '100', version: '1.2.3', buildId: 'build-100' },
+        { buildNumber: '99', version: '1.2.2', buildId: 'build-99' },
+      ]),
+      submitForReview: async () => {
+        submitted = true;
+      },
+    });
 
-  let submitted = false;
-  const asc = createASC({
-    checkRejectedVersion: async () => ({
-      rejected: true,
-      version: '1.2.3',
-      state: 'REJECTED',
-      buildNumber: '100',
-      versionId: 'version-123',
-    }),
-    getTestFlightReadyBuilds: async () => ([
-      { buildNumber: '100', version: '1.2.3', buildId: 'build-100' },
-      { buildNumber: '99', version: '1.2.2', buildId: 'build-99' },
-    ]),
-    submitForReview: async () => {
-      submitted = true;
-    },
+    await runDeployCheck(asc, createGitHub(), false);
+
+    assert.equal(submitted, false);
   });
-
-  await runDeployCheck(asc, createGitHub(), false);
-
-  assert.equal(submitted, false);
 });
 
 test('submits a newer build after a rejection', async () => {
-  process.env.XCODE_WORKFLOW_ID = 'workflow-1';
+  await withWorkflowId('workflow-1', async () => {
+    let selectedBuildId = null;
+    let submittedVersionId = null;
+    const asc = createASC({
+      checkRejectedVersion: async () => ({
+        rejected: true,
+        version: '1.2.3',
+        state: 'REJECTED',
+        buildNumber: '100',
+        versionId: 'version-123',
+      }),
+      getTestFlightReadyBuilds: async () => ([
+        { buildNumber: '101', version: '1.2.4', buildId: 'build-101' },
+        { buildNumber: '100', version: '1.2.3', buildId: 'build-100' },
+      ]),
+      selectBuildForVersion: async (_versionId, buildId) => {
+        selectedBuildId = buildId;
+      },
+      submitForReview: async versionId => {
+        submittedVersionId = versionId;
+      },
+    });
 
-  let selectedBuildId = null;
-  let submittedVersionId = null;
-  const asc = createASC({
-    checkRejectedVersion: async () => ({
-      rejected: true,
-      version: '1.2.3',
-      state: 'REJECTED',
-      buildNumber: '100',
-      versionId: 'version-123',
-    }),
-    getTestFlightReadyBuilds: async () => ([
-      { buildNumber: '101', version: '1.2.4', buildId: 'build-101' },
-      { buildNumber: '100', version: '1.2.3', buildId: 'build-100' },
-    ]),
-    selectBuildForVersion: async (_versionId, buildId) => {
-      selectedBuildId = buildId;
-    },
-    submitForReview: async versionId => {
-      submittedVersionId = versionId;
-    },
+    await runDeployCheck(asc, createGitHub(), false);
+
+    assert.equal(selectedBuildId, 'build-101');
+    assert.equal(submittedVersionId, 'version-1.2.4');
   });
-
-  await runDeployCheck(asc, createGitHub(), false);
-
-  assert.equal(selectedBuildId, 'build-101');
-  assert.equal(submittedVersionId, 'version-1.2.4');
 });
