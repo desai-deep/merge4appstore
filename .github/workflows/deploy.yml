@@ -25,7 +25,7 @@ jobs:
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
-          DEPLOY_DIR: ${{ secrets.MERGE4APPSTORE_DIR }}
+          DEPLOY_DIR: ${{ secrets.SERVER_DIR }}
         run: |
           ssh -i ~/.ssh/deploy_key "$VPS_USER@$VPS_HOST" "DEPLOY_DIR='$DEPLOY_DIR' bash -s" <<'ENDSSH'
             set -e
@@ -43,7 +43,7 @@ jobs:
             echo "Starting merge4appstore deployment..."
 
             if [ -z "$DEPLOY_DIR" ]; then
-              echo "MERGE4APPSTORE_DIR secret is not set"
+              echo "SERVER_DIR secret is not set"
               exit 1
             fi
 
