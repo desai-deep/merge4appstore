@@ -1,0 +1,78 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -m 700 -p ~/.ssh
+          umask 077
+          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy to VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          DEPLOY_DIR: ${{ secrets.SERVER_DIR }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "$VPS_USER@$VPS_HOST" "DEPLOY_DIR='$DEPLOY_DIR' bash -s" <<'ENDSSH'
+            set -e
+
+            get_file_hash() {
+              if command -v md5sum >/dev/null 2>&1; then
+                md5sum "$1" 2>/dev/null | cut -d' ' -f1 || echo "none"
+              elif command -v sha256sum >/dev/null 2>&1; then
+                sha256sum "$1" 2>/dev/null | cut -d' ' -f1 || echo "none"
+              else
+                echo "none"
+              fi
+            }
+
+            echo "Starting merge4appstore deployment..."
+
+            if [ -z "$DEPLOY_DIR" ]; then
+              echo "SERVER_DIR secret is not set"
+              exit 1
+            fi
+
+            cd "$DEPLOY_DIR"
+
+            node --version || { echo "Node.js not found"; exit 1; }
+            npm --version || { echo "npm not found"; exit 1; }
+
+            OLD_LOCK_HASH=$(get_file_hash package-lock.json)
+
+            git fetch origin main
+            git reset --hard origin/main
+
+            COMMIT_SHA=$(git rev-parse --short HEAD)
+            COMMIT_MSG=$(git log -1 --pretty=%B | head -1)
+            echo "Deployed commit: $COMMIT_SHA - $COMMIT_MSG"
+
+            NEW_LOCK_HASH=$(get_file_hash package-lock.json)
+            if [ "$OLD_LOCK_HASH" != "$NEW_LOCK_HASH" ]; then
+              npm ci --omit=dev
+            else
+              echo "Dependencies unchanged, skipping npm ci"
+            fi
+
+            node --test tests/github.test.js
+
+            echo "merge4appstore deployment complete"
+          ENDSSH
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
