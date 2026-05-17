@@ -85,6 +85,21 @@ npm run sync:dry       # Dry run sync
 */5 * * * * cd /path/to/merge4appstore && node index.js >> logs/cron.log 2>&1
 ```
 
+## Automatic VPS Deploy
+
+This repo can deploy itself to the VPS on every push to `main` using `.github/workflows/deploy.yml`.
+
+Required GitHub Actions secrets:
+
+| Secret | Description |
+|--------|-------------|
+| `VPS_HOST` | VPS hostname or IP |
+| `VPS_USER` | SSH user |
+| `VPS_SSH_KEY` | Private SSH key for deployment |
+| `MERGE4APPSTORE_DIR` | Absolute path to this repo on the VPS |
+
+The deploy workflow SSHes into the VPS, hard-resets the checkout to `origin/main`, runs `npm ci --omit=dev` when dependencies changed, and executes `node --test tests/github.test.js`.
+
 ## Environment Variables
 
 ### Required
