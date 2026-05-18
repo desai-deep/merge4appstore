@@ -22,6 +22,7 @@ function createASC(overrides = {}) {
   return {
     checkBuildInReview: async () => ({ inReview: false }),
     checkRejectedVersion: async () => ({ rejected: false }),
+    checkVersionWithUnresolvedIssues: async () => ({ hasUnresolvedIssues: false }),
     getLiveProductionBuild: async () => ({ live: false, buildId: null }),
     getTestFlightReadyBuilds: async () => [],
     getBuildCommitSHA: async () => ({
@@ -110,5 +111,30 @@ test('submits a newer build after a rejection', async () => {
 
     assert.equal(selectedBuildId, 'build-101');
     assert.equal(submittedVersionId, 'version-1.2.4');
+  });
+});
+
+test('does not resubmit a draft build with unresolved review issues when no newer build exists', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    let submitted = false;
+    const asc = createASC({
+      checkVersionWithUnresolvedIssues: async () => ({
+        hasUnresolvedIssues: true,
+        version: '1.2.3',
+        state: 'PREPARE_FOR_SUBMISSION',
+        buildNumber: '100',
+        versionId: 'version-123',
+      }),
+      getTestFlightReadyBuilds: async () => ([
+        { buildNumber: '100', version: '1.2.3', buildId: 'build-100' },
+      ]),
+      submitForReview: async () => {
+        submitted = true;
+      },
+    });
+
+    await runDeployCheck(asc, createGitHub(), false);
+
+    assert.equal(submitted, false);
   });
 });
