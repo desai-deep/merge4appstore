@@ -63,6 +63,7 @@ test('does not resubmit the same rejected build on cron runs', async () => {
     const asc = createASC({
       checkRejectedVersion: async () => ({
         rejected: true,
+        blockReason: 'rejected',
         version: '1.2.3',
         state: 'REJECTED',
         buildNumber: '100',
@@ -90,6 +91,7 @@ test('submits a newer build after a rejection', async () => {
     const asc = createASC({
       checkRejectedVersion: async () => ({
         rejected: true,
+        blockReason: 'rejected',
         version: '1.2.3',
         state: 'REJECTED',
         buildNumber: '100',
@@ -120,6 +122,7 @@ test('does not resubmit a draft build with unresolved review issues when no newe
     const asc = createASC({
       checkVersionWithUnresolvedIssues: async () => ({
         hasUnresolvedIssues: true,
+        blockReason: 'unresolved_review',
         version: '1.2.3',
         state: 'PREPARE_FOR_SUBMISSION',
         buildNumber: '100',
