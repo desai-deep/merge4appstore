@@ -19,8 +19,8 @@ Automated iOS App Store deployment and release sync. Monitors TestFlight builds 
 
 ```
 Xcode Cloud                          Your VPS
-┌─────────────────┐                  ┌─────────────────────────┐
-│ Build Workflow  │                  │  merge4appstore (cron)  │
+┌─────────────────┐   webhook /      ┌─────────────────────────┐
+│ Build Workflow  │   cron trigger   │  merge4appstore         │
 │ "Publish to     │──► TestFlight ──►│                         │
 │  App Store"     │                  │  1. Check new builds    │
 └─────────────────┘                  │  2. Find merged PR      │
@@ -78,7 +78,40 @@ npm run deploy:dry     # Dry run deploy
 npm run sync:dry       # Dry run sync
 ```
 
-### 4. Schedule (cron)
+### 4. Run continuously (webhook server)
+
+Instead of polling on a cron, run the webhook server so submissions are triggered
+the moment a release build is produced:
+
+```bash
+node server.js          # or: npm run serve
+DRY_RUN=true npm run serve:dry
+```
+
+The server listens on `127.0.0.1:$WEBHOOK_PORT` (default `8090`) and exposes:
+
+- `POST /webhook/xcode-cloud` — triggers a deploy check (authenticated by `XCODE_WEBHOOK_SECRET`)
+- `GET  /healthz` — liveness probe
+
+Because Xcode Cloud fires its webhook when **CI finishes**, the TestFlight build
+is usually still processing on Apple's side for several minutes afterward. The
+server therefore retries the deploy check on a fixed interval
+(`WEBHOOK_RETRY_INTERVAL_MS`, default 3 min) up to `WEBHOOK_RETRY_MAX_ATTEMPTS`
+times (default 20 ≈ 1 hour) until the build becomes submittable, then stops.
+
+**Authentication.** Xcode Cloud webhooks are unsigned, so the caller is
+authenticated with a shared secret. Provide it as a trailing path segment
+(`/webhook/xcode-cloud/<secret>`), an `X-Webhook-Secret` header, or a
+`?token=<secret>` query parameter.
+
+Run it under a process manager (e.g. PM2) and reverse-proxy it behind TLS:
+
+```bash
+pm2 start server.js --name merge4appstore-webhook
+pm2 save
+```
+
+### 4b. Schedule (cron, legacy)
 
 ```bash
 # Run every 5 minutes
@@ -98,7 +131,7 @@ Required GitHub Actions secrets:
 | `VPS_SSH_KEY` | Private SSH key for deployment |
 | `MERGE4APPSTORE_DIR` | Absolute path to this repo on the VPS |
 
-The deploy workflow SSHes into the VPS, hard-resets the checkout to `origin/main`, runs `npm ci --omit=dev` when dependencies changed, and executes `node --test tests/github.test.js`.
+The deploy workflow SSHes into the VPS, hard-resets the checkout to `origin/main`, runs `npm ci --omit=dev`, executes the test suite (`node --test tests/`), and reloads the `merge4appstore-webhook` PM2 process.
 
 ## Environment Variables
 
@@ -122,6 +155,10 @@ The deploy workflow SSHes into the VPS, hard-resets the checkout to `origin/main
 | `APP_ID` | App Store Connect app ID (use if bundle ID matches multiple apps) |
 | `XCODE_WORKFLOW_ID` | Xcode Cloud workflow ID to filter builds |
 | `DRY_RUN` | Set to `true` to run without making changes |
+| `XCODE_WEBHOOK_SECRET` | Shared secret authenticating Xcode Cloud webhooks (**required** to run `server.js`) |
+| `WEBHOOK_PORT` | Port the webhook server binds to on `127.0.0.1` (default `8090`) |
+| `WEBHOOK_RETRY_INTERVAL_MS` | Delay between deploy retries while a build finishes processing (default `180000`) |
+| `WEBHOOK_RETRY_MAX_ATTEMPTS` | Max deploy attempts per webhook trigger (default `20`) |
 
 ## Requirements
 

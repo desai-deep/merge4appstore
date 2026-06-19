@@ -116,6 +116,112 @@ test('submits a newer build after a rejection', async () => {
   });
 });
 
+test('resubmits a newer build over a previously rejected same-version number', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    let clearedVersionId = null;
+    let selectedBuildId = null;
+    let submittedVersionId = null;
+    const asc = createASC({
+      checkRejectedVersion: async () => ({
+        rejected: true,
+        blockReason: 'rejected',
+        version: '1.2.3',
+        state: 'REJECTED',
+        buildNumber: '100',
+        versionId: 'version-1.2.3',
+      }),
+      getTestFlightReadyBuilds: async () => ([
+        { buildNumber: '105', version: '1.2.3', buildId: 'build-105' },
+      ]),
+      getBuildByNumber: async buildNumber => ({
+        buildId: `build-${buildNumber}`,
+        version: '1.2.3',
+      }),
+      // The existing 1.2.3 version is still sitting in REJECTED.
+      getOrCreateAppStoreVersion: async version => ({
+        exists: true,
+        versionId: `version-${version}`,
+        state: 'REJECTED',
+      }),
+      cancelReview: async versionId => {
+        clearedVersionId = versionId;
+        return { success: true };
+      },
+      selectBuildForVersion: async (_versionId, buildId) => {
+        selectedBuildId = buildId;
+      },
+      submitForReview: async versionId => {
+        submittedVersionId = versionId;
+      },
+    });
+
+    const result = await runDeployCheck(asc, createGitHub(), false);
+
+    assert.equal(result.status, 'submitted');
+    assert.equal(result.resubmittedOverRejected, true);
+    assert.equal(selectedBuildId, 'build-105');
+    assert.equal(submittedVersionId, 'version-1.2.3');
+    // Any stale submission on the rejected version is cleared before resubmitting.
+    assert.equal(clearedVersionId, 'version-1.2.3');
+  });
+});
+
+test('treats METADATA_REJECTED as submittable', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    let submittedVersionId = null;
+    const asc = createASC({
+      checkRejectedVersion: async () => ({
+        rejected: true,
+        blockReason: 'rejected',
+        version: '1.2.3',
+        state: 'METADATA_REJECTED',
+        buildNumber: '100',
+        versionId: 'version-1.2.3',
+      }),
+      getTestFlightReadyBuilds: async () => ([
+        { buildNumber: '105', version: '1.2.3', buildId: 'build-105' },
+      ]),
+      getBuildByNumber: async buildNumber => ({
+        buildId: `build-${buildNumber}`,
+        version: '1.2.3',
+      }),
+      getOrCreateAppStoreVersion: async version => ({
+        exists: true,
+        versionId: `version-${version}`,
+        state: 'METADATA_REJECTED',
+      }),
+      cancelReview: async () => ({ success: true }),
+      submitForReview: async versionId => {
+        submittedVersionId = versionId;
+      },
+    });
+
+    const result = await runDeployCheck(asc, createGitHub(), false);
+
+    assert.equal(result.status, 'submitted');
+    assert.equal(submittedVersionId, 'version-1.2.3');
+  });
+});
+
+test('returns no-eligible-build when only other-workflow builds exist', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    const asc = createASC({
+      getTestFlightReadyBuilds: async () => ([
+        { buildNumber: '105', version: '1.2.3', buildId: 'build-105' },
+      ]),
+      getBuildCommitSHA: async () => ({
+        found: true,
+        commitSha: 'abcdef1234567890',
+        workflowId: 'public-beta',
+        workflowName: 'Public Beta',
+      }),
+    });
+
+    const result = await runDeployCheck(asc, createGitHub(), false);
+    assert.equal(result.status, 'no-eligible-build');
+  });
+});
+
 test('does not resubmit a draft build with unresolved review issues when no newer build exists', async () => {
   await withWorkflowId('workflow-1', async () => {
     let submitted = false;

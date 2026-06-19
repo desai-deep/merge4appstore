@@ -51,7 +51,15 @@ jobs:
 
             npm ci --omit=dev
 
-            node --test tests/github.test.js
+            node --test tests/*.test.js
+
+            # Restart (or start) the webhook server under PM2 so the new code is live.
+            if command -v pm2 >/dev/null 2>&1; then
+              pm2 reload merge4appstore-webhook || pm2 start server.js --name merge4appstore-webhook
+              pm2 save
+            else
+              echo "WARNING: pm2 not found - webhook server not restarted"
+            fi
 
             echo "merge4appstore deployment complete"
           ENDSSH
