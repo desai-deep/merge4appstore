@@ -72,4 +72,13 @@ test('extractWebhookSecret reads header, query, then trailing path', () => {
     extractWebhookSecret({ headers: {} }, new URL('http://x/webhook/xcode-cloud'), prefix),
     null
   );
+
+  // Malformed percent-encoding must not throw (pre-auth DoS guard)
+  assert.doesNotThrow(() =>
+    extractWebhookSecret({ headers: {} }, new URL('http://x/webhook/xcode-cloud/%E0%A4%'), prefix)
+  );
+  assert.equal(
+    extractWebhookSecret({ headers: {} }, new URL('http://x/webhook/xcode-cloud/%E0%A4%'), prefix),
+    null
+  );
 });

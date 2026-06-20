@@ -54,9 +54,22 @@ for (const varName of requiredVars) {
   }
 }
 
-const port = parseInt(process.env.WEBHOOK_PORT || '8090', 10);
-const intervalMs = parseInt(process.env.WEBHOOK_RETRY_INTERVAL_MS || '180000', 10);
-const maxAttempts = parseInt(process.env.WEBHOOK_RETRY_MAX_ATTEMPTS || '20', 10);
+// Parse a positive-integer env var, falling back to the default (with a warning)
+// when it's unset or not a valid number, so a typo can't crash startup.
+function intFromEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) {
+    log(`WARNING: ${name}="${raw}" is not a valid positive number - using default ${fallback}`);
+    return fallback;
+  }
+  return Math.floor(n);
+}
+
+const port = intFromEnv('WEBHOOK_PORT', 8090);
+const intervalMs = intFromEnv('WEBHOOK_RETRY_INTERVAL_MS', 180000);
+const maxAttempts = intFromEnv('WEBHOOK_RETRY_MAX_ATTEMPTS', 20);
 
 const asc = new AppStoreConnectAPI(
   process.env.APP_STORE_CONNECT_API_KEY_ID,
