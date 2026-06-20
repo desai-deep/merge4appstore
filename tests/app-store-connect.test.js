@@ -259,3 +259,83 @@ test('checkVersionWithUnresolvedIssues ignores non-unresolved items in the same 
     versionId: 'version-unresolved',
   });
 });
+
+function createASCWithRequest(requestImpl) {
+  const asc = new AppStoreConnectAPI('key', 'issuer', Buffer.from('fake-key').toString('base64'));
+  asc.getAppId = async () => 'app-1';
+  asc.request = requestImpl;
+  return asc;
+}
+
+test('clearBlockingReviewSubmissions deletes empty drafts and cancels open submissions', async () => {
+  const calls = [];
+  const asc = createASCWithRequest(async (endpoint, options = {}) => {
+    const method = options.method || 'GET';
+    calls.push(`${method} ${endpoint.split('?')[0]}`);
+    if (method === 'GET' && endpoint.startsWith('/reviewSubmissions')) {
+      return {
+        data: [
+          { id: 'complete-1', attributes: { state: 'COMPLETE' }, relationships: { items: { data: [{ id: 'i0' }] } } },
+          { id: 'empty-draft', attributes: { state: 'READY_FOR_REVIEW' }, relationships: { items: { data: [] } } },
+          { id: 'unresolved', attributes: { state: 'UNRESOLVED_ISSUES' }, relationships: { items: { data: [{ id: 'i1' }] } } },
+        ],
+      };
+    }
+    return null; // DELETE / PATCH responses
+  });
+
+  const cleared = await asc.clearBlockingReviewSubmissions();
+
+  assert.deepEqual(cleared, [
+    { id: 'empty-draft', state: 'READY_FOR_REVIEW', action: 'deleted' },
+    { id: 'unresolved', state: 'UNRESOLVED_ISSUES', action: 'canceled' },
+  ]);
+  assert.ok(calls.includes('DELETE /reviewSubmissions/empty-draft'));
+  assert.ok(calls.includes('PATCH /reviewSubmissions/unresolved'));
+  // COMPLETE submissions never block and must be left alone.
+  assert.ok(!calls.some(c => c.includes('complete-1')));
+});
+
+test('clearBlockingReviewSubmissions skips the exceptId submission', async () => {
+  const calls = [];
+  const asc = createASCWithRequest(async (endpoint, options = {}) => {
+    const method = options.method || 'GET';
+    calls.push(`${method} ${endpoint.split('?')[0]}`);
+    if (method === 'GET') {
+      return {
+        data: [
+          { id: 'keep', attributes: { state: 'READY_FOR_REVIEW' }, relationships: { items: { data: [] } } },
+        ],
+      };
+    }
+    return null;
+  });
+
+  const cleared = await asc.clearBlockingReviewSubmissions('keep');
+
+  assert.deepEqual(cleared, []);
+  assert.ok(!calls.some(c => c.startsWith('DELETE') || c.startsWith('PATCH')));
+});
+
+test('getOrCreateDraftReviewSubmission rolls back the submission when item creation fails', async () => {
+  const calls = [];
+  const asc = createASCWithRequest(async (endpoint, options = {}) => {
+    const method = options.method || 'GET';
+    calls.push(`${method} ${endpoint.split('?')[0]}`);
+    if (method === 'POST' && endpoint === '/reviewSubmissions') {
+      return { data: { id: 'new-sub' } };
+    }
+    if (method === 'POST' && endpoint === '/reviewSubmissionItems') {
+      throw new Error('API Error 409: This resource cannot be reviewed');
+    }
+    return null; // DELETE response
+  });
+  // No existing submission for this version.
+  asc.getReviewSubmissionIdForVersion = async () => null;
+
+  await assert.rejects(() => asc.getOrCreateDraftReviewSubmission('version-1'), /409/);
+  assert.ok(
+    calls.includes('DELETE /reviewSubmissions/new-sub'),
+    'should delete the half-created empty submission'
+  );
+});

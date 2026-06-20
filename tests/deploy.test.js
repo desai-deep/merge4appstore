@@ -43,6 +43,8 @@ function createASC(overrides = {}) {
     selectBuildForVersion: async () => {},
     updateReleaseNotes: async () => {},
     submitForReview: async () => {},
+    clearBlockingReviewSubmissions: async () => [],
+    cancelReview: async () => ({ success: true }),
     ...overrides,
   };
 }
@@ -118,9 +120,10 @@ test('submits a newer build after a rejection', async () => {
 
 test('resubmits a newer build over a previously rejected same-version number', async () => {
   await withWorkflowId('workflow-1', async () => {
-    let clearedVersionId = null;
+    let clearCalled = false;
     let selectedBuildId = null;
     let submittedVersionId = null;
+    const callOrder = [];
     const asc = createASC({
       checkRejectedVersion: async () => ({
         rejected: true,
@@ -143,15 +146,17 @@ test('resubmits a newer build over a previously rejected same-version number', a
         versionId: `version-${version}`,
         state: 'REJECTED',
       }),
-      cancelReview: async versionId => {
-        clearedVersionId = versionId;
-        return { success: true };
+      clearBlockingReviewSubmissions: async () => {
+        clearCalled = true;
+        callOrder.push('clear');
+        return [{ id: 'sub-1', state: 'UNRESOLVED_ISSUES', action: 'canceled' }];
       },
       selectBuildForVersion: async (_versionId, buildId) => {
         selectedBuildId = buildId;
       },
       submitForReview: async versionId => {
         submittedVersionId = versionId;
+        callOrder.push('submit');
       },
     });
 
@@ -161,8 +166,9 @@ test('resubmits a newer build over a previously rejected same-version number', a
     assert.equal(result.resubmittedOverRejected, true);
     assert.equal(selectedBuildId, 'build-105');
     assert.equal(submittedVersionId, 'version-1.2.3');
-    // Any stale submission on the rejected version is cleared before resubmitting.
-    assert.equal(clearedVersionId, 'version-1.2.3');
+    // Blocking submissions are cleared, and that happens before submitting.
+    assert.equal(clearCalled, true);
+    assert.deepEqual(callOrder, ['clear', 'submit']);
   });
 });
 
@@ -190,7 +196,6 @@ test('treats METADATA_REJECTED as submittable', async () => {
         versionId: `version-${version}`,
         state: 'METADATA_REJECTED',
       }),
-      cancelReview: async () => ({ success: true }),
       submitForReview: async versionId => {
         submittedVersionId = versionId;
       },
