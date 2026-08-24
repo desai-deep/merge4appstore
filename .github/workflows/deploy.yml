@@ -67,8 +67,8 @@ jobs:
               scripts/install-profile.sh .env "$defaults_file" "$profile_file"
 
               current_crontab="$(printf '%s\n' "$current_crontab" | grep -Fv "$marker" || true)"
-              current_crontab="${current_crontab}
-*/5 * * * * cd ${deploy_dir_quoted} && node index.js --config ${profile_file} >> logs/cron.log 2>&1 ${marker}"
+              cron_line="*/5 * * * * cd ${deploy_dir_quoted} && node index.js --config ${profile_file} >> logs/cron.log 2>&1 ${marker}"
+              current_crontab="$(printf '%s\n%s\n' "$current_crontab" "$cron_line")"
             done
 
             if (( ${#profile_defaults[@]} > 0 )); then
