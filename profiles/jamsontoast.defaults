@@ -1,0 +1,11 @@
+INSTANCE_NAME=jamsontoast
+APP_ID=1303194454
+APP_BUNDLE_ID=com.deepdesai.jamsontoast
+APP_NAME=Jams On Toast
+GITHUB_REPO_OWNER=desai-deep
+GITHUB_REPO_NAME=JamsOnToast
+GITHUB_REPO=desai-deep/JamsOnToast
+XCODE_WORKFLOW_ID=fb31931a-7a0b-4f77-aa1f-e424f2b8b84d
+IOS_REPO_PATH=
+PRODUCTION_BRANCH=master
+BETA_BRANCH=development
