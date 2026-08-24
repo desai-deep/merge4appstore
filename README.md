@@ -60,6 +60,11 @@ cp profiles/jamsontoast.env.example profiles/jamsontoast.env
 Each profile should set a unique `INSTANCE_NAME`. That gives it an independent
 lock and log file, so two cron invocations cannot block or overwrite one another.
 
+Tracked `profiles/*.defaults` files are deployment-managed profiles. On each VPS
+deploy, they inherit the shared credentials from `.env`, apply their non-secret
+app settings, and install an idempotent five-minute cron entry. Generated
+`profiles/*.env` files are ignored by Git and written with mode `600`.
+
 ### 3. Run
 
 ```bash

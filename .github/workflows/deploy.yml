@@ -53,6 +53,29 @@ jobs:
 
             npm test
 
+            echo "Configuring app profiles..."
+            shopt -s nullglob
+            profile_defaults=(profiles/*.defaults)
+            current_crontab="$(crontab -l 2>/dev/null || true)"
+            printf -v deploy_dir_quoted '%q' "$DEPLOY_DIR"
+
+            for defaults_file in "${profile_defaults[@]}"; do
+              profile_name="$(basename "$defaults_file" .defaults)"
+              profile_file="profiles/${profile_name}.env"
+              marker="# merge4appstore:${profile_name}"
+
+              scripts/install-profile.sh .env "$defaults_file" "$profile_file"
+
+              current_crontab="$(printf '%s\n' "$current_crontab" | grep -Fv "$marker" || true)"
+              current_crontab="${current_crontab}
+*/5 * * * * cd ${deploy_dir_quoted} && node index.js --config ${profile_file} >> logs/cron.log 2>&1 ${marker}"
+            done
+
+            if (( ${#profile_defaults[@]} > 0 )); then
+              printf '%s\n' "$current_crontab" | sed '/^[[:space:]]*$/d' | crontab -
+              echo "Configured ${#profile_defaults[@]} app profile cron job(s)"
+            fi
+
             echo "merge4appstore deployment complete"
           ENDSSH
 
