@@ -259,3 +259,36 @@ test('checkVersionWithUnresolvedIssues ignores non-unresolved items in the same 
     versionId: 'version-unresolved',
   });
 });
+
+test('build commit lookup is scoped to the configured app product', async () => {
+  const asc = createASCWithVersions({ data: [], included: [] });
+  asc.getAppId = async () => 'jams-app';
+  asc.getCIProducts = async () => ([
+    {
+      id: 'running-order-product',
+      relationships: { app: { data: { id: 'running-order-app' } } },
+    },
+    {
+      id: 'jams-product',
+      relationships: { app: { data: { id: 'jams-app' } } },
+    },
+  ]);
+  asc.getWorkflows = async productId => ([
+    { id: `${productId}-workflow`, attributes: { name: 'Publish to App Store' } },
+  ]);
+  asc.getBuildRuns = async workflowId => ({
+    data: [{
+      attributes: {
+        number: 100,
+        sourceCommit: {
+          commitSha: workflowId.startsWith('jams-product') ? 'jams-commit' : 'running-order-commit',
+        },
+      },
+    }],
+  });
+
+  const commit = await asc.getBuildCommitSHA('100');
+
+  assert.equal(commit.commitSha, 'jams-commit');
+  assert.equal(commit.workflowId, 'jams-product-workflow');
+});
