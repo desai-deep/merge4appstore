@@ -11,6 +11,7 @@
  *   node index.js                    # Run both operations
  *   node index.js deploy             # Run only deployment check
  *   node index.js sync               # Run only release sync
+ *   node index.js --config profiles/my-app.env
  *   DRY_RUN=true node index.js       # Dry run mode
  *
  * Required environment variables:
@@ -26,6 +27,9 @@
  * Optional environment variables:
  *   APP_ID                            - App Store Connect app ID (if bundle ID matches multiple apps)
  *   XCODE_WORKFLOW_ID                 - Xcode Cloud workflow ID to filter builds
+ *   PRODUCTION_BRANCH                 - Branch whose workflow builds ship (default: main)
+ *   BETA_BRANCH                       - Branch to trigger after a release (default: develop)
+ *   INSTANCE_NAME                     - Unique lock/log name for this app
  *   DRY_RUN=true                      - Run without making changes
  */
 
@@ -35,12 +39,24 @@ process.env.DOTENV_CONFIG_QUIET = 'true';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import { parseCliArgs } from './lib/cli.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Load environment variables from .env file
-dotenv.config({ path: path.join(__dirname, '.env') });
+let cli;
+try {
+  cli = parseCliArgs(process.argv.slice(2), __dirname);
+} catch (error) {
+  console.error(`ERROR: ${error.message}`);
+  process.exit(1);
+}
+
+const dotenvResult = dotenv.config({ path: cli.configPath });
+if (dotenvResult.error) {
+  console.error(`ERROR: Could not load config file ${cli.configPath}: ${dotenvResult.error.message}`);
+  process.exit(1);
+}
 
 // Import modules
 import { CONFIG, log } from './lib/config.js';
@@ -53,8 +69,7 @@ import { runReleaseSync } from './lib/sync.js';
 
 async function main() {
   const DRY_RUN = process.env.DRY_RUN === 'true';
-  const args = process.argv.slice(2);
-  const mode = args[0] || 'all'; // 'deploy', 'sync', or 'all'
+  const { mode } = cli;
 
   // Acquire lock
   if (!acquireLock()) {
@@ -69,6 +84,7 @@ async function main() {
 
   log('=== merge4appstore ===');
   log(`Mode: ${mode}`);
+  log(`Config: ${cli.configPath}`);
   if (DRY_RUN) {
     log('DRY RUN MODE - No actual changes will be made');
   }
@@ -98,7 +114,7 @@ async function main() {
     process.env.APP_STORE_CONNECT_API_KEY_CONTENT
   );
 
-  const github = new GitHubAPI(CONFIG.repoOwner, CONFIG.repoName);
+  const github = new GitHubAPI(CONFIG.repoOwner, CONFIG.repoName, CONFIG.productionBranch);
   const tags = new GitHubTags(CONFIG.repoOwner, CONFIG.repoName);
 
   try {

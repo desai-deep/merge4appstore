@@ -1,5 +1,7 @@
 # Environment
 .env
+profiles/*.env
+!profiles/*.env.example
 
 # Dependencies
 node_modules/

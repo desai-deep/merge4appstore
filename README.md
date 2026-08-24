@@ -12,7 +12,7 @@ Automated iOS App Store deployment and release sync. Monitors TestFlight builds 
 
 - Direct App Store Connect API calls (no Fastlane/Ruby dependency)
 - 10x faster than Fastlane-based solutions (~8s vs ~60s)
-- Configurable for multiple apps via environment variables
+- Multiple app profiles can safely share one checkout, cron, and deployment
 - Single combined script for both operations
 
 ## How It Works
@@ -43,11 +43,22 @@ npm install
 
 ### 2. Configure
 
-Copy `.env.example` to `.env` and fill in your values:
+For one app, copy `.env.example` to `.env` and fill in your values:
 
 ```bash
 cp .env.example .env
 ```
+
+For multiple apps, keep one ignored environment file per app. A Jams On Toast
+starter is included:
+
+```bash
+mkdir -p profiles
+cp profiles/jamsontoast.env.example profiles/jamsontoast.env
+```
+
+Each profile should set a unique `INSTANCE_NAME`. That gives it an independent
+lock and log file, so two cron invocations cannot block or overwrite one another.
 
 ### 3. Run
 
@@ -60,6 +71,10 @@ node index.js deploy
 
 # Run only release sync
 node index.js sync
+
+# Run one app profile
+node index.js --config profiles/jamsontoast.env
+node index.js deploy --config profiles/jamsontoast.env
 
 # Dry run modes
 DRY_RUN=true node index.js
@@ -81,8 +96,9 @@ npm run sync:dry       # Dry run sync
 ### 4. Schedule (cron)
 
 ```bash
-# Run every 5 minutes
+# Run every app every 5 minutes
 */5 * * * * cd /path/to/merge4appstore && node index.js >> logs/cron.log 2>&1
+*/5 * * * * cd /path/to/merge4appstore && node index.js --config profiles/jamsontoast.env >> logs/cron.log 2>&1
 ```
 
 ## Automatic VPS Deploy
@@ -96,9 +112,9 @@ Required GitHub Actions secrets:
 | `VPS_HOST` | VPS hostname or IP |
 | `VPS_USER` | SSH user |
 | `VPS_SSH_KEY` | Private SSH key for deployment |
-| `MERGE4APPSTORE_DIR` | Absolute path to this repo on the VPS |
+| `SERVER_DIR` | Absolute path to this repo on the VPS |
 
-The deploy workflow SSHes into the VPS, hard-resets the checkout to `origin/main`, runs `npm ci --omit=dev` when dependencies changed, and executes `node --test tests/github.test.js`.
+The deploy workflow SSHes into the VPS, updates the checkout to `origin/main`, runs `npm ci --omit=dev`, and executes the full test suite. Ignored profile files remain on the server.
 
 ## Environment Variables
 
@@ -121,6 +137,11 @@ The deploy workflow SSHes into the VPS, hard-resets the checkout to `origin/main
 |----------|-------------|
 | `APP_ID` | App Store Connect app ID (use if bundle ID matches multiple apps) |
 | `XCODE_WORKFLOW_ID` | Xcode Cloud workflow ID to filter builds |
+| `INSTANCE_NAME` | Unique lock/log basename for this app profile |
+| `PRODUCTION_BRANCH` | Branch used to find merged release PRs (default `main`) |
+| `BETA_BRANCH` | Branch to trigger after a release goes live (default `develop`) |
+| `IOS_REPO_PATH` | Optional server checkout used to trigger the next beta build |
+| `MERGE4APPSTORE_ENV` | Alternative to the `--config` command-line option |
 | `DRY_RUN` | Set to `true` to run without making changes |
 
 ## Requirements

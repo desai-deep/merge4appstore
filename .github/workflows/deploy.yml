@@ -51,7 +51,7 @@ jobs:
 
             npm ci --omit=dev
 
-            node --test tests/github.test.js
+            npm test
 
             echo "merge4appstore deployment complete"
           ENDSSH
