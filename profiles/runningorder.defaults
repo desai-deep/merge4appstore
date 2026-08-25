@@ -1,0 +1,10 @@
+INSTANCE_NAME=runningorder-ios
+APP_BUNDLE_ID=com.deepdesai.runningorder
+APP_NAME=Running Order
+GITHUB_REPO_OWNER=desai-deep
+GITHUB_REPO_NAME=runningorder-ios
+GITHUB_REPO=desai-deep/runningorder-ios
+XCODE_WORKFLOW_ID=C4885BE9-A4F2-40B8-A860-89463FE377EF
+PRODUCTION_BRANCH=main
+BETA_BRANCH=develop
+EXPIRE_MERGED_BUILDS=true

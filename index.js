@@ -11,6 +11,7 @@
  *   node index.js                    # Run both operations
  *   node index.js deploy             # Run only deployment check
  *   node index.js sync               # Run only release sync
+ *   node index.js expire             # Expire builds from branches merged to BETA_BRANCH
  *   node index.js --config profiles/my-app.env
  *   DRY_RUN=true node index.js       # Dry run mode
  *
@@ -30,6 +31,7 @@
  *   PRODUCTION_BRANCH                 - Branch whose workflow builds ship (default: main)
  *   BETA_BRANCH                       - Branch to trigger after a release (default: develop)
  *   INSTANCE_NAME                     - Unique lock/log name for this app
+ *   EXPIRE_MERGED_BUILDS=true         - Run merged-branch expiry during the default mode
  *   DRY_RUN=true                      - Run without making changes
  */
 
@@ -66,6 +68,7 @@ import { GitHubTags } from './lib/git.js';
 import { acquireLock, releaseLock } from './lib/lock.js';
 import { runDeployCheck } from './lib/deploy.js';
 import { runReleaseSync } from './lib/sync.js';
+import { runMergedBuildExpiry } from './lib/expire.js';
 
 async function main() {
   const DRY_RUN = process.env.DRY_RUN === 'true';
@@ -126,6 +129,10 @@ async function main() {
     // Run release sync
     if (mode === 'sync' || mode === 'all') {
       await runReleaseSync(asc, tags, github, DRY_RUN);
+    }
+
+    if (mode === 'expire' || (mode === 'all' && CONFIG.expireMergedBuilds)) {
+      await runMergedBuildExpiry(asc, github, DRY_RUN);
     }
 
     log('=== Done ===');

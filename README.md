@@ -8,6 +8,8 @@ Automated iOS App Store deployment and release sync. Monitors TestFlight builds 
 
 2. **Release Sync** - Monitors App Store Connect for builds that went live (READY_FOR_SALE), creates git tags (e.g., `v1.4-1400`) for released versions, and comments on PRs when builds are released.
 
+3. **Merged Branch Cleanup** - Expires TestFlight builds from feature branches after their PR is merged into the configured beta branch. Builds from the beta or production branch and builds selected for an App Store version are always protected.
+
 ## Features
 
 - Direct App Store Connect API calls (no Fastlane/Ruby dependency)
@@ -49,11 +51,12 @@ For one app, copy `.env.example` to `.env` and fill in your values:
 cp .env.example .env
 ```
 
-For multiple apps, keep one ignored environment file per app. A Jams On Toast
-starter is included:
+For multiple apps, keep one ignored environment file per app. Running Order and
+Jams On Toast starters are included:
 
 ```bash
 mkdir -p profiles
+cp profiles/runningorder.env.example profiles/runningorder.env
 cp profiles/jamsontoast.env.example profiles/jamsontoast.env
 ```
 
@@ -77,6 +80,9 @@ node index.js deploy
 # Run only release sync
 node index.js sync
 
+# Expire TestFlight builds from branches merged to the beta branch
+node index.js expire
+
 # Run one app profile
 node index.js --config profiles/jamsontoast.env
 node index.js deploy --config profiles/jamsontoast.env
@@ -85,6 +91,7 @@ node index.js deploy --config profiles/jamsontoast.env
 DRY_RUN=true node index.js
 DRY_RUN=true node index.js deploy
 DRY_RUN=true node index.js sync
+DRY_RUN=true node index.js expire
 ```
 
 Or use npm scripts:
@@ -96,6 +103,8 @@ npm run sync           # Sync only
 npm run start:dry      # Dry run both
 npm run deploy:dry     # Dry run deploy
 npm run sync:dry       # Dry run sync
+npm run expire         # Expire merged feature-branch builds
+npm run expire:dry     # Preview merged feature-branch expiry
 ```
 
 ### 4. Schedule (cron)
@@ -145,6 +154,7 @@ The deploy workflow SSHes into the VPS, updates the checkout to `origin/main`, r
 | `INSTANCE_NAME` | Unique lock/log basename for this app profile |
 | `PRODUCTION_BRANCH` | Branch used to find merged release PRs (default `main`) |
 | `BETA_BRANCH` | Branch to trigger after a release goes live (default `develop`) |
+| `EXPIRE_MERGED_BUILDS` | Run merged-branch expiry in the default `all` mode (default `true`) |
 | `IOS_REPO_PATH` | Optional server checkout used to trigger the next beta build |
 | `MERGE4APPSTORE_ENV` | Alternative to the `--config` command-line option |
 | `DRY_RUN` | Set to `true` to run without making changes |
@@ -158,6 +168,12 @@ The deploy workflow SSHes into the VPS, updates the checkout to `origin/main`, r
 ## How It Filters Builds
 
 The script only processes builds from the specified Xcode Cloud workflow (default: "Publish to App Store"). Other workflows like "Public Beta" or "UAT" are skipped - they're for TestFlight distribution only, not App Store submission.
+
+## Merged Branch Build Expiry
+
+The `expire` mode checks each valid, unexpired TestFlight build against its exact Xcode Cloud build run and source branch. It expires the build only when GitHub reports that the same source commit and branch belong to a merged PR targeting `BETA_BRANCH`.
+
+The cleanup skips builds when their source cannot be identified, their PR is still open, they came from `BETA_BRANCH` or `PRODUCTION_BRANCH`, or they are selected for an App Store version. Use `npm run expire:dry` to preview every decision. It runs in scheduled default executions unless `EXPIRE_MERGED_BUILDS=false` is set.
 
 ## License
 
