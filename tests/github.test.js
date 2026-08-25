@@ -46,76 +46,109 @@ Bug fixes and review handling improvements
   );
 });
 
-test('finds a merged PR for the exact source and destination branches', () => {
+test('finds one closed PR for the exact source and destination branches', () => {
   const github = new GitHubAPI('desai-deep', 'JamsOnToast');
   github.exec = () => JSON.stringify([
     {
       number: 40,
-      merged_at: '2026-08-20T10:00:00Z',
-      head: { ref: 'feature/other' },
-      base: { ref: 'develop' },
-    },
-    {
-      number: 41,
-      merged_at: '2026-08-21T10:00:00Z',
-      head: { ref: 'feature/player' },
-      base: { ref: 'develop' },
+      state: 'MERGED',
+      closedAt: '2026-08-21T10:00:00Z',
+      mergedAt: '2026-08-21T10:00:00Z',
+      headRefName: 'feature/player',
+      baseRefName: 'develop',
     },
   ]);
 
   assert.deepEqual(
-    github.findMergedPRForCommit('abc123', 'develop', 'feature/player'),
+    github.findClosedPRForBuild('abc123', 'develop', 'feature/player'),
     {
-      number: 41,
+      number: 40,
       headBranch: 'feature/player',
       baseBranch: 'develop',
       mergedAt: '2026-08-21T10:00:00Z',
+      closedAt: '2026-08-21T10:00:00Z',
     },
   );
 });
 
-test('ignores open PRs and PRs merged to another branch', () => {
+test('finds a PR closed without merging', () => {
   const github = new GitHubAPI('desai-deep', 'JamsOnToast');
   github.exec = () => JSON.stringify([
     {
       number: 40,
-      merged_at: null,
-      head: { ref: 'feature/player' },
-      base: { ref: 'develop' },
+      state: 'CLOSED',
+      closedAt: '2026-08-21T10:00:00Z',
+      mergedAt: null,
+      headRefName: 'feature/player',
+      baseRefName: 'develop',
+    },
+  ]);
+
+  assert.deepEqual(
+    github.findClosedPRForBuild('abc123', 'develop', 'feature/player'),
+    {
+      number: 40,
+      headBranch: 'feature/player',
+      baseBranch: 'develop',
+      mergedAt: null,
+      closedAt: '2026-08-21T10:00:00Z',
+    },
+  );
+});
+
+test('keeps a branch when it has a currently open PR', () => {
+  const github = new GitHubAPI('desai-deep', 'JamsOnToast');
+  github.exec = () => JSON.stringify([
+    {
+      number: 40,
+      state: 'CLOSED',
+      closedAt: '2026-08-20T10:00:00Z',
+      mergedAt: null,
+      headRefName: 'feature/player',
+      baseRefName: 'develop',
     },
     {
       number: 41,
-      merged_at: '2026-08-21T10:00:00Z',
-      head: { ref: 'feature/player' },
-      base: { ref: 'main' },
+      state: 'OPEN',
+      closedAt: null,
+      mergedAt: null,
+      headRefName: 'feature/player',
+      baseRefName: 'develop',
     },
   ]);
 
   assert.equal(
-    github.findMergedPRForCommit('abc123', 'develop', 'feature/player'),
+    github.findClosedPRForBuild('abc123', 'develop', 'feature/player'),
     null,
   );
 });
 
-test('treats multiple matching merged PRs as ambiguous', () => {
+test('uses the commit association to disambiguate a reused closed branch', () => {
   const github = new GitHubAPI('desai-deep', 'JamsOnToast');
-  github.exec = () => JSON.stringify([
-    {
-      number: 40,
-      merged_at: '2026-08-20T10:00:00Z',
-      head: { ref: 'feature/player' },
-      base: { ref: 'develop' },
-    },
-    {
-      number: 41,
-      merged_at: '2026-08-21T10:00:00Z',
-      head: { ref: 'feature/player' },
-      base: { ref: 'develop' },
-    },
-  ]);
+  let calls = 0;
+  github.exec = () => {
+    calls += 1;
+    if (calls === 1) return JSON.stringify([
+      { number: 40, state: 'CLOSED', closedAt: '2026-08-20T10:00:00Z', mergedAt: null, headRefName: 'feature/player', baseRefName: 'develop' },
+      { number: 41, state: 'MERGED', closedAt: '2026-08-21T10:00:00Z', mergedAt: '2026-08-21T10:00:00Z', headRefName: 'feature/player', baseRefName: 'develop' },
+    ]);
+    return JSON.stringify([{ number: 41 }]);
+  };
 
-  assert.equal(
-    github.findMergedPRForCommit('abc123', 'develop', 'feature/player'),
-    null,
-  );
+  assert.equal(github.findClosedPRForBuild('abc123', 'develop', 'feature/player').number, 41);
+});
+
+test('treats a reused closed branch without one commit match as ambiguous', () => {
+  const github = new GitHubAPI('desai-deep', 'JamsOnToast');
+  let calls = 0;
+  github.exec = () => {
+    calls += 1;
+    if (calls === 1) return JSON.stringify([
+      { number: 40, state: 'CLOSED', closedAt: '2026-08-20T10:00:00Z', mergedAt: null, headRefName: 'feature/player', baseRefName: 'develop' },
+      { number: 41, state: 'MERGED', closedAt: '2026-08-21T10:00:00Z', mergedAt: '2026-08-21T10:00:00Z', headRefName: 'feature/player', baseRefName: 'develop' },
+    ]);
+    return '[]';
+  };
+
+  assert.equal(github.findClosedPRForBuild('abc123', 'develop', 'feature/player'), null);
 });

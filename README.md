@@ -8,7 +8,7 @@ Automated iOS App Store deployment and release sync. Monitors TestFlight builds 
 
 2. **Release Sync** - Monitors App Store Connect for builds that went live (READY_FOR_SALE), creates git tags (e.g., `v1.4-1400`) for released versions, and comments on PRs when builds are released.
 
-3. **Merged Branch Cleanup** - Expires TestFlight builds from feature branches after their PR is merged into the configured beta branch. Builds from the beta or production branch and builds selected for an App Store version are always protected.
+3. **Closed PR Cleanup** - Expires TestFlight builds from feature branches after their PR is merged or closed against the configured beta branch. Builds from the beta or production branch and builds selected for an App Store version are always protected.
 
 ## Features
 
@@ -154,7 +154,7 @@ The deploy workflow SSHes into the VPS, updates the checkout to `origin/main`, r
 | `INSTANCE_NAME` | Unique lock/log basename for this app profile |
 | `PRODUCTION_BRANCH` | Branch used to find merged release PRs (default `main`) |
 | `BETA_BRANCH` | Branch to trigger after a release goes live (default `develop`) |
-| `EXPIRE_MERGED_BUILDS` | Run merged-branch expiry in the default `all` mode (default `true`) |
+| `EXPIRE_MERGED_BUILDS` | Run closed-PR expiry in the default `all` mode (default `true`) |
 | `IOS_REPO_PATH` | Optional server checkout used to trigger the next beta build |
 | `MERGE4APPSTORE_ENV` | Alternative to the `--config` command-line option |
 | `DRY_RUN` | Set to `true` to run without making changes |
@@ -169,11 +169,11 @@ The deploy workflow SSHes into the VPS, updates the checkout to `origin/main`, r
 
 The script only processes builds from the specified Xcode Cloud workflow (default: "Publish to App Store"). Other workflows like "Public Beta" or "UAT" are skipped - they're for TestFlight distribution only, not App Store submission.
 
-## Merged Branch Build Expiry
+## Closed PR Build Expiry
 
-The `expire` mode checks each valid, unexpired TestFlight build against its exact Xcode Cloud build run and source branch. It expires the build only when GitHub reports that the same source commit and branch belong to a merged PR targeting `BETA_BRANCH`.
+The `expire` mode checks each valid, unexpired TestFlight build against its Xcode Cloud source branch. It expires the build only when that exact branch has one closed or merged PR targeting `BETA_BRANCH`. When a branch name has been reused by multiple closed PRs, the source commit must identify exactly one of them. A currently open PR for the branch always protects its builds.
 
-The cleanup skips builds when their source cannot be identified, their PR is still open, they came from `BETA_BRANCH` or `PRODUCTION_BRANCH`, or they are selected for an App Store version. Use `npm run expire:dry` to preview every decision. It runs in scheduled default executions unless `EXPIRE_MERGED_BUILDS=false` is set.
+The cleanup skips builds when their source cannot be identified, their PR is still open or ambiguous, they came from `BETA_BRANCH` or `PRODUCTION_BRANCH`, or they are selected for an App Store version. Use `npm run expire:dry` to preview every decision. It runs in scheduled default executions unless `EXPIRE_MERGED_BUILDS=false` is set.
 
 ## License
 
