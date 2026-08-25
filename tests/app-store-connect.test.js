@@ -122,6 +122,58 @@ test('starts a clean workflow build for the selected branch reference', async ()
   assert.equal(asc.ciBuildRuns, null);
 });
 
+test('reuses an empty review draft instead of creating another submission', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.getReviewSubmissionIdForVersion = async () => null;
+  asc.getReusableDraftReviewSubmissionId = async () => 'draft-1';
+  const requests = [];
+  asc.request = async (endpoint, options) => {
+    requests.push({ endpoint, options });
+    return { data: { id: 'item-1' } };
+  };
+
+  const submissionId = await asc.getOrCreateDraftReviewSubmission('version-1');
+
+  assert.equal(submissionId, 'draft-1');
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].endpoint, '/reviewSubmissionItems');
+  assert.deepEqual(JSON.parse(requests[0].options.body), {
+    data: {
+      type: 'reviewSubmissionItems',
+      relationships: {
+        reviewSubmission: {
+          data: { type: 'reviewSubmissions', id: 'draft-1' },
+        },
+        appStoreVersion: {
+          data: { type: 'appStoreVersions', id: 'version-1' },
+        },
+      },
+    },
+  });
+});
+
+test('finds an empty ready-for-review draft', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.getAppId = async () => 'app-1';
+  asc.request = async endpoint => {
+    assert.match(endpoint, /filter\[state\]=READY_FOR_REVIEW/);
+    return {
+      data: [
+        {
+          id: 'draft-with-item',
+          relationships: { items: { data: [{ id: 'item-1' }] } },
+        },
+        {
+          id: 'empty-draft',
+          relationships: { items: { data: [] } },
+        },
+      ],
+    };
+  };
+
+  assert.equal(await asc.getReusableDraftReviewSubmissionId(), 'empty-draft');
+});
+
 test('checkRejectedVersion returns the highest rejected build number', async () => {
   const asc = createASCWithVersions({
     data: [
