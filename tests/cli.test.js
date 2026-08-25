@@ -21,6 +21,10 @@ test('accepts a profile config before or after the mode', () => {
   );
 });
 
+test('accepts the merged-build expiry mode', () => {
+  assert.equal(parseCliArgs(['expire'], '/srv/merge4appstore', {}).mode, 'expire');
+});
+
 test('supports an environment-selected config', () => {
   assert.equal(
     parseCliArgs([], '/srv/merge4appstore', { MERGE4APPSTORE_ENV: '/etc/jams.env' }).configPath,

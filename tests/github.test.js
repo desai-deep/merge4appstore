@@ -45,3 +45,54 @@ Bug fixes and review handling improvements
     'Skip non-publish TestFlight builds during deploy'
   );
 });
+
+test('finds a merged PR for the exact source and destination branches', () => {
+  const github = new GitHubAPI('desai-deep', 'JamsOnToast');
+  github.exec = () => JSON.stringify([
+    {
+      number: 40,
+      merged_at: '2026-08-20T10:00:00Z',
+      head: { ref: 'feature/other' },
+      base: { ref: 'develop' },
+    },
+    {
+      number: 41,
+      merged_at: '2026-08-21T10:00:00Z',
+      head: { ref: 'feature/player' },
+      base: { ref: 'develop' },
+    },
+  ]);
+
+  assert.deepEqual(
+    github.findMergedPRForCommit('abc123', 'develop', 'feature/player'),
+    {
+      number: 41,
+      headBranch: 'feature/player',
+      baseBranch: 'develop',
+      mergedAt: '2026-08-21T10:00:00Z',
+    },
+  );
+});
+
+test('ignores open PRs and PRs merged to another branch', () => {
+  const github = new GitHubAPI('desai-deep', 'JamsOnToast');
+  github.exec = () => JSON.stringify([
+    {
+      number: 40,
+      merged_at: null,
+      head: { ref: 'feature/player' },
+      base: { ref: 'develop' },
+    },
+    {
+      number: 41,
+      merged_at: '2026-08-21T10:00:00Z',
+      head: { ref: 'feature/player' },
+      base: { ref: 'main' },
+    },
+  ]);
+
+  assert.equal(
+    github.findMergedPRForCommit('abc123', 'develop', 'feature/player'),
+    null,
+  );
+});

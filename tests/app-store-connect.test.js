@@ -292,3 +292,115 @@ test('build commit lookup is scoped to the configured app product', async () => 
   assert.equal(commit.commitSha, 'jams-commit');
   assert.equal(commit.workflowId, 'jams-product-workflow');
 });
+
+test('cleanup candidates exclude expired, invalid, and App Store-selected builds', async () => {
+  const asc = createASCWithVersions({ data: [], included: [] });
+  asc.getAppId = async () => 'app-1';
+  asc.request = async endpoint => {
+    assert.match(endpoint, /filter\[expired\]=false/);
+    assert.match(endpoint, /include=preReleaseVersion,appStoreVersion/);
+    return {
+      data: [
+        {
+          id: 'build-eligible',
+          attributes: { version: '101', processingState: 'VALID', expired: false },
+          relationships: {
+            preReleaseVersion: { data: { id: 'pre-1' } },
+            appStoreVersion: { data: null },
+          },
+        },
+        {
+          id: 'build-selected',
+          attributes: { version: '102', processingState: 'VALID', expired: false },
+          relationships: { appStoreVersion: { data: { id: 'version-1' } } },
+        },
+        {
+          id: 'build-invalid',
+          attributes: { version: '103', processingState: 'INVALID', expired: false },
+          relationships: {},
+        },
+      ],
+      included: [{ id: 'pre-1', type: 'preReleaseVersions', attributes: { version: '2.4' } }],
+    };
+  };
+
+  assert.deepEqual(await asc.getTestFlightCleanupCandidates(), [{
+    buildId: 'build-eligible',
+    buildNumber: '101',
+    version: '2.4',
+    uploadedDate: null,
+  }]);
+});
+
+test('expires a build through the build update endpoint', async () => {
+  const asc = createASCWithVersions({ data: [], included: [] });
+  let request = null;
+  asc.request = async (endpoint, options) => {
+    request = { endpoint, options };
+    return { data: { id: 'build-101' } };
+  };
+
+  await asc.expireBuild('build-101');
+
+  assert.equal(request.endpoint, '/builds/build-101');
+  assert.equal(request.options.method, 'PATCH');
+  assert.deepEqual(JSON.parse(request.options.body), {
+    data: {
+      type: 'builds',
+      id: 'build-101',
+      attributes: { expired: true },
+    },
+  });
+});
+
+test('maps an App Store build ID to its Xcode Cloud commit and branch', async () => {
+  const asc = createASCWithVersions({ data: [], included: [] });
+  asc.loadCIBuildRuns = async () => ([{
+    workflowId: 'workflow-1',
+    workflowName: 'Public Beta',
+    sourceBranch: 'refs/heads/feature/player',
+    run: {
+      attributes: { sourceCommit: { commitSha: 'abc123' } },
+      relationships: { builds: { data: [{ id: 'build-101' }] } },
+    },
+  }]);
+
+  assert.deepEqual(await asc.getBuildSource('build-101'), {
+    found: true,
+    commitSha: 'abc123',
+    sourceBranch: 'feature/player',
+    workflowId: 'workflow-1',
+    workflowName: 'Public Beta',
+  });
+});
+
+test('falls back to a unique Xcode Cloud build number when Apple omits build linkage', async () => {
+  const asc = createASCWithVersions({ data: [], included: [] });
+  asc.loadCIBuildRuns = async () => ([{
+    workflowId: 'workflow-1',
+    workflowName: 'Public Beta',
+    sourceBranch: 'develop',
+    run: {
+      attributes: { number: 101, sourceCommit: { commitSha: 'abc123' } },
+      relationships: { builds: { data: [] } },
+    },
+  }]);
+
+  assert.deepEqual(await asc.getBuildSource('build-101', '101'), {
+    found: true,
+    commitSha: 'abc123',
+    sourceBranch: 'develop',
+    workflowId: 'workflow-1',
+    workflowName: 'Public Beta',
+  });
+});
+
+test('does not use an ambiguous Xcode Cloud build-number fallback', async () => {
+  const asc = createASCWithVersions({ data: [], included: [] });
+  asc.loadCIBuildRuns = async () => ([
+    { run: { attributes: { number: 101 }, relationships: { builds: { data: [] } } } },
+    { run: { attributes: { number: 101 }, relationships: { builds: { data: [] } } } },
+  ]);
+
+  assert.deepEqual(await asc.getBuildSource('build-101', '101'), { found: false });
+});
