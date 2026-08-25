@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { runMergedBuildExpiry } from '../lib/expire.js';
+import { runClosedPRBuildExpiry } from '../lib/expire.js';
 
 async function withBranches(fn) {
   const previousBeta = process.env.BETA_BRANCH;
@@ -33,10 +33,10 @@ test('dry run reports merged feature builds without expiring them', async () => 
       expireBuild: async () => { expireCalls += 1; },
     };
     const github = {
-      findMergedPRForCommit: () => ({ number: 41, headBranch: 'feature/player' }),
+      findClosedPRForBuild: () => ({ number: 41, headBranch: 'feature/player', mergedAt: '2026-08-21T10:00:00Z' }),
     };
 
-    const result = await runMergedBuildExpiry(asc, github, true);
+    const result = await runClosedPRBuildExpiry(asc, github, true);
 
     assert.deepEqual(result, { checked: 1, expired: 1 });
     assert.equal(expireCalls, 0);
@@ -58,17 +58,43 @@ test('expires builds from feature branches merged to develop', async () => {
       expireBuild: async buildId => { expiredBuilds.push(buildId); },
     };
     const github = {
-      findMergedPRForCommit: () => ({ number: 41, headBranch: 'feature/player' }),
+      findClosedPRForBuild: () => ({ number: 41, headBranch: 'feature/player', mergedAt: '2026-08-21T10:00:00Z' }),
     };
 
-    const result = await runMergedBuildExpiry(asc, github, false);
+    const result = await runClosedPRBuildExpiry(asc, github, false);
 
     assert.deepEqual(result, { checked: 1, expired: 1 });
     assert.deepEqual(expiredBuilds, ['build-101']);
   });
 });
 
-test('keeps protected branch builds and builds without a merged PR', async () => {
+test('expires builds from PRs closed without merging', async () => {
+  await withBranches(async () => {
+    const expiredBuilds = [];
+    const asc = {
+      getTestFlightCleanupCandidates: async () => ([
+        { buildId: 'build-102', buildNumber: '102', version: '2.4' },
+      ]),
+      getBuildSource: async () => ({
+        found: true,
+        commitSha: 'def456',
+        sourceBranch: 'feature/abandoned',
+      }),
+      expireBuild: async buildId => { expiredBuilds.push(buildId); },
+    };
+    const github = {
+      findClosedPRForBuild: () => ({ number: 42, headBranch: 'feature/abandoned', mergedAt: null }),
+    };
+
+    assert.deepEqual(await runClosedPRBuildExpiry(asc, github, false), {
+      checked: 1,
+      expired: 1,
+    });
+    assert.deepEqual(expiredBuilds, ['build-102']);
+  });
+});
+
+test('keeps protected branch builds and builds without a closed PR', async () => {
   await withBranches(async () => {
     const asc = {
       getTestFlightCleanupCandidates: async () => ([
@@ -82,9 +108,9 @@ test('keeps protected branch builds and builds without a merged PR', async () =>
       }),
       expireBuild: async () => assert.fail('no build should be expired'),
     };
-    const github = { findMergedPRForCommit: () => null };
+    const github = { findClosedPRForBuild: () => null };
 
-    assert.deepEqual(await runMergedBuildExpiry(asc, github, false), {
+    assert.deepEqual(await runClosedPRBuildExpiry(asc, github, false), {
       checked: 2,
       expired: 0,
     });
