@@ -11,7 +11,7 @@
  *   node index.js                    # Run both operations
  *   node index.js deploy             # Run only deployment check
  *   node index.js sync               # Run only release sync
- *   node index.js expire             # Expire builds from branches merged to develop
+ *   node index.js expire             # Expire builds from branches merged to BETA_BRANCH
  *   node index.js --config profiles/my-app.env
  *   DRY_RUN=true node index.js       # Dry run mode
  *

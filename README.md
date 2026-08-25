@@ -51,11 +51,12 @@ For one app, copy `.env.example` to `.env` and fill in your values:
 cp .env.example .env
 ```
 
-For multiple apps, keep one ignored environment file per app. A Jams On Toast
-starter is included:
+For multiple apps, keep one ignored environment file per app. Running Order and
+Jams On Toast starters are included:
 
 ```bash
 mkdir -p profiles
+cp profiles/runningorder.env.example profiles/runningorder.env
 cp profiles/jamsontoast.env.example profiles/jamsontoast.env
 ```
 

@@ -96,3 +96,26 @@ test('ignores open PRs and PRs merged to another branch', () => {
     null,
   );
 });
+
+test('treats multiple matching merged PRs as ambiguous', () => {
+  const github = new GitHubAPI('desai-deep', 'JamsOnToast');
+  github.exec = () => JSON.stringify([
+    {
+      number: 40,
+      merged_at: '2026-08-20T10:00:00Z',
+      head: { ref: 'feature/player' },
+      base: { ref: 'develop' },
+    },
+    {
+      number: 41,
+      merged_at: '2026-08-21T10:00:00Z',
+      head: { ref: 'feature/player' },
+      base: { ref: 'develop' },
+    },
+  ]);
+
+  assert.equal(
+    github.findMergedPRForCommit('abc123', 'develop', 'feature/player'),
+    null,
+  );
+});
