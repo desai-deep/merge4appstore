@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { runDeployCheck } from '../lib/deploy.js';
+import { recoverMissedProductionBuild, runDeployCheck } from '../lib/deploy.js';
 
 async function withWorkflowId(workflowId, fn) {
   const previousWorkflowId = process.env.XCODE_WORKFLOW_ID;
@@ -14,6 +14,21 @@ async function withWorkflowId(workflowId, fn) {
       delete process.env.XCODE_WORKFLOW_ID;
     } else {
       process.env.XCODE_WORKFLOW_ID = previousWorkflowId;
+    }
+  }
+}
+
+async function withTriggerRecovery(fn) {
+  const previous = process.env.RECOVER_MISSED_XCODE_BUILDS;
+  process.env.RECOVER_MISSED_XCODE_BUILDS = 'true';
+
+  try {
+    await withWorkflowId('workflow-1', fn);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.RECOVER_MISSED_XCODE_BUILDS;
+    } else {
+      process.env.RECOVER_MISSED_XCODE_BUILDS = previous;
     }
   }
 }
@@ -56,6 +71,160 @@ function createGitHub(overrides = {}) {
     ...overrides,
   };
 }
+
+test('recovers a missed production workflow trigger for a merged PR', async () => {
+  await withTriggerRecovery(async () => {
+    let started = null;
+    const asc = createASC({
+      getWorkflowRunStatus: async () => ({ found: false, unknownActiveBranchRun: null }),
+      getWorkflowBranchReference: async () => ({ id: 'main-ref', name: 'main' }),
+      startWorkflowBuild: async (workflowId, sourceReferenceId) => {
+        started = { workflowId, sourceReferenceId };
+        return { runId: 'run-1', number: 140, executionProgress: 'PENDING' };
+      },
+    });
+    const github = createGitHub({
+      getProductionHead: () => 'abcdef1234567890',
+    });
+
+    const result = await recoverMissedProductionBuild(asc, github, false);
+
+    assert.deepEqual(started, {
+      workflowId: 'workflow-1',
+      sourceReferenceId: 'main-ref',
+    });
+    assert.deepEqual(result, { waiting: true });
+  });
+});
+
+test('does not duplicate an existing production run for the release commit', async () => {
+  await withTriggerRecovery(async () => {
+    let started = false;
+    const asc = createASC({
+      getWorkflowRunStatus: async () => ({
+        found: true,
+        runId: 'run-1',
+        number: 140,
+        executionProgress: 'RUNNING',
+        completionStatus: null,
+      }),
+      startWorkflowBuild: async () => {
+        started = true;
+      },
+    });
+    const github = createGitHub({
+      getProductionHead: () => 'abcdef1234567890',
+    });
+
+    const result = await recoverMissedProductionBuild(asc, github, false);
+
+    assert.equal(started, false);
+    assert.deepEqual(result, { waiting: true });
+  });
+});
+
+test('waits for an active branch run whose commit metadata is not populated', async () => {
+  await withTriggerRecovery(async () => {
+    let started = false;
+    const asc = createASC({
+      getWorkflowRunStatus: async () => ({
+        found: false,
+        unknownActiveBranchRun: {
+          runId: 'run-1',
+          number: 140,
+          executionProgress: 'PENDING',
+        },
+      }),
+      startWorkflowBuild: async () => {
+        started = true;
+      },
+    });
+    const github = createGitHub({
+      getProductionHead: () => 'abcdef1234567890',
+    });
+
+    const result = await recoverMissedProductionBuild(asc, github, false);
+
+    assert.equal(started, false);
+    assert.deepEqual(result, { waiting: true });
+  });
+});
+
+test('does not trigger production for a direct push without a merged PR', async () => {
+  await withTriggerRecovery(async () => {
+    let queriedRuns = false;
+    const asc = createASC({
+      getWorkflowRunStatus: async () => {
+        queriedRuns = true;
+        return { found: false };
+      },
+    });
+    const github = createGitHub({
+      getProductionHead: () => 'abcdef1234567890',
+      findPRFromCommit: () => null,
+    });
+
+    const result = await recoverMissedProductionBuild(asc, github, false);
+
+    assert.equal(queriedRuns, false);
+    assert.deepEqual(result, { waiting: false });
+  });
+});
+
+test('dry run reports recovery without starting Xcode Cloud', async () => {
+  await withTriggerRecovery(async () => {
+    let started = false;
+    const asc = createASC({
+      getWorkflowRunStatus: async () => ({ found: false, unknownActiveBranchRun: null }),
+      getWorkflowBranchReference: async () => ({ id: 'main-ref', name: 'main' }),
+      startWorkflowBuild: async () => {
+        started = true;
+      },
+    });
+    const github = createGitHub({
+      getProductionHead: () => 'abcdef1234567890',
+    });
+
+    const result = await recoverMissedProductionBuild(asc, github, true);
+
+    assert.equal(started, false);
+    assert.deepEqual(result, { waiting: true });
+  });
+});
+
+test('does not submit an older production build while the current build is processing', async () => {
+  await withTriggerRecovery(async () => {
+    let submitted = false;
+    const asc = createASC({
+      getWorkflowRunStatus: async () => ({
+        found: true,
+        runId: 'run-140',
+        number: 140,
+        executionProgress: 'COMPLETE',
+        completionStatus: 'SUCCEEDED',
+      }),
+      getTestFlightReadyBuilds: async () => ([
+        { buildNumber: '139', version: '1.1', buildId: 'build-139' },
+      ]),
+      getBuildCommitSHA: async () => ({
+        found: true,
+        commitSha: 'older1234567890',
+        workflowId: 'workflow-1',
+        workflowName: 'Publish to App Store',
+      }),
+      submitForReview: async () => {
+        submitted = true;
+      },
+    });
+    const github = createGitHub({
+      getProductionHead: () => 'abcdef1234567890',
+    });
+
+    await runDeployCheck(asc, github, false);
+
+    assert.equal(submitted, false);
+  });
+});
 
 test('does not resubmit the same rejected build on cron runs', async () => {
   await withWorkflowId('workflow-1', async () => {
