@@ -10,8 +10,6 @@ Automated iOS App Store deployment and release sync. Monitors TestFlight builds 
 
 3. **Closed PR Cleanup** - Expires TestFlight builds from feature branches after their PR is merged or closed against the configured beta branch. Builds from the beta or production branch and builds selected for an App Store version are always protected.
 
-4. **Missed Trigger Recovery** - Optionally starts the configured production Xcode Cloud workflow when a merged production PR has no build run. Active and completed runs are detected first so the five-minute cron cannot create duplicates.
-
 ## Features
 
 - Direct App Store Connect API calls (no Fastlane/Ruby dependency)
@@ -153,7 +151,6 @@ The deploy workflow SSHes into the VPS, updates the checkout to `origin/main`, r
 |----------|-------------|
 | `APP_ID` | App Store Connect app ID (use if bundle ID matches multiple apps) |
 | `XCODE_WORKFLOW_ID` | Xcode Cloud workflow ID to filter builds |
-| `RECOVER_MISSED_XCODE_BUILDS` | Recover missed production-branch workflow triggers (default `false`) |
 | `INSTANCE_NAME` | Unique lock/log basename for this app profile |
 | `PRODUCTION_BRANCH` | Branch used to find merged release PRs (default `main`) |
 | `BETA_BRANCH` | Branch to trigger after a release goes live (default `develop`) |
