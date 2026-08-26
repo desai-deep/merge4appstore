@@ -310,6 +310,11 @@ purpose. Before starting a build, the provider must also check for an existing
 pending, running, or completed run so webhook retries, service restarts, and
 reconciliation cannot create duplicates.
 
+GitHub may deliver an event before Xcode Cloud's repository mirror exposes the
+new branch, pull request, or commit. Treat a missing source reference as a
+transient condition: retry it with bounded backoff and reconciliation, while
+retaining the same idempotency key, rather than falling back to another ref.
+
 ### Build provider contract
 
 The release policy must depend on a small provider interface rather than Xcode
