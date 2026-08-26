@@ -115,11 +115,12 @@ automation:
 
 build:
   provider: xcode_cloud
-  trigger_mode: native # shadow and managed are reserved for webhook cutover
+  trigger_mode: managed # default; each purpose may override it
   purposes:
     pull_request:
       app: internal
       workflow: pull_requests
+      trigger_mode: shadow # Xcode Cloud requires its matching PR condition
     beta:
       workflow: beta
     production:
@@ -180,11 +181,18 @@ npm run trigger        # Start/reuse the configured build purpose
 npm run trigger:dry    # Resolve a build intent without starting it
 ```
 
-`trigger` is an explicit API/CLI operation in this change. A later webhook
-listener can call the same provider-neutral path. Keep `trigger_mode: native`
-until GitHub-event shadow results match Xcode Cloud's existing automatic
-triggers; then disable the overlapping native start conditions before switching
-the profile to `managed`.
+`trigger` is an explicit API/CLI operation in this change. A webhook listener
+can call the same provider-neutral path. Use `shadow` while comparing webhook
+intents with a build provider's native triggers, and `managed` after native
+triggers can safely be removed.
+
+Xcode Cloud is a special case for pull-request builds. Apple rejects manual PR
+builds when the workflow is deactivated, has no start condition, or its PR
+condition does not match the source and target branches. Consequently, an
+Xcode Cloud `pull_request` purpose must retain a matching native PR condition;
+use `native` or `shadow` for that purpose. GitHub webhooks can still own event
+ingestion, deduplication, status reconciliation, and recovery of a missed native
+run. Branch-based beta and production purposes can use `managed` independently.
 
 ### 4. Schedule (cron)
 

@@ -20,10 +20,11 @@ apps:
 
 build:
   provider: xcode_cloud
-  trigger_mode: native
+  trigger_mode: managed
   purposes:
     pull_request:
       workflow: pull_requests
+      trigger_mode: shadow
     beta:
       workflow: beta
     production:

@@ -101,6 +101,16 @@ test('resolves provider-neutral build purposes to app workflows', () => {
   });
 });
 
+test('allows each build purpose to override the default trigger mode', () => {
+  const profile = profileFixture();
+  profile.build.trigger_mode = 'managed';
+  profile.build.purposes.pull_request.trigger_mode = 'shadow';
+  const validated = validateRepositoryProfile(profile);
+
+  assert.equal(resolveBuildPurpose(validated, 'pull_request').triggerMode, 'shadow');
+  assert.equal(resolveBuildPurpose(validated, 'production').triggerMode, 'managed');
+});
+
 test('rejects unknown build providers and purposes', () => {
   const providerProfile = profileFixture();
   providerProfile.build.provider = 'unknown';
