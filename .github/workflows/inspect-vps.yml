@@ -1,0 +1,47 @@
+name: Inspect VPS webhook readiness
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -m 700 -p ~/.ssh
+          umask 077
+          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Inspect process and HTTPS support
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "$VPS_USER@$VPS_HOST" 'bash -s' <<'ENDSSH'
+            set -eu
+            echo "user=$(id -un) uid=$(id -u) init=$(ps -p 1 -o comm=)"
+            echo "hostname=$(hostname -f 2>/dev/null || hostname)"
+            for command in nginx caddy apache2 systemctl pm2 node; do
+              if command -v "$command" >/dev/null 2>&1; then
+                echo "$command=$(command -v "$command")"
+              else
+                echo "$command=missing"
+              fi
+            done
+            if command -v systemctl >/dev/null 2>&1; then
+              echo "user-systemd=$(systemctl --user is-system-running 2>/dev/null || true)"
+            fi
+            if command -v nginx >/dev/null 2>&1; then
+              grep -RhsE '^[[:space:]]*server_name|^[[:space:]]*listen.*443' /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null || true
+            fi
+            if command -v caddy >/dev/null 2>&1; then
+              sed -n '1,160p' /etc/caddy/Caddyfile 2>/dev/null || true
+            fi
+            ss -lnt 2>/dev/null | sed -n '1,30p' || true
+          ENDSSH
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
