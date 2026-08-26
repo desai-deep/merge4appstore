@@ -26,6 +26,11 @@ Store Connect:
   release back to GitHub;
 - expose dry runs, decision reasons, approvals, and an audit trail.
 
+GitHub and Xcode Cloud webhooks are the primary execution model. Signed App
+Store Connect webhooks supply subsequent build, TestFlight, and app-version
+state changes. Scheduled polling remains only as a slower reconciliation path
+for missed, delayed, or unsupported events.
+
 The existing code is a useful single-tenant implementation of the core release
 algorithms. Productizing it requires durable jobs, tenant isolation, an
 encrypted credential store, GitHub App authentication, onboarding and
@@ -179,6 +184,77 @@ role. A configurable fallback may allow project generation to continue using a
 version committed in the repository, but submission automation must not treat
 that build as eligible until it is reconciled.
 
+## Webhook-first event model
+
+The hosted product must react to provider events instead of running every
+automation for every repository every five minutes.
+
+### [GitHub webhooks](https://docs.github.com/en/webhooks/about-webhooks)
+
+Subscribe only to the events required by enabled modules:
+
+| GitHub event | Product action |
+| --- | --- |
+| Pull request opened, synchronized, reopened, or closed | Track the expected PR build; on close or merge, enqueue workflow-scoped TestFlight cleanup |
+| Push to the production or beta branch | Reconcile the expected Xcode Cloud workflow run and recover a missed trigger when policy permits |
+| Release PR merged | Associate the production commit, expected workflow, release notes, and later submission |
+| Installation, repository, or permission changed | Refresh access and suspend jobs that are no longer authorized |
+
+Validate GitHub's HMAC signature before accepting a delivery. Persist
+`X-GitHub-Delivery` as the idempotency key, acknowledge quickly, and process the
+event asynchronously. A duplicate delivery must resolve to the same stored
+event and must never repeat a mutation.
+
+### [Xcode Cloud webhooks](https://developer.apple.com/documentation/xcode/configuring-webhooks-in-xcode-cloud)
+
+Configure a product webhook for each connected Xcode Cloud product. Apple sends
+events when a build is created, starts, and completes; the payload includes app,
+workflow, build, repository, and source-control context.
+
+| Xcode Cloud event | Product action |
+| --- | --- |
+| `BUILD_CREATED` | Match the run to the expected repository commit, PR, app role, and workflow; cancel any pending recovery timer |
+| `BUILD_STARTED` | Mark the build active and expose progress without polling |
+| `BUILD_COMPLETED` | Fetch authoritative build/run state, record provenance, then enqueue submission or cleanup evaluation as appropriate |
+
+Xcode Cloud retries retryable failures, so ingestion must be idempotent and
+respond promptly after durable acceptance. Apple supports up to five webhooks
+per Xcode Cloud product. Onboarding must verify that a product webhook points to
+the correct tenant endpoint and perform a test build/delivery check.
+
+Apple's Xcode Cloud webhook documentation does not describe an HMAC signing
+secret. Treat its payload as a notification, not authorization: validate its
+shape and configured product/workflow IDs, deduplicate it, then confirm the
+build through the authenticated App Store Connect API before any mutation.
+Rate-limit and monitor the public endpoint. Never submit or expire a build based
+only on an unauthenticated Xcode Cloud payload.
+
+### [App Store Connect webhooks](https://developer.apple.com/documentation/appstoreconnectapi/configuring-webhook-notifications)
+
+Create signed per-app App Store Connect webhooks for supported lifecycle events,
+including build-upload state, external beta state, and App Store version state.
+Verify `x-apple-signature` using the configured HMAC secret before accepting the
+event.
+
+These events close the gap between Xcode Cloud finishing and App Store Connect
+finishing build processing, beta review, App Review, and release. They should
+drive submission continuation, release synchronization, and status updates
+without frequent polling.
+
+### Reconciliation remains mandatory
+
+Webhooks can be delayed, duplicated, misconfigured, or missed during an outage.
+A scheduled reconciler should therefore:
+
+- run much less frequently than the current five-minute full scan, initially
+  every 30–60 minutes;
+- prioritize builds or releases with an expected transition overdue;
+- read provider rate-limit headers and defer low-priority work;
+- compare stored state with GitHub, Xcode Cloud, TestFlight, and App Store
+  Connect;
+- repair missing jobs without repeating completed external mutations;
+- expose the reason and source (`webhook` or `reconciliation`) for every job.
+
 ## CI client distribution
 
 Never execute an unpinned script directly from the default branch. Builds must
@@ -254,9 +330,13 @@ The intended setup is:
    submission, release synchronization, and release PR maintenance.
 7. Run read-only credential and configuration checks.
 8. Run an explainable dry run against recent builds.
-9. Open a bootstrap PR containing the thin CI adapter when build preparation is
+9. Register and verify the GitHub App webhook, configure and test the Xcode
+   Cloud product webhook, and create signed App Store Connect app webhooks where
+   supported.
+10. Open a bootstrap PR containing the thin CI adapter when build preparation is
    enabled.
-10. Enable mutations only after validation succeeds.
+11. Enable mutations only after webhook delivery and reconciliation validation
+    succeed.
 
 This can be low setup, but not zero setup. Customers must already have a valid
 Apple Developer membership, app records, signing, schemes, repository access,
@@ -265,15 +345,16 @@ and working Xcode Cloud workflows.
 ## Runtime architecture required for a product
 
 ```text
-GitHub webhooks ----\
-                     -> API / event ingestion -> durable job queue -> workers
-ASC/Xcode events ---/                              |              |
-                                                   |              +-> GitHub App
-Xcode CI client -----------------------------------+              +-> ASC API
-                                                   |
-                             tenant/profile DB <---+
-                             encrypted secret vault
-                             audit and decision log
+GitHub webhooks ---------\
+Xcode Cloud webhooks -----+-> event ingestion -> durable job queue -> workers
+signed ASC webhooks -----/                            |              |
+                                                       |              +-> GitHub App
+                                                       |              +-> ASC API
+Xcode CI client ---------------------------------------+
+                                                       |
+                                 tenant/profile DB <---+
+                                 encrypted secret vault
+                                 audit and decision log
 
 Scheduled reconciler -> detects missed events and repairs drift
 ```
@@ -286,6 +367,8 @@ Required properties:
 - immutable audit events containing inputs, decisions, and external IDs, but no
   secrets;
 - webhook-first execution plus periodic reconciliation;
+- signature verification where providers support it, API corroboration where
+  they do not, and durable delivery deduplication for every source;
 - dry-run parity with live decision logic;
 - approval gates for submission cancellation and App Store review submission;
 - customer-visible health, errors, and remediation instructions;
@@ -416,6 +499,12 @@ Exit criteria:
 ### Phase 2: central build preparation and GitHub App
 
 - Implement GitHub App installation authentication and replace `gh` calls.
+- Implement signed GitHub webhook ingestion, durable delivery deduplication,
+  and jobs for PR, push, installation, and permission events.
+- Implement Xcode Cloud webhook ingestion for build-created, build-started, and
+  build-completed events; corroborate every actionable event through ASC API.
+- Register signed App Store Connect app webhooks for build, beta, and version
+  state changes.
 - Add the repository-scoped build preparation endpoint and idempotency.
 - Store ASC credentials centrally and return only non-secret build inputs.
 - Remove ASC and GitHub credentials from Xcode Cloud after migration.
@@ -425,13 +514,18 @@ Exit criteria:
 Exit criteria:
 
 - Xcode Cloud holds only a scoped product build token;
+- normal build and PR lifecycle automation is webhook-driven rather than
+  dependent on the five-minute cron;
+- duplicate GitHub, Xcode Cloud, or ASC deliveries cannot repeat a mutation;
+- an Xcode Cloud payload not corroborated through ASC cannot submit or expire a
+  build;
 - no hosted operation depends on a persistent app checkout;
 - revoking a GitHub installation or ASC credential stops only that tenant.
 
 ### Phase 3: hosted multi-tenant control plane
 
 - Add tenant/profile storage, encrypted secrets, job queue, worker isolation,
-  webhooks, reconciliation, rate limiting, and audit history.
+  reconciliation, provider-aware rate limiting, and audit history.
 - Build discovery and guided onboarding.
 - Add approval policies and a customer operations dashboard.
 - Add alerts and actionable remediation.
