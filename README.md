@@ -66,6 +66,10 @@ node index.js --profile profiles/runningorder.yml
 node index.js --profile profiles/jamsontoast.yml
 ```
 
+When a profile is supplied, `.env` is optional if the required shared
+credentials are already injected into the process environment, as they are in
+GitHub Actions or another secret-aware runner.
+
 Each repository profile has a required `prod` app and may add `uat` and
 `internal` apps. Every automation can select an app role; omitted selections
 default to `prod`. This keeps the common single-app case terse while allowing a

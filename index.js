@@ -63,7 +63,8 @@ try {
 }
 
 const dotenvResult = dotenv.config({ path: cli.configPath });
-if (dotenvResult.error) {
+const missingOptionalProfileEnv = cli.profilePath && dotenvResult.error?.code === 'ENOENT';
+if (dotenvResult.error && !missingOptionalProfileEnv) {
   console.error(`ERROR: Could not load config file ${cli.configPath}: ${dotenvResult.error.message}`);
   process.exit(1);
 }
