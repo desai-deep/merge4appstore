@@ -100,6 +100,44 @@ test('reports a transient error when Apple has not mirrored the source branch', 
   );
 });
 
+test('starts a pull request workflow through the Apple SCM pull request', async () => {
+  let started = null;
+  const provider = new XcodeCloudBuildProvider({
+    getWorkflowRunStatus: async () => ({ found: false }),
+    getWorkflowPullRequest: async (workflowId, number) => {
+      assert.equal(workflowId, 'workflow-pr');
+      assert.equal(number, '49');
+      return { id: 'apple-pr-49', number: '49' };
+    },
+    startWorkflowBuild: async (workflowId, sourceReferenceId, options) => {
+      started = { workflowId, sourceReferenceId, options };
+      return { runId: 'run-pr', number: 151, executionProgress: 'PENDING' };
+    },
+  });
+
+  const result = await provider.trigger({ ...intent(), pullRequest: '49' });
+
+  assert.deepEqual(started, {
+    workflowId: 'workflow-pr',
+    sourceReferenceId: null,
+    options: { pullRequestId: 'apple-pr-49' },
+  });
+  assert.equal(result.action, 'started');
+  assert.equal(result.runId, 'run-pr');
+});
+
+test('reports a transient error when Apple has not mirrored the pull request', async () => {
+  const provider = new XcodeCloudBuildProvider({
+    getWorkflowRunStatus: async () => ({ found: false }),
+    getWorkflowPullRequest: async () => null,
+  });
+
+  await assert.rejects(
+    provider.trigger({ ...intent(), pullRequest: '49' }),
+    error => error.code === 'SOURCE_PULL_REQUEST_NOT_FOUND',
+  );
+});
+
 test('creates a normalized intent from GitHub event environment values', () => {
   const build = {
     provider: 'xcode_cloud',

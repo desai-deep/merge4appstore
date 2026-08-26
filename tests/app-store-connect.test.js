@@ -122,6 +122,58 @@ test('starts a clean workflow build for the selected branch reference', async ()
   assert.equal(asc.ciBuildRuns, null);
 });
 
+test('resolves an open Apple SCM pull request for a workflow', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.request = async endpoint => {
+    if (endpoint === '/ciWorkflows/workflow-1/repository') {
+      return { data: { id: 'repository-1' } };
+    }
+    assert.equal(endpoint, '/scmRepositories/repository-1/pullRequests?limit=200');
+    return {
+      data: [
+        { id: 'closed-pr', attributes: { number: 48, isClosed: true } },
+        {
+          id: 'open-pr',
+          attributes: {
+            number: 49,
+            isClosed: false,
+            sourceBranchName: 'feature',
+            destinationBranchName: 'develop',
+          },
+        },
+      ],
+    };
+  };
+
+  assert.deepEqual(await asc.getWorkflowPullRequest('workflow-1', '49'), {
+    id: 'open-pr',
+    number: '49',
+    sourceBranchName: 'feature',
+    destinationBranchName: 'develop',
+  });
+});
+
+test('starts a clean workflow build for an Apple SCM pull request', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  let request = null;
+  asc.request = async (endpoint, options) => {
+    request = { endpoint, options };
+    return {
+      data: {
+        id: 'run-141',
+        attributes: { number: 141, executionProgress: 'PENDING' },
+      },
+    };
+  };
+
+  await asc.startWorkflowBuild('workflow-1', null, { pullRequestId: 'apple-pr-49' });
+
+  assert.deepEqual(JSON.parse(request.options.body).data.relationships, {
+    workflow: { data: { type: 'ciWorkflows', id: 'workflow-1' } },
+    pullRequest: { data: { type: 'scmPullRequests', id: 'apple-pr-49' } },
+  });
+});
+
 test('normalizes one Xcode Cloud build run', async () => {
   const asc = createASCWithVersions({ data: [] });
   asc.request = async endpoint => {
