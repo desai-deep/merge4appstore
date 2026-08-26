@@ -120,7 +120,7 @@ build:
     pull_request:
       app: internal
       workflow: pull_requests
-      trigger_mode: shadow # Xcode Cloud requires its matching PR condition
+      trigger_mode: managed # requires Xcode Cloud's Manual Start PR option
     beta:
       workflow: beta
     production:
@@ -186,13 +186,14 @@ can call the same provider-neutral path. Use `shadow` while comparing webhook
 intents with a build provider's native triggers, and `managed` after native
 triggers can safely be removed.
 
-Xcode Cloud is a special case for pull-request builds. Apple rejects manual PR
-builds when the workflow is deactivated, has no start condition, or its PR
-condition does not match the source and target branches. Consequently, an
-Xcode Cloud `pull_request` purpose must retain a matching native PR condition;
-use `native` or `shadow` for that purpose. GitHub webhooks can still own event
-ingestion, deduplication, status reconciliation, and recovery of a missed native
-run. Branch-based beta and production purposes can use `managed` independently.
+Xcode Cloud is a special case for pull-request builds. Apple rejects API-started
+PR builds when the workflow is deactivated or its enabled start conditions do
+not allow that PR. For fully managed operation, replace the automatic **Pull
+Request Changes** condition with **Manual Start**, enable its **Pull Request**
+option, and select the allowed source and target branches. This keeps the
+workflow API-startable without Apple also reacting directly to Git events. Use
+`shadow` while the automatic PR condition is still present. Branch-based beta
+and production purposes can use `managed` independently.
 
 ### 4. Schedule (cron)
 

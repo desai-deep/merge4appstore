@@ -30,7 +30,6 @@ build:
     pull_request:
       app: uat
       workflow: pull_requests
-      trigger_mode: shadow
     beta:
       app: prod
       workflow: beta
