@@ -16,7 +16,8 @@ Automated iOS App Store deployment and release sync. Monitors TestFlight builds 
 
 - Direct App Store Connect API calls (no Fastlane/Ruby dependency)
 - 10x faster than Fastlane-based solutions (~8s vs ~60s)
-- Multiple app profiles can safely share one checkout, cron, and deployment
+- Repository profiles can route deploy, sync, and cleanup to different App Store Connect apps
+- Standard `prod`, `uat`, and `internal` app roles, with `prod` as the default
 - Single combined script for both operations
 
 ## How It Works
@@ -47,28 +48,65 @@ npm install
 
 ### 2. Configure
 
-For one app, copy `.env.example` to `.env` and fill in your values:
+Copy `.env.example` to `.env` and add the shared App Store Connect and GitHub credentials:
 
 ```bash
 cp .env.example .env
 ```
 
-For multiple apps, keep one ignored environment file per app. Running Order and
-Jams On Toast starters are included:
+Then select one of the tracked repository profiles:
 
 ```bash
-mkdir -p profiles
-cp profiles/runningorder.env.example profiles/runningorder.env
-cp profiles/jamsontoast.env.example profiles/jamsontoast.env
+node index.js --profile profiles/runningorder.yml
+node index.js --profile profiles/jamsontoast.yml
 ```
 
-Each profile should set a unique `INSTANCE_NAME`. That gives it an independent
-lock and log file, so two cron invocations cannot block or overwrite one another.
+Each repository profile has a required `prod` app and may add `uat` and
+`internal` apps. Every automation can select an app role; omitted selections
+default to `prod`. This keeps the common single-app case terse while allowing a
+repository such as Running Order to deploy from its production app and clean up
+PR builds from its separate UAT app.
 
-Tracked `profiles/*.defaults` files are deployment-managed profiles. On each VPS
-deploy, they inherit the shared credentials from `.env`, apply their non-secret
-app settings, and install an idempotent five-minute cron entry. Generated
-`profiles/*.env` files are ignored by Git and written with mode `600`.
+Cleanup must name an exact workflow. That prevents a cleanup job from expiring
+beta or production builds when one App Store Connect app serves several roles.
+
+```yaml
+version: 1
+instance: example-ios
+
+repository:
+  owner: example
+  name: example-ios
+  production_branch: main
+  beta_branch: develop
+
+apps:
+  prod:
+    app_id: "123456789"
+    bundle_id: com.example.app
+    name: Example
+    workflows:
+      pull_requests: PR-WORKFLOW-ID
+      production: PROD-WORKFLOW-ID
+
+  internal: # optional; `uat` is also supported
+    app_id: "987654321"
+    bundle_id: com.example.app.internal
+    name: Example Internal
+    workflows:
+      pull_requests: INTERNAL-PR-WORKFLOW-ID
+
+automation:
+  deploy:
+    workflow: production # app defaults to prod
+  sync: true             # boolean shorthand, also defaults to prod
+  expire:
+    app: internal
+    workflow: pull_requests
+```
+
+An automation may also set `app_id`, `bundle_id`, or `app_name` directly as an
+override. Prefer app roles when several values travel together.
 
 ### 3. Run
 
@@ -85,9 +123,9 @@ node index.js sync
 # Expire TestFlight builds from branches merged to the beta branch
 node index.js expire
 
-# Run one app profile
-node index.js --config profiles/jamsontoast.env
-node index.js deploy --config profiles/jamsontoast.env
+# Run one repository profile
+node index.js --profile profiles/jamsontoast.yml
+node index.js deploy --profile profiles/jamsontoast.yml
 
 # Dry run modes
 DRY_RUN=true node index.js
@@ -112,9 +150,9 @@ npm run expire:dry     # Preview merged feature-branch expiry
 ### 4. Schedule (cron)
 
 ```bash
-# Run every app every 5 minutes
-*/5 * * * * cd /path/to/merge4appstore && node index.js >> logs/cron.log 2>&1
-*/5 * * * * cd /path/to/merge4appstore && node index.js --config profiles/jamsontoast.env >> logs/cron.log 2>&1
+# Run every repository every 5 minutes
+*/5 * * * * cd /path/to/merge4appstore && node index.js --profile profiles/runningorder.yml >> logs/cron.log 2>&1
+*/5 * * * * cd /path/to/merge4appstore && node index.js --profile profiles/jamsontoast.yml >> logs/cron.log 2>&1
 ```
 
 ## Automatic VPS Deploy
@@ -130,7 +168,13 @@ Required GitHub Actions secrets:
 | `VPS_SSH_KEY` | Private SSH key for deployment |
 | `SERVER_DIR` | Absolute path to this repo on the VPS |
 
-The deploy workflow SSHes into the VPS, updates the checkout to `origin/main`, runs `npm ci --omit=dev`, and executes the full test suite. Ignored profile files remain on the server.
+The deploy workflow SSHes into the VPS, updates the checkout to `origin/main`,
+runs `npm ci --omit=dev`, executes the full test suite, dry-runs deploy and
+cleanup for every YAML profile, and installs one idempotent cron entry per
+repository.
+
+Pull requests run the unit suite and validate every tracked repository profile
+without requiring production credentials.
 
 ## Environment Variables
 
@@ -142,10 +186,10 @@ The deploy workflow SSHes into the VPS, updates the checkout to `origin/main`, r
 | `APP_STORE_CONNECT_ISSUER_ID` | App Store Connect Issuer ID |
 | `APP_STORE_CONNECT_API_KEY_CONTENT` | API private key (base64 encoded) |
 | `GH_TOKEN` | GitHub token for PR comments |
-| `APP_BUNDLE_ID` | Your app's bundle identifier |
-| `APP_NAME` | App name (must match App Store Connect) |
-| `GITHUB_REPO_OWNER` | GitHub org/user |
-| `GITHUB_REPO_NAME` | GitHub repo name |
+App and repository values live in YAML profiles. The legacy environment-only
+configuration remains supported; when no `--profile` is supplied it still
+requires `APP_BUNDLE_ID`, `APP_NAME`, `GITHUB_REPO_OWNER`, and
+`GITHUB_REPO_NAME`.
 
 ### Optional
 
@@ -160,6 +204,7 @@ The deploy workflow SSHes into the VPS, updates the checkout to `origin/main`, r
 | `EXPIRE_MERGED_BUILDS` | Run closed-PR expiry in the default `all` mode (default `true`) |
 | `IOS_REPO_PATH` | Optional server checkout used to trigger the next beta build |
 | `MERGE4APPSTORE_ENV` | Alternative to the `--config` command-line option |
+| `MERGE4APPSTORE_PROFILE` | Alternative to the `--profile` command-line option |
 | `DRY_RUN` | Set to `true` to run without making changes |
 
 ## Requirements
@@ -170,13 +215,20 @@ The deploy workflow SSHes into the VPS, updates the checkout to `origin/main`, r
 
 ## How It Filters Builds
 
-The script only processes builds from the specified Xcode Cloud workflow (default: "Publish to App Store"). Other workflows like "Public Beta" or "UAT" are skipped - they're for TestFlight distribution only, not App Store submission.
+Each automation resolves its own App Store Connect app and workflow from the
+repository profile. App selections default to `prod`. Deployment only processes
+the configured production workflow, while cleanup only processes the configured
+PR workflow.
 
 ## Closed PR Build Expiry
 
 The `expire` mode checks each valid, unexpired TestFlight build against its Xcode Cloud source branch. It expires the build only when that exact branch has one closed or merged PR targeting `BETA_BRANCH`. When a branch name has been reused by multiple closed PRs, the source commit must identify exactly one of them. A currently open PR for the branch always protects its builds.
 
-The cleanup skips builds when their source cannot be identified, their PR is still open or ambiguous, they came from `BETA_BRANCH` or `PRODUCTION_BRANCH`, or they are selected for an App Store version. Use `npm run expire:dry` to preview every decision. It runs in scheduled default executions unless `EXPIRE_MERGED_BUILDS=false` is set.
+The cleanup skips builds when their source cannot be identified, they came from
+a workflow other than the configured PR workflow, their PR is still open or
+ambiguous, they came from the beta or production branch, or they are selected
+for an App Store version. Use `DRY_RUN=true node index.js expire --profile ...`
+to preview every decision.
 
 ## License
 

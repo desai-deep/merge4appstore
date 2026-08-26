@@ -1,0 +1,36 @@
+version: 1
+instance: runningorder-ios
+
+repository:
+  owner: desai-deep
+  name: runningorder-ios
+  production_branch: main
+  beta_branch: develop
+
+apps:
+  prod:
+    app_id: "6497231574"
+    bundle_id: com.deepdesai.runningorder
+    name: Running Order
+    workflows:
+      beta: 9CDCEA68-534E-484E-8358-4092094A8581
+      production: C4885BE9-A4F2-40B8-A860-89463FE377EF
+
+  uat:
+    app_id: "6756181040"
+    bundle_id: com.deepdesai.runningorder.uat
+    name: UAT Running Order
+    workflows:
+      pull_requests: E1A68E5D-F440-4D03-9315-A4052CBA7D70
+
+automation:
+  deploy:
+    app: prod
+    workflow: production
+
+  sync:
+    app: prod
+
+  expire:
+    app: uat
+    workflow: pull_requests

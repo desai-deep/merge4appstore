@@ -13,6 +13,7 @@
  *   node index.js sync               # Run only release sync
  *   node index.js expire             # Expire builds from closed PRs targeting BETA_BRANCH
  *   node index.js --config profiles/my-app.env
+ *   node index.js --profile profiles/my-repository.yml
  *   DRY_RUN=true node index.js       # Dry run mode
  *
  * Required environment variables:
@@ -42,6 +43,11 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { parseCliArgs } from './lib/cli.js';
+import {
+  applyAutomationProfile,
+  applyRepositoryProfile,
+  loadRepositoryProfile,
+} from './lib/profile.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -58,6 +64,17 @@ const dotenvResult = dotenv.config({ path: cli.configPath });
 if (dotenvResult.error) {
   console.error(`ERROR: Could not load config file ${cli.configPath}: ${dotenvResult.error.message}`);
   process.exit(1);
+}
+
+let repositoryProfile = null;
+if (cli.profilePath) {
+  try {
+    repositoryProfile = loadRepositoryProfile(cli.profilePath);
+    applyRepositoryProfile(repositoryProfile);
+  } catch (error) {
+    console.error(`ERROR: Could not load repository profile ${cli.profilePath}: ${error.message}`);
+    process.exit(1);
+  }
 }
 
 // Import modules
@@ -88,51 +105,74 @@ async function main() {
   log('=== merge4appstore ===');
   log(`Mode: ${mode}`);
   log(`Config: ${cli.configPath}`);
+  if (cli.profilePath) log(`Profile: ${cli.profilePath}`);
   if (DRY_RUN) {
     log('DRY RUN MODE - No actual changes will be made');
   }
 
   // Validate required environment variables
-  const requiredVars = [
+  const requiredSharedVars = [
     'APP_STORE_CONNECT_API_KEY_ID',
     'APP_STORE_CONNECT_ISSUER_ID',
     'APP_STORE_CONNECT_API_KEY_CONTENT',
-    'APP_BUNDLE_ID',
-    'APP_NAME',
     'GITHUB_REPO_OWNER',
     'GITHUB_REPO_NAME',
   ];
 
-  for (const varName of requiredVars) {
+  if (!repositoryProfile) requiredSharedVars.push('APP_BUNDLE_ID', 'APP_NAME');
+
+  for (const varName of requiredSharedVars) {
     if (!process.env[varName]) {
       log(`ERROR: Missing required environment variable: ${varName}`);
       process.exit(1);
     }
   }
 
-  // Initialize clients
-  const asc = new AppStoreConnectAPI(
-    process.env.APP_STORE_CONNECT_API_KEY_ID,
-    process.env.APP_STORE_CONNECT_ISSUER_ID,
-    process.env.APP_STORE_CONNECT_API_KEY_CONTENT
-  );
+  const createClients = () => ({
+    asc: new AppStoreConnectAPI(
+      process.env.APP_STORE_CONNECT_API_KEY_ID,
+      process.env.APP_STORE_CONNECT_ISSUER_ID,
+      process.env.APP_STORE_CONNECT_API_KEY_CONTENT
+    ),
+    github: new GitHubAPI(CONFIG.repoOwner, CONFIG.repoName, CONFIG.productionBranch),
+    tags: new GitHubTags(CONFIG.repoOwner, CONFIG.repoName),
+  });
 
-  const github = new GitHubAPI(CONFIG.repoOwner, CONFIG.repoName, CONFIG.productionBranch);
-  const tags = new GitHubTags(CONFIG.repoOwner, CONFIG.repoName);
+  const selectAutomation = name => {
+    if (!repositoryProfile) return { enabled: true, appRole: 'legacy' };
+    const automation = applyAutomationProfile(repositoryProfile, name);
+    if (!automation.enabled) log(`Skipping disabled ${name} automation`);
+    else log(`${name}: using ${automation.appRole} app (${automation.appName}, ${automation.appId})`);
+    return automation;
+  };
 
   try {
     // Run deploy check
     if (mode === 'deploy' || mode === 'all') {
-      await runDeployCheck(asc, github, DRY_RUN);
+      const automation = selectAutomation('deploy');
+      if (automation.enabled) {
+        const { asc, github } = createClients();
+        await runDeployCheck(asc, github, DRY_RUN);
+      }
     }
 
     // Run release sync
     if (mode === 'sync' || mode === 'all') {
-      await runReleaseSync(asc, tags, github, DRY_RUN);
+      const automation = selectAutomation('sync');
+      if (automation.enabled) {
+        const { asc, tags, github } = createClients();
+        await runReleaseSync(asc, tags, github, DRY_RUN);
+      }
     }
 
-    if (mode === 'expire' || (mode === 'all' && CONFIG.expireMergedBuilds)) {
-      await runClosedPRBuildExpiry(asc, github, DRY_RUN);
+    const shouldRunExpiration = mode === 'expire'
+      || (mode === 'all' && (repositoryProfile || CONFIG.expireMergedBuilds));
+    if (shouldRunExpiration) {
+      const automation = selectAutomation('expire');
+      if (automation.enabled) {
+        const { asc, github } = createClients();
+        await runClosedPRBuildExpiry(asc, github, DRY_RUN);
+      }
     }
 
     log('=== Done ===');

@@ -52,30 +52,29 @@ jobs:
             npm ci --omit=dev
 
             npm test
+            npm run validate:profiles
 
-            echo "Configuring app profiles..."
+            echo "Configuring repository profiles..."
             shopt -s nullglob
-            profile_defaults=(profiles/*.defaults)
+            repository_profiles=(profiles/*.yml)
             current_crontab="$(crontab -l 2>/dev/null || true)"
             printf -v deploy_dir_quoted '%q' "$DEPLOY_DIR"
 
-            for defaults_file in "${profile_defaults[@]}"; do
-              profile_name="$(basename "$defaults_file" .defaults)"
-              profile_file="profiles/${profile_name}.env"
+            for profile_file in "${repository_profiles[@]}"; do
+              profile_name="$(basename "$profile_file" .yml)"
               marker="# merge4appstore:${profile_name}"
 
-              scripts/install-profile.sh .env "$defaults_file" "$profile_file"
-              DRY_RUN=true node index.js deploy --config "$profile_file"
-              DRY_RUN=true node index.js expire --config "$profile_file"
+              DRY_RUN=true node index.js deploy --profile "$profile_file"
+              DRY_RUN=true node index.js expire --profile "$profile_file"
 
               current_crontab="$(printf '%s\n' "$current_crontab" | grep -Fv "$marker" || true)"
-              cron_line="*/5 * * * * cd ${deploy_dir_quoted} && node index.js --config ${profile_file} >> logs/cron.log 2>&1 ${marker}"
+              cron_line="*/5 * * * * cd ${deploy_dir_quoted} && node index.js --profile ${profile_file} >> logs/cron.log 2>&1 ${marker}"
               current_crontab="$(printf '%s\n%s\n' "$current_crontab" "$cron_line")"
             done
 
-            if (( ${#profile_defaults[@]} > 0 )); then
+            if (( ${#repository_profiles[@]} > 0 )); then
               printf '%s\n' "$current_crontab" | sed '/^[[:space:]]*$/d' | crontab -
-              echo "Configured ${#profile_defaults[@]} app profile cron job(s)"
+              echo "Configured ${#repository_profiles[@]} repository profile cron job(s)"
             fi
 
             echo "merge4appstore deployment complete"
