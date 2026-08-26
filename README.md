@@ -173,8 +173,9 @@ runs `npm ci --omit=dev`, executes the full test suite, dry-runs deploy and
 cleanup for every YAML profile, and installs one idempotent cron entry per
 repository.
 
-Pull requests run the unit suite and validate every tracked repository profile
-without requiring production credentials.
+Pull requests run the test job in the deployment workflow and validate every
+tracked repository profile without requiring production credentials. The VPS
+deployment job is disabled for pull-request events.
 
 ## Environment Variables
 
