@@ -2,6 +2,9 @@
 
 Automated iOS App Store deployment and release sync. Monitors TestFlight builds from Xcode Cloud, submits them for App Store review, and tags releases when they go live.
 
+See the [product and Xcode Cloud CI ownership plan](docs/PRODUCT_PLAN.md) for the
+proposed path from the current single-tenant automation to a reusable service.
+
 ## What it does
 
 1. **Deploy Check** - Monitors TestFlight for new builds from specific Xcode Cloud workflows, automatically submits them to App Store review, extracts release notes from merged GitHub PRs, and comments on PRs when builds are submitted or cancelled.
