@@ -12,6 +12,7 @@
  *   node index.js deploy             # Run only deployment check
  *   node index.js sync               # Run only release sync
  *   node index.js expire             # Expire builds from closed PRs targeting BETA_BRANCH
+ *   node index.js trigger            # Trigger a configured build purpose
  *   node index.js --config profiles/my-app.env
  *   node index.js --profile profiles/my-repository.yml
  *   DRY_RUN=true node index.js       # Dry run mode
@@ -45,6 +46,7 @@ import dotenv from 'dotenv';
 import { parseCliArgs } from './lib/cli.js';
 import {
   applyAutomationProfile,
+  applyBuildPurposeProfile,
   applyRepositoryProfile,
   loadRepositoryProfile,
 } from './lib/profile.js';
@@ -86,6 +88,8 @@ import { acquireLock, releaseLock } from './lib/lock.js';
 import { runDeployCheck } from './lib/deploy.js';
 import { runReleaseSync } from './lib/sync.js';
 import { runClosedPRBuildExpiry } from './lib/expire.js';
+import { XcodeCloudBuildProvider } from './lib/build-provider.js';
+import { buildIntentFromEnvironment, runManagedBuildTrigger } from './lib/trigger.js';
 
 async function main() {
   const DRY_RUN = process.env.DRY_RUN === 'true';
@@ -147,6 +151,19 @@ async function main() {
   };
 
   try {
+    if (mode === 'trigger') {
+      if (!repositoryProfile) {
+        throw new Error('trigger mode requires --profile');
+      }
+      const purpose = process.env.BUILD_PURPOSE;
+      const build = applyBuildPurposeProfile(repositoryProfile, purpose);
+      log(`trigger: using ${build.provider}/${build.appRole} (${build.appName}, ${build.workflowId})`);
+      const { asc, github } = createClients();
+      const provider = new XcodeCloudBuildProvider(asc);
+      const intent = buildIntentFromEnvironment(build);
+      await runManagedBuildTrigger(provider, github, intent, DRY_RUN);
+    }
+
     // Run deploy check
     if (mode === 'deploy' || mode === 'all') {
       const automation = selectAutomation('deploy');

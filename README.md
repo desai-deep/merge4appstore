@@ -12,6 +12,11 @@ Automated iOS App Store deployment and release sync. Monitors TestFlight builds 
 
 4. **Missed Trigger Recovery** - Optionally starts the configured production Xcode Cloud workflow when a merged production PR has no build run. Active and completed runs are detected first so the five-minute cron cannot create duplicates.
 
+5. **Managed Build Triggering** - Converts a provider-neutral build intent into
+   an Xcode Cloud build, reusing an existing run for the same workflow and
+   commit and refusing to duplicate an active run whose commit metadata is not
+   available yet.
+
 ## Features
 
 - Direct App Store Connect API calls (no Fastlane/Ruby dependency)
@@ -103,6 +108,18 @@ automation:
   expire:
     app: internal
     workflow: pull_requests
+
+build:
+  provider: xcode_cloud
+  trigger_mode: native # shadow and managed are reserved for webhook cutover
+  purposes:
+    pull_request:
+      app: internal
+      workflow: pull_requests
+    beta:
+      workflow: beta
+    production:
+      workflow: production
 ```
 
 An automation may also set `app_id`, `bundle_id`, or `app_name` directly as an
@@ -122,6 +139,13 @@ node index.js sync
 
 # Expire TestFlight builds from branches merged to the beta branch
 node index.js expire
+
+# Start or reuse a configured build for an immutable GitHub event intent
+BUILD_PURPOSE=pull_request \
+BUILD_BRANCH=feature/example \
+BUILD_COMMIT_SHA=abcdef1234567890 \
+BUILD_SOURCE_DELIVERY_ID=github-delivery-id \
+node index.js trigger --profile profiles/runningorder.yml
 
 # Run one repository profile
 node index.js --profile profiles/jamsontoast.yml
@@ -145,7 +169,15 @@ npm run deploy:dry     # Dry run deploy
 npm run sync:dry       # Dry run sync
 npm run expire         # Expire merged feature-branch builds
 npm run expire:dry     # Preview merged feature-branch expiry
+npm run trigger        # Start/reuse the configured build purpose
+npm run trigger:dry    # Resolve a build intent without starting it
 ```
+
+`trigger` is an explicit API/CLI operation in this change. A later webhook
+listener can call the same provider-neutral path. Keep `trigger_mode: native`
+until GitHub-event shadow results match Xcode Cloud's existing automatic
+triggers; then disable the overlapping native start conditions before switching
+the profile to `managed`.
 
 ### 4. Schedule (cron)
 

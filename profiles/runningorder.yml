@@ -23,6 +23,20 @@ apps:
     workflows:
       pull_requests: E1A68E5D-F440-4D03-9315-A4052CBA7D70
 
+build:
+  provider: xcode_cloud
+  trigger_mode: native
+  purposes:
+    pull_request:
+      app: uat
+      workflow: pull_requests
+    beta:
+      app: prod
+      workflow: beta
+    production:
+      app: prod
+      workflow: production
+
 automation:
   deploy:
     app: prod

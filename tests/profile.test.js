@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 
 import {
   applyAutomationProfile,
+  applyBuildPurposeProfile,
   applyRepositoryProfile,
   resolveAutomation,
+  resolveBuildPurpose,
   validateRepositoryProfile,
 } from '../lib/profile.js';
 
@@ -43,6 +45,15 @@ function profileFixture() {
       sync: true,
       expire: { app: 'uat', workflow: 'pull_requests' },
     },
+    build: {
+      provider: 'xcode_cloud',
+      trigger_mode: 'native',
+      purposes: {
+        pull_request: { app: 'uat', workflow: 'pull_requests' },
+        beta: { workflow: 'internal' },
+        production: { workflow: 'production' },
+      },
+    },
   };
 }
 
@@ -74,6 +85,46 @@ test('supports the standard internal app role', () => {
   const automation = resolveAutomation(validateRepositoryProfile(profile), 'expire');
   assert.equal(automation.appRole, 'internal');
   assert.equal(automation.appId, 'internal-id');
+});
+
+test('resolves provider-neutral build purposes to app workflows', () => {
+  const profile = validateRepositoryProfile(profileFixture());
+  assert.deepEqual(resolveBuildPurpose(profile, 'pull_request'), {
+    purpose: 'pull_request',
+    provider: 'xcode_cloud',
+    triggerMode: 'native',
+    appRole: 'uat',
+    appId: 'uat-id',
+    appIdentifier: 'com.example.app.uat',
+    appName: 'Example UAT',
+    workflowId: 'uat-pr-workflow',
+  });
+});
+
+test('rejects unknown build providers and purposes', () => {
+  const providerProfile = profileFixture();
+  providerProfile.build.provider = 'unknown';
+  assert.throws(() => validateRepositoryProfile(providerProfile), /Unknown build provider/);
+
+  const purposeProfile = profileFixture();
+  purposeProfile.build.purposes.nightly = { workflow: 'internal' };
+  assert.throws(() => validateRepositoryProfile(purposeProfile), /Unknown build purpose/);
+});
+
+test('applies a build purpose to an environment', () => {
+  const environment = {};
+  const build = applyBuildPurposeProfile(
+    validateRepositoryProfile(profileFixture()),
+    'pull_request',
+    environment,
+  );
+  assert.equal(build.appRole, 'uat');
+  assert.deepEqual(environment, {
+    APP_ID: 'uat-id',
+    APP_BUNDLE_ID: 'com.example.app.uat',
+    APP_NAME: 'Example UAT',
+    XCODE_WORKFLOW_ID: 'uat-pr-workflow',
+  });
 });
 
 test('allows an automation-specific app id override', () => {

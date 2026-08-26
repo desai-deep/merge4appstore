@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import { loadRepositoryProfile, resolveAutomation } from '../lib/profile.js';
+import { loadRepositoryProfile, resolveAutomation, resolveBuildPurpose } from '../lib/profile.js';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const profilesDir = path.join(rootDir, 'profiles');
@@ -25,5 +25,13 @@ for (const file of profileFiles) {
       return `${name}=${automation.appRole}:${automation.appId}${automation.workflowId ? `:${automation.workflowId}` : ''}`;
     })
     .join(', ');
-  console.log(`${file}: ${routes}`);
+  const builds = profile.build
+    ? Object.keys(profile.build.purposes)
+      .map(purpose => {
+        const build = resolveBuildPurpose(profile, purpose);
+        return `${purpose}=${build.provider}:${build.appRole}:${build.workflowId}`;
+      })
+      .join(', ')
+    : 'disabled';
+  console.log(`${file}: ${routes}; builds: ${builds}`);
 }

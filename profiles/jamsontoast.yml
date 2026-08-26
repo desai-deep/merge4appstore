@@ -18,6 +18,17 @@ apps:
       beta: 87040761-AF53-47D4-8239-076B82F1A091
       production: fb31931a-7a0b-4f77-aa1f-e424f2b8b84d
 
+build:
+  provider: xcode_cloud
+  trigger_mode: native
+  purposes:
+    pull_request:
+      workflow: pull_requests
+    beta:
+      workflow: beta
+    production:
+      workflow: production
+
 automation:
   deploy:
     workflow: production
