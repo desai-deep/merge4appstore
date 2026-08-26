@@ -158,6 +158,9 @@ DRY_RUN=true node index.js sync
 DRY_RUN=true node index.js expire
 ```
 
+Set `BUILD_WAIT_FOR_COMPLETION=true` for a credentialed smoke test that should
+remain active until the provider reports success or failure.
+
 Or use npm scripts:
 
 ```bash

@@ -89,7 +89,7 @@ import { runDeployCheck } from './lib/deploy.js';
 import { runReleaseSync } from './lib/sync.js';
 import { runClosedPRBuildExpiry } from './lib/expire.js';
 import { XcodeCloudBuildProvider } from './lib/build-provider.js';
-import { buildIntentFromEnvironment, runManagedBuildTrigger } from './lib/trigger.js';
+import { buildIntentFromEnvironment, runManagedBuildTrigger, waitForBuildCompletion } from './lib/trigger.js';
 
 async function main() {
   const DRY_RUN = process.env.DRY_RUN === 'true';
@@ -161,7 +161,13 @@ async function main() {
       const { asc, github } = createClients();
       const provider = new XcodeCloudBuildProvider(asc);
       const intent = buildIntentFromEnvironment(build);
-      await runManagedBuildTrigger(provider, github, intent, DRY_RUN);
+      const result = await runManagedBuildTrigger(provider, github, intent, DRY_RUN);
+      if (!DRY_RUN && process.env.BUILD_WAIT_FOR_COMPLETION === 'true' && result.runId) {
+        const completed = await waitForBuildCompletion(provider, result.runId);
+        if (completed.completionStatus !== 'SUCCEEDED') {
+          throw new Error(`Build #${completed.number || completed.runId} completed with ${completed.completionStatus}`);
+        }
+      }
     }
 
     // Run deploy check

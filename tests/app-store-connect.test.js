@@ -122,6 +122,32 @@ test('starts a clean workflow build for the selected branch reference', async ()
   assert.equal(asc.ciBuildRuns, null);
 });
 
+test('normalizes one Xcode Cloud build run', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.request = async endpoint => {
+    assert.equal(endpoint, '/ciBuildRuns/run-140');
+    return {
+      data: {
+        id: 'run-140',
+        attributes: {
+          number: 140,
+          executionProgress: 'COMPLETE',
+          completionStatus: 'SUCCEEDED',
+          sourceCommit: { commitSha: 'abcdef1234567890' },
+        },
+      },
+    };
+  };
+
+  assert.deepEqual(await asc.getBuildRun('run-140'), {
+    runId: 'run-140',
+    number: 140,
+    executionProgress: 'COMPLETE',
+    completionStatus: 'SUCCEEDED',
+    sourceCommit: { commitSha: 'abcdef1234567890' },
+  });
+});
+
 test('reuses an empty review draft instead of creating another submission', async () => {
   const asc = createASCWithVersions({ data: [] });
   asc.getReviewSubmissionIdForVersion = async () => null;

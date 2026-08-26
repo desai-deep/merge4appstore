@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { XcodeCloudBuildProvider } from '../lib/build-provider.js';
-import { buildIntentFromEnvironment, runManagedBuildTrigger } from '../lib/trigger.js';
+import { buildIntentFromEnvironment, runManagedBuildTrigger, waitForBuildCompletion } from '../lib/trigger.js';
 
 function intent() {
   return {
@@ -162,4 +162,22 @@ test('verifies a pull request head before triggering', async () => {
 
   assert.equal(triggered, true);
   assert.equal(result.action, 'started');
+});
+
+test('waits for a provider build to complete', async () => {
+  const states = [
+    { runId: 'run-1', number: 150, executionProgress: 'RUNNING', completionStatus: null },
+    { runId: 'run-1', number: 150, executionProgress: 'COMPLETE', completionStatus: 'SUCCEEDED' },
+  ];
+  const provider = {
+    getRun: async () => states.shift(),
+  };
+
+  const result = await waitForBuildCompletion(provider, 'run-1', {
+    intervalMs: 0,
+    timeoutMs: 1000,
+    sleep: async () => {},
+  });
+
+  assert.equal(result.completionStatus, 'SUCCEEDED');
 });
