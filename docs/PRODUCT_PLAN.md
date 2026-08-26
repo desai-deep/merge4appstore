@@ -114,7 +114,8 @@ or another generator. Tuist must not be a product requirement.
 Xcode Cloud continues to own:
 
 - repository checkout and Apple-provided CI environment;
-- workflow start conditions and actions;
+- workflow definitions and actions, with manual/provider-managed start
+  conditions when `merge4appstore` owns triggering;
 - Xcode build, test, archive, and analysis;
 - signing, entitlements, and distribution groups;
 - upload to App Store Connect and TestFlight;
@@ -128,6 +129,7 @@ signing and workflow configuration.
 
 The service should own:
 
+- GitHub-event-to-build intent and provider trigger policy;
 - app-role and workflow resolution;
 - environment classification (`prod`, `uat`, and `internal`);
 - marketing-version policy and App Store version lookup;
@@ -255,6 +257,136 @@ A scheduled reconciler should therefore:
 - repair missing jobs without repeating completed external mutations;
 - expose the reason and source (`webhook` or `reconciliation`) for every job.
 
+## Managed build triggers and modular build providers
+
+GitHub should become the source of build intent. Once a connected repository is
+in managed-trigger mode, its push and pull-request webhooks select a configured
+build purpose (`pull_request`, `beta`, or `production`) and enqueue exactly one
+provider build for the relevant commit.
+
+For Xcode Cloud, configure workflows with manual branch or pull-request start
+conditions and call Apple's [Start a build
+endpoint](https://developer.apple.com/documentation/appstoreconnectapi/post-v1-cibuildruns).
+Apple explicitly supports reading and managing Xcode Cloud workflows and
+starting builds through the App Store Connect API. Native automatic Git start
+conditions must be disabled after cutover so the same GitHub event cannot also
+start a second Apple-managed build.
+
+The flow is:
+
+```text
+GitHub push / PR webhook
+          |
+          v
+derive immutable BuildIntent
+          |
+          v
+deduplicate repository + workflow + commit + purpose
+          |
+          v
+selected BuildProvider.trigger(intent)
+          |
+          v
+provider result webhook -> normalized BuildEvent -> lifecycle automation
+```
+
+A `BuildIntent` should be provider-neutral:
+
+```json
+{
+  "repository": "example/example-ios",
+  "commit": "abc123",
+  "ref": "refs/heads/develop",
+  "pull_request": 49,
+  "purpose": "pull_request",
+  "app_role": "uat",
+  "workflow": "pull_requests",
+  "source_delivery_id": "github-delivery-id"
+}
+```
+
+The durable uniqueness key is the repository, provider, workflow, commit, and
+purpose. Before starting a build, the provider must also check for an existing
+pending, running, or completed run so webhook retries, service restarts, and
+reconciliation cannot create duplicates.
+
+### Build provider contract
+
+The release policy must depend on a small provider interface rather than Xcode
+Cloud response objects:
+
+- `discover()` lists products, workflows, repositories, and supported trigger
+  types;
+- `validate(config)` checks credentials, repository access, workflow mapping,
+  and webhook health;
+- `trigger(buildIntent)` starts or returns the existing provider run;
+- `getRun(providerRunId)` returns normalized status and provenance;
+- `findRun(buildIntent)` supports reconciliation and duplicate prevention;
+- `cancel(providerRunId)` cancels when the provider supports it;
+- `normalizeWebhook(payload)` produces a normalized `BuildEvent`;
+- `resolveArtifacts(providerRunId)` links archives, logs, and uploaded store
+  builds where supported.
+
+Normalized states should be deliberately small: `queued`, `running`,
+`succeeded`, `failed`, and `cancelled`. Provider-specific details remain in
+diagnostics rather than leaking into release policy.
+
+### Initial Xcode Cloud provider
+
+Xcode Cloud is the only provider required for the first release. It uses the
+customer's own App Store Connect API key; there is no separate Xcode Cloud API
+token. `merge4appstore` generates short-lived ASC JWTs and uses them to:
+
+- discover Xcode Cloud products, workflows, Git references, and pull requests;
+- start a build for the selected manual workflow and source reference;
+- read run state, commit provenance, actions, and artifacts;
+- corroborate Xcode Cloud webhook payloads;
+- continue into TestFlight and App Store lifecycle automation.
+
+The customer's Apple account continues to own and pay for Xcode Cloud compute,
+signing, and distribution. The hosted service stores the ASC private key using
+the tenant-isolated secret controls described below.
+
+Target profile shape:
+
+```yaml
+build:
+  provider: xcode_cloud
+  trigger_mode: managed
+  credential: customer_asc
+  workflows:
+    pull_request:
+      app: uat
+      id: PR-WORKFLOW-ID
+    beta:
+      app: prod
+      id: BETA-WORKFLOW-ID
+    production:
+      app: prod
+      id: PRODUCTION-WORKFLOW-ID
+```
+
+`trigger_mode: native` remains available during migration or when a customer
+prefers Xcode Cloud's own start conditions. Provider ownership and release
+automation are independent switches.
+
+Pull requests from forks or source references that Xcode Cloud cannot access
+must fail validation without attempting a different commit. The provider
+capability result should tell onboarding whether branch, tag, and pull-request
+manual triggers are supported for the selected workflow.
+
+### Later providers
+
+GitHub Actions, Bitrise, Codemagic, or a self-hosted runner can be added behind
+the same contract. Each supplies its own credential, trigger API, result
+webhook, and provenance mapping. Store automation remains separate: a provider
+is not considered successful for submission until the resulting build is
+authoritatively linked to the expected commit and visible in App Store Connect.
+
+Modularity must not delay the initial product. Implement and contract-test one
+Xcode Cloud adapter first, while keeping provider-specific data out of the core
+job and release models.
+
 ## CI client distribution
 
 Never execute an unpinned script directly from the default branch. Builds must
@@ -326,16 +458,23 @@ The intended setup is:
 4. Assign apps to `prod`, `uat`, and `internal`; `prod` is the default when
    optional roles are absent.
 5. Map pull-request, beta, and production workflows and select branches.
-6. Choose modules: build preparation, PR expiration, trigger recovery,
+6. Choose whether `merge4appstore` owns build triggers. For managed Xcode Cloud
+   triggering, validate manual branch/PR support and explicitly approve
+   disabling overlapping native automatic start conditions.
+7. Choose modules: build preparation, PR expiration, trigger recovery,
    submission, release synchronization, and release PR maintenance.
-7. Run read-only credential and configuration checks.
-8. Run an explainable dry run against recent builds.
-9. Register and verify the GitHub App webhook, configure and test the Xcode
+8. Run read-only credential and configuration checks.
+9. Run an explainable dry run against recent builds.
+10. Register and verify the GitHub App webhook, configure and test the Xcode
    Cloud product webhook, and create signed App Store Connect app webhooks where
    supported.
-10. Open a bootstrap PR containing the thin CI adapter when build preparation is
+11. Open a bootstrap PR containing the thin CI adapter when build preparation is
    enabled.
-11. Enable mutations only after webhook delivery and reconciliation validation
+12. Run managed triggers in shadow mode, proving that each GitHub event maps to
+    the expected workflow and commit without starting it.
+13. Disable overlapping native Xcode Cloud automatic triggers and enable the
+    provider trigger only after the shadow comparison succeeds.
+14. Enable remaining mutations only after webhook delivery and reconciliation validation
     succeed.
 
 This can be low setup, but not zero setup. Customers must already have a valid
@@ -349,7 +488,8 @@ GitHub webhooks ---------\
 Xcode Cloud webhooks -----+-> event ingestion -> durable job queue -> workers
 signed ASC webhooks -----/                            |              |
                                                        |              +-> GitHub App
-                                                       |              +-> ASC API
+                                                       |              +-> ASC API/store
+                                                       |              +-> BuildProvider
 Xcode CI client ---------------------------------------+
                                                        |
                                  tenant/profile DB <---+
@@ -503,6 +643,11 @@ Exit criteria:
   and jobs for PR, push, installation, and permission events.
 - Implement Xcode Cloud webhook ingestion for build-created, build-started, and
   build-completed events; corroborate every actionable event through ASC API.
+- Define the provider-neutral `BuildIntent`, `BuildEvent`, and `BuildProvider`
+  contracts and implement the Xcode Cloud provider using the customer's ASC
+  credential.
+- Add managed GitHub-webhook triggers for manual Xcode Cloud branch and PR
+  workflows, with shadow mode and durable duplicate prevention.
 - Register signed App Store Connect app webhooks for build, beta, and version
   state changes.
 - Add the repository-scoped build preparation endpoint and idempotency.
@@ -516,6 +661,9 @@ Exit criteria:
 - Xcode Cloud holds only a scoped product build token;
 - normal build and PR lifecycle automation is webhook-driven rather than
   dependent on the five-minute cron;
+- Xcode Cloud native Git triggers can be disabled without losing push or PR
+  builds, and one GitHub event cannot create duplicate provider runs;
+- release policy has no dependency on raw Xcode Cloud response objects;
 - duplicate GitHub, Xcode Cloud, or ASC deliveries cannot repeat a mutation;
 - an Xcode Cloud payload not corroborated through ASC cannot submit or expire a
   build;
