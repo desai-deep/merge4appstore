@@ -72,11 +72,16 @@ jobs:
             fi
             if command -v nginx >/dev/null 2>&1; then
               grep -RhsE '^[[:space:]]*server_name|^[[:space:]]*listen.*443' /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null || true
+              for config in $(grep -Rls 'server_name api\.runningorder\.app' /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null || true); do
+                echo "nginx-config=$config"
+                sed -n '1,220p' "$config"
+              done
             fi
             if command -v caddy >/dev/null 2>&1; then
               sed -n '1,160p' /etc/caddy/Caddyfile 2>/dev/null || true
             fi
             ss -lnt 2>/dev/null | sed -n '1,30p' || true
+            pm2 jlist 2>/dev/null | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{for(const p of JSON.parse(s||"[]")) console.log(`pm2=${p.name}:${p.pm2_env?.status}:${p.pm2_env?.pm_cwd}`)})' || true
           ENDSSH
 
       - name: Deploy to VPS
