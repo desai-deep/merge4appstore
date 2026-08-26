@@ -183,17 +183,17 @@ npm run trigger:dry    # Resolve a build intent without starting it
 
 `trigger` is an explicit API/CLI operation in this change. A webhook listener
 can call the same provider-neutral path. Use `shadow` while comparing webhook
-intents with a build provider's native triggers, and `managed` after native
-triggers can safely be removed.
+intents with a build provider's native triggers, and `managed` after all native
+automatic triggers have been removed.
 
 Xcode Cloud is a special case for pull-request builds. Apple rejects API-started
 PR builds when the workflow is deactivated or its enabled start conditions do
 not allow that PR. For fully managed operation, replace the automatic **Pull
 Request Changes** condition with **Manual Start**, enable its **Pull Request**
 option, and select the allowed source and target branches. This keeps the
-workflow API-startable without Apple also reacting directly to Git events. Use
-`shadow` while the automatic PR condition is still present. Branch-based beta
-and production purposes can use `managed` independently.
+workflow API-startable without Apple also reacting directly to Git events.
+Branch-based beta and production workflows use **Manual Start - Branch**.
+Pull-request workflows use **Manual Start - Branch, Pull Request**.
 
 ### 4. Schedule (cron)
 
