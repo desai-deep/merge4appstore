@@ -132,3 +132,16 @@ test('uses the pull request target branch when finding a title fallback', async 
   assert.equal(titleBranch, 'develop');
   assert.equal(result.testflight_notes, 'Improve playback');
 });
+
+test('classifies an inaccessible commit as a bad request', async () => {
+  const profile = { repository: { owner: 'example', name: 'ios', beta_branch: 'develop' } };
+  const build = { purpose: 'beta', appRole: 'prod', appId: '1', workflowId: 'wf-beta', includeCommits: false };
+  const payload = { repository: 'example/ios', commit: 'missing', branch: 'develop', current_marketing_version: '1.4' };
+  const asc = { appId: null, getAppStoreVersions: async () => ({ data: [] }) };
+  const github = { getCommitSubject: () => null };
+
+  await assert.rejects(
+    prepareBuild({ profile, build, payload, asc, github }),
+    error => error.statusCode === 400 && /Commit is not accessible/.test(error.message),
+  );
+});

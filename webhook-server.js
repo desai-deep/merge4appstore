@@ -26,7 +26,7 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: process.env.MERGE4APPSTORE_ENV || path.join(ROOT, '.env') });
 
 export function loadProfiles(directory) {
-  const profiles = {};
+  const profiles = Object.create(null);
   for (const name of fs.readdirSync(directory).filter(name => name.endsWith('.yml') || name.endsWith('.yaml'))) {
     const profilePath = path.join(directory, name);
     const profile = loadRepositoryProfile(profilePath);

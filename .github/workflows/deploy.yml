@@ -142,9 +142,14 @@ jobs:
             chmod 600 .webhook.env.new
             mv .webhook.env.new .webhook.env
 
-            set -a
-            . ./.webhook.env
-            set +a
+            read_webhook_secret() {
+              node -e 'import("dotenv").then(({config})=>process.stdout.write(config({path:".webhook.env",quiet:true}).parsed?.[process.argv[1]]||""))' "$1"
+            }
+            export GH_WEBHOOK_SECRET="$(read_webhook_secret GH_WEBHOOK_SECRET)"
+            export XCODE_CLOUD_WEBHOOK_TOKEN="$(read_webhook_secret XCODE_CLOUD_WEBHOOK_TOKEN)"
+            export MERGE4APPSTORE_BUILD_TOKEN_JAMSONTOAST="$(read_webhook_secret MERGE4APPSTORE_BUILD_TOKEN_JAMSONTOAST)"
+            export MERGE4APPSTORE_BUILD_TOKEN_RUNNINGORDER_IOS="$(read_webhook_secret MERGE4APPSTORE_BUILD_TOKEN_RUNNINGORDER_IOS)"
+            unset -f read_webhook_secret
             export GH_TOKEN="$(node -e "import('dotenv').then(d=>console.log(d.config({path:'.env',quiet:true}).parsed?.GH_TOKEN||''))")"
             shopt -s nullglob
             repository_profiles=(profiles/*.yml profiles/*.yaml)

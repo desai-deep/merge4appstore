@@ -184,3 +184,22 @@ build:
   fs.writeFileSync(path.join(directory, 'two.yaml'), source);
   assert.throws(() => loadProfiles(directory), /Duplicate profile instance duplicate/);
 });
+
+test('loads reserved profile instance names without Object prototype collisions', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'merge4appstore-profiles-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(directory, 'reserved.yml'), `
+version: 1
+instance: __proto__
+repository: { owner: example, name: ios }
+apps:
+  prod: { app_id: "1", bundle_id: com.example, name: Example, workflows: { pr: workflow-1 } }
+build:
+  purposes:
+    pull_request: { workflow: pr }
+`);
+
+  const profiles = loadProfiles(directory);
+  assert.equal(Object.getPrototypeOf(profiles), null);
+  assert.equal(profiles.__proto__.profile.instance, '__proto__');
+});
