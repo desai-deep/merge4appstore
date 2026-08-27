@@ -13,7 +13,7 @@ import { loadRepositoryProfile } from './lib/profile.js';
 import { resolveBuildPurpose } from './lib/profile.js';
 import { AppStoreConnectAPI } from './lib/app-store-connect.js';
 import { GitHubAPI } from './lib/github.js';
-import { prepareBuild } from './lib/build-prepare.js';
+import { inferBuildPurpose, prepareBuild } from './lib/build-prepare.js';
 import {
   jobsForGitHubEvent,
   jobsForXcodeCloudEvent,
@@ -77,7 +77,8 @@ function send(response, statusCode, body) {
 }
 
 async function prepareRequest(entry, payload) {
-  const build = resolveBuildPurpose(entry.profile, payload.purpose);
+  const purpose = inferBuildPurpose(entry.profile, payload);
+  const build = resolveBuildPurpose(entry.profile, purpose);
   const asc = new AppStoreConnectAPI(
     process.env.APP_STORE_CONNECT_API_KEY_ID,
     process.env.APP_STORE_CONNECT_ISSUER_ID,

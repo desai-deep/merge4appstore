@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { compareVersions, nextMinorVersion, prepareBuild, selectMarketingVersion } from '../lib/build-prepare.js';
+import {
+  compareVersions,
+  inferBuildPurpose,
+  nextMinorVersion,
+  prepareBuild,
+  selectMarketingVersion,
+} from '../lib/build-prepare.js';
 
 test('compares two- and three-part marketing versions', () => {
   assert.equal(compareVersions('1.4', '1.4.0'), 0);
@@ -16,6 +22,15 @@ test('production compares with live versions while beta includes active versions
   ] };
   assert.equal(selectMarketingVersion('1.4', versions, 'production'), '1.4');
   assert.equal(selectMarketingVersion('1.4', versions, 'beta'), '1.5');
+});
+
+test('infers build purpose from repository profile branches and pull-request context', () => {
+  const profile = { repository: { beta_branch: 'develop', production_branch: 'main' } };
+  assert.equal(inferBuildPurpose(profile, { pull_request: 42, branch: 'feature' }), 'pull_request');
+  assert.equal(inferBuildPurpose(profile, { branch: 'develop' }), 'beta');
+  assert.equal(inferBuildPurpose(profile, { branch: 'main' }), 'production');
+  assert.equal(inferBuildPurpose(profile, { purpose: 'beta', branch: 'custom' }), 'beta');
+  assert.throws(() => inferBuildPurpose(profile, { branch: 'feature' }), /Cannot infer build purpose/);
 });
 
 test('prepares version and notes without exposing provider credentials to the app repo', async () => {

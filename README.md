@@ -238,9 +238,11 @@ POST /v1/builds/prepare/:instance
 Authorization: Bearer <repository-scoped token>
 ```
 
-The service verifies the repository, purpose, branch or pull request, commit,
-and configured workflow. It returns the centrally selected marketing version,
-app role, and TestFlight notes. The checked-out repository applies those
+The app client sends repository, commit, branch, and pull-request context. The
+service infers the build purpose from the repository profile, verifies that
+context and any optional purpose or workflow supplied by older clients, and
+returns the centrally selected marketing version, app role, and TestFlight
+notes. The checked-out repository applies those
 non-secret values before running its project preparation command. The only
 Xcode Cloud secrets/configuration required for this adapter are:
 
