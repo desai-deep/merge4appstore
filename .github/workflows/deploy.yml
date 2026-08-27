@@ -138,6 +138,7 @@ jobs:
             npm run validate:profiles
 
             umask 077
+            chmod 600 .webhook.env.new
             mv .webhook.env.new .webhook.env
 
             set -a

@@ -79,15 +79,27 @@ function send(response, statusCode, body) {
   response.end(JSON.stringify(body));
 }
 
+export function normalizePreparePayload(payload) {
+  return {
+    ...payload,
+    branch: payload.branch?.replace(/^refs\/heads\//, '') || payload.branch,
+    target_branch: payload.target_branch?.replace(/^refs\/heads\//, '') || payload.target_branch,
+  };
+}
+
 async function prepareRequest(entry, payload) {
   const github = new GitHubAPI(entry.profile.repository.owner, entry.profile.repository.name);
-  let normalizedPayload = payload;
-  if (!payload.pull_request && payload.commit && payload.branch) {
+  let normalizedPayload = normalizePreparePayload(payload);
+  if (!normalizedPayload.pull_request && normalizedPayload.commit && normalizedPayload.branch) {
     const betaBranch = entry.profile.repository.beta_branch || 'develop';
-    const pullRequest = github.findOpenPullRequestForCommit(payload.commit, betaBranch, payload.branch);
+    const pullRequest = github.findOpenPullRequestForCommit(
+      normalizedPayload.commit,
+      betaBranch,
+      normalizedPayload.branch,
+    );
     if (pullRequest) {
       normalizedPayload = {
-        ...payload,
+        ...normalizedPayload,
         purpose: 'pull_request',
         pull_request: pullRequest.number,
         target_branch: pullRequest.baseBranch,

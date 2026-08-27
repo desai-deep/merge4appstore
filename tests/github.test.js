@@ -71,6 +71,18 @@ test('returns all pull-request commit subjects across paginated results', () => 
   assert.deepEqual(github.getPullRequestCommitSubjects(42), ['First', 'Second']);
 });
 
+test('URL-encodes slash-containing branch names when resolving their head', () => {
+  const github = new GitHubAPI('example', 'ios');
+  let endpoint;
+  github.exec = args => {
+    endpoint = args[1];
+    return 'abc123';
+  };
+
+  assert.equal(github.getBranchHead('feature/player'), 'abc123');
+  assert.equal(endpoint, 'repos/example/ios/commits/feature%2Fplayer');
+});
+
 test('recovers an open pull request only for the exact branch head commit', () => {
   const github = new GitHubAPI('example', 'ios');
   github.exec = () => JSON.stringify([

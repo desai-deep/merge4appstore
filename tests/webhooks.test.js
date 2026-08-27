@@ -9,7 +9,7 @@ import {
   jobsForXcodeCloudEvent,
   verifyGitHubSignature,
 } from '../lib/webhooks.js';
-import { createWebhookServer, loadProfiles } from '../webhook-server.js';
+import { createWebhookServer, loadProfiles, normalizePreparePayload } from '../webhook-server.js';
 
 const profile = {
   instance: 'example-ios',
@@ -47,6 +47,18 @@ test('maps beta and production pushes to their managed build purposes', () => {
   assert.equal(jobsForGitHubEvent(profile, 'push', { ref: 'refs/heads/develop', after: 'abc', repository }, 'one')[0].purpose, 'beta');
   assert.equal(jobsForGitHubEvent(profile, 'push', { ref: 'refs/heads/main', after: 'def', repository }, 'two')[0].purpose, 'production');
   assert.deepEqual(jobsForGitHubEvent(profile, 'push', { ref: 'refs/heads/feature', after: 'ghi', repository }, 'three'), []);
+});
+
+test('normalizes full Git refs in build preparation payloads', () => {
+  assert.deepEqual(normalizePreparePayload({
+    branch: 'refs/heads/feature/player',
+    target_branch: 'refs/heads/develop',
+    commit: 'abc123',
+  }), {
+    branch: 'feature/player',
+    target_branch: 'develop',
+    commit: 'abc123',
+  });
 });
 
 test('runs deploy only for a successful completed production workflow', () => {
