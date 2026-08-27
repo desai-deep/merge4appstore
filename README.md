@@ -115,7 +115,7 @@ automation:
 
 build:
   provider: xcode_cloud
-  trigger_mode: managed # default; each purpose may override it
+  trigger_mode: managed # opt in to webhook-managed starts; default is native
   purposes:
     pull_request:
       app: internal

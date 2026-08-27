@@ -173,7 +173,8 @@ jobs:
               beta_branch="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>{const p=loadRepositoryProfile(process.argv[1]);console.log(p.repository.beta_branch||'develop')})" "$profile_file")"
               token_env="$(node -e "Promise.all([import('./lib/profile.js'),import('./lib/webhooks.js')]).then(([{loadRepositoryProfile},{webhookSettings}])=>console.log(webhookSettings(loadRepositoryProfile(process.argv[1])).buildTokenEnv))" "$profile_file")"
               build_token="${!token_env}"
-              commit="$(gh api "repos/$repository/commits/$beta_branch" --jq .sha)"
+              encoded_beta_branch="$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$beta_branch")"
+              commit="$(gh api "repos/$repository/commits/$encoded_beta_branch" --jq .sha)"
               payload="$(REPOSITORY="$repository" COMMIT="$commit" BRANCH="$beta_branch" node -e 'console.log(JSON.stringify({repository:process.env.REPOSITORY,commit:process.env.COMMIT,branch:process.env.BRANCH,target_branch:"",pull_request:null,current_marketing_version:"0.1"}))')"
               prepared="$(curl --fail-with-body --silent --show-error \
                 -H "Authorization: Bearer $build_token" -H 'Content-Type: application/json' \
