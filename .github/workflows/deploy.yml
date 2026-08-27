@@ -152,6 +152,25 @@ jobs:
             fi
             pm2 save
 
+            for attempt in {1..10}; do
+              if curl --fail --silent http://127.0.0.1:8787/health >/dev/null; then break; fi
+              sleep 1
+            done
+            curl --fail --silent http://127.0.0.1:8787/health >/dev/null
+            for profile_file in profiles/*.yml; do
+              instance="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>console.log(loadRepositoryProfile(process.argv[1]).instance))" "$profile_file")"
+              repository="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>{const p=loadRepositoryProfile(process.argv[1]);console.log(p.repository.owner+'/'+p.repository.name)})" "$profile_file")"
+              beta_branch="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>{const p=loadRepositoryProfile(process.argv[1]);console.log(p.repository.beta_branch||'develop')})" "$profile_file")"
+              token_env="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>console.log(loadRepositoryProfile(process.argv[1]).ci.prepare.token_env))" "$profile_file")"
+              build_token="${!token_env}"
+              commit="$(gh api "repos/$repository/commits/$beta_branch" --jq .sha)"
+              payload="$(REPOSITORY="$repository" COMMIT="$commit" BRANCH="$beta_branch" node -e 'console.log(JSON.stringify({repository:process.env.REPOSITORY,purpose:"beta",commit:process.env.COMMIT,branch:process.env.BRANCH,target_branch:"",pull_request:null,current_marketing_version:"0.1"}))')"
+              prepared="$(curl --fail-with-body --silent --show-error \
+                -H "Authorization: Bearer $build_token" -H 'Content-Type: application/json' \
+                --data "$payload" "http://127.0.0.1:8787/v1/builds/prepare/$instance")"
+              PREPARED="$prepared" node -e 'const value=JSON.parse(process.env.PREPARED);console.log(`Prepared endpoint: ${value.role}/${value.purpose} version ${value.marketing_version}`)'
+            done
+
             printf '%s\n' \
               'location /merge4appstore/ {' \
               '    proxy_pass http://127.0.0.1:8787/;' \
