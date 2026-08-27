@@ -165,7 +165,7 @@ jobs:
               token_env="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>console.log(loadRepositoryProfile(process.argv[1]).ci.prepare.token_env))" "$profile_file")"
               build_token="${!token_env}"
               commit="$(gh api "repos/$repository/commits/$beta_branch" --jq .sha)"
-              payload="$(REPOSITORY="$repository" COMMIT="$commit" BRANCH="$beta_branch" node -e 'console.log(JSON.stringify({repository:process.env.REPOSITORY,purpose:"beta",commit:process.env.COMMIT,branch:process.env.BRANCH,target_branch:"",pull_request:null,current_marketing_version:"0.1"}))')"
+              payload="$(REPOSITORY="$repository" COMMIT="$commit" BRANCH="$beta_branch" node -e 'console.log(JSON.stringify({repository:process.env.REPOSITORY,commit:process.env.COMMIT,branch:process.env.BRANCH,target_branch:"",pull_request:null,current_marketing_version:"0.1"}))')"
               prepared="$(curl --fail-with-body --silent --show-error \
                 -H "Authorization: Bearer $build_token" -H 'Content-Type: application/json' \
                 --data "$payload" "http://127.0.0.1:8787/v1/builds/prepare/$instance")"
