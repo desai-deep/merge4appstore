@@ -156,12 +156,15 @@ async function main() {
   try {
     if (mode === 'notes') {
       if (!repositoryProfile) throw new Error('notes mode requires --profile');
+      for (const name of ['BUILD_COMMIT_SHA', 'BUILD_BRANCH']) {
+        if (!process.env[name]) throw new Error(`notes mode requires ${name}`);
+      }
       const purpose = process.env.BUILD_PURPOSE || 'pull_request';
       const build = applyBuildPurposeProfile(repositoryProfile, purpose);
       const { asc, github } = createClients();
       await refreshTestFlightNotes(asc, github, build, {
-        commit: process.env.BUILD_COMMIT_SHA || '',
-        branch: process.env.BUILD_BRANCH || '',
+        commit: process.env.BUILD_COMMIT_SHA,
+        branch: process.env.BUILD_BRANCH,
         pull_request: process.env.BUILD_PULL_REQUEST || null,
       }, DRY_RUN);
     }
@@ -170,6 +173,7 @@ async function main() {
       if (!repositoryProfile) {
         throw new Error('trigger mode requires --profile');
       }
+      if (!process.env.BUILD_PURPOSE) throw new Error('trigger mode requires BUILD_PURPOSE');
       const purpose = process.env.BUILD_PURPOSE;
       const build = applyBuildPurposeProfile(repositoryProfile, purpose);
       log(`trigger: using ${build.provider}/${build.appRole} (${build.appName}, ${build.workflowId})`);

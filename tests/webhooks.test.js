@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import {
   jobsForGitHubEvent,
   jobsForXcodeCloudEvent,
   verifyGitHubSignature,
 } from '../lib/webhooks.js';
-import { createWebhookServer } from '../webhook-server.js';
+import { createWebhookServer, loadProfiles } from '../webhook-server.js';
 
 const profile = {
   instance: 'example-ios',
@@ -78,4 +81,22 @@ test('protects the build preparation endpoint with its repository token', async 
   });
   assert.equal(accepted.status, 200);
   assert.equal((await accepted.json()).marketing_version, '1.5');
+});
+
+test('rejects duplicate profile instances instead of silently replacing one', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'merge4appstore-profiles-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const source = `
+version: 1
+instance: duplicate
+repository: { owner: example, name: ios }
+apps:
+  prod: { app_id: "1", bundle_id: com.example, name: Example, workflows: { pr: workflow-1 } }
+build:
+  purposes:
+    pull_request: { workflow: pr }
+`;
+  fs.writeFileSync(path.join(directory, 'one.yml'), source);
+  fs.writeFileSync(path.join(directory, 'two.yaml'), source);
+  assert.throws(() => loadProfiles(directory), /Duplicate profile instance duplicate/);
 });

@@ -244,8 +244,25 @@ The app client sends repository, commit, branch, and pull-request context. The
 service infers the build purpose from the repository profile, verifies that
 context and any optional purpose or workflow supplied by older clients, and
 returns the centrally selected marketing version, app role, and TestFlight
-notes. The checked-out repository applies those
-non-secret values before running its project preparation command. The only
+notes as a versioned, provider-neutral response:
+
+```json
+{
+  "schema_version": 1,
+  "role": "internal",
+  "purpose": "pull_request",
+  "marketing_version": "1.5",
+  "testflight_notes": "Verify playback controls\n\n• Fix lock-screen state",
+  "warnings": []
+}
+```
+
+The checked-out repository owns adapters that read its current marketing
+version and consume this response. That adapter may update an Xcode project,
+an xcconfig, a Tuist definition, or another project format; merge4appstore does
+not assume a project-generation tool. It should validate `schema_version` and
+`marketing_version` before applying the non-secret values, then run whatever
+project preparation command the app needs. The only
 Xcode Cloud secrets/configuration required for this adapter are:
 
 - `MERGE4APPSTORE_BUILD_TOKEN`: repository-scoped preparation credential;

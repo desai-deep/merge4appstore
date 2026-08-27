@@ -658,12 +658,43 @@ test('finds uploaded commits for one configured workflow', async () => {
       { id: 'build-1', attributes: { version: '1', uploadedDate: '2026-08-27T01:00:00Z' } },
     ] };
   };
-  asc.getBuildSource = async buildId => buildId === 'build-2'
-    ? { found: true, workflowId: 'other', commitSha: 'other-commit' }
-    : { found: true, workflowId: 'workflow-1', commitSha: 'ancestor' };
+  let scopedLoads = 0;
+  asc.loadCIBuildRunsForWorkflow = async workflowId => {
+    scopedLoads += 1;
+    assert.equal(workflowId, 'workflow-1');
+    return [{
+      workflowId,
+      run: {
+        attributes: { number: 1, sourceCommit: { commitSha: 'ancestor' } },
+        relationships: { builds: { data: [{ id: 'build-1' }] } },
+      },
+    }];
+  };
   assert.deepEqual(await asc.getPublishedWorkflowCommits('workflow-1'), [{
     commitSha: 'ancestor', buildId: 'build-1', buildNumber: '1', uploadedDate: '2026-08-27T01:00:00Z',
   }]);
+  assert.equal(scopedLoads, 1);
+});
+
+test('finds builds for a commit without enumerating unrelated workflows', async () => {
+  const asc = createASCWithVersions({ data: [], included: [] });
+  asc.getAppId = async () => 'app-1';
+  asc.request = async () => ({ data: [
+    { id: 'build-1', attributes: { version: '1' } },
+    { id: 'build-2', attributes: { version: '2' } },
+  ] });
+  asc.loadCIBuildRuns = async () => { throw new Error('global workflow scan should not run'); };
+  asc.loadCIBuildRunsForWorkflow = async workflowId => [{
+    workflowId,
+    run: {
+      attributes: { sourceCommit: { commitSha: 'head' } },
+      relationships: { builds: { data: [{ id: 'build-2' }] } },
+    },
+  }];
+
+  assert.deepEqual(await asc.getBuildsForWorkflowCommit('workflow-1', 'head'), [
+    { buildId: 'build-2', buildNumber: '2' },
+  ]);
 });
 
 test('updates or creates English TestFlight build notes', async () => {

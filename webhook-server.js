@@ -25,14 +25,17 @@ import {
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: process.env.MERGE4APPSTORE_ENV || path.join(ROOT, '.env') });
 
-function loadProfiles(directory) {
-  return Object.fromEntries(fs.readdirSync(directory)
-    .filter(name => name.endsWith('.yml') || name.endsWith('.yaml'))
-    .map(name => {
-      const profilePath = path.join(directory, name);
-      const profile = loadRepositoryProfile(profilePath);
-      return [profile.instance, { profile, profilePath }];
-    }));
+export function loadProfiles(directory) {
+  const profiles = {};
+  for (const name of fs.readdirSync(directory).filter(name => name.endsWith('.yml') || name.endsWith('.yaml'))) {
+    const profilePath = path.join(directory, name);
+    const profile = loadRepositoryProfile(profilePath);
+    if (profiles[profile.instance]) {
+      throw new Error(`Duplicate profile instance ${profile.instance}: ${profiles[profile.instance].profilePath} and ${profilePath}`);
+    }
+    profiles[profile.instance] = { profile, profilePath };
+  }
+  return profiles;
 }
 
 function readBody(request, limit = 1024 * 1024) {

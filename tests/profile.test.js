@@ -176,6 +176,15 @@ test('rejects unsupported profile versions', () => {
   assert.throws(() => validateRepositoryProfile(profile), /version must be 1/);
 });
 
+test('rejects webhook keys unsupported by their provider', () => {
+  const profile = profileFixture();
+  profile.webhooks = { github: { token_env: 'WRONG' } };
+  assert.throws(() => validateRepositoryProfile(profile), /webhooks.github.token_env is not supported/);
+
+  profile.webhooks = { xcode_cloud: { secret_env: 'WRONG' } };
+  assert.throws(() => validateRepositoryProfile(profile), /webhooks.xcode_cloud.secret_env is not supported/);
+});
+
 test('applies repository and selected automation values to an environment', () => {
   const profile = validateRepositoryProfile(profileFixture());
   const environment = {};

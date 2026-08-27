@@ -50,6 +50,7 @@ test('prepares version and notes without exposing provider credentials to the ap
     getPullRequestCommitSubjects: () => [],
   };
   assert.deepEqual(await prepareBuild({ profile, build, payload, asc, github }), {
+    schema_version: 1,
     role: 'uat',
     purpose: 'pull_request',
     marketing_version: '1.4',

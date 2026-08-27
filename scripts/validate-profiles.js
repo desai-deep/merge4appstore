@@ -9,7 +9,7 @@ import { loadRepositoryProfile, resolveAutomation, resolveBuildPurpose } from '.
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const profilesDir = path.join(rootDir, 'profiles');
 const profileFiles = fs.readdirSync(profilesDir)
-  .filter(file => file.endsWith('.yml'))
+  .filter(file => file.endsWith('.yml') || file.endsWith('.yaml'))
   .sort();
 
 if (profileFiles.length === 0) {
