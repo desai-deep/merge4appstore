@@ -145,7 +145,7 @@ jobs:
             set +a
             export GH_TOKEN="$(node -e "import('dotenv').then(d=>console.log(d.config({path:'.env',quiet:true}).parsed?.GH_TOKEN||''))")"
 
-            export WEBHOOK_HOST=127.0.0.1 WEBHOOK_PORT=8787
+            export WEBHOOK_AUTOSTART=true WEBHOOK_HOST=127.0.0.1 WEBHOOK_PORT=8787
             if pm2 describe merge4appstore-webhooks >/dev/null 2>&1; then
               pm2 restart merge4appstore-webhooks --update-env
             else

@@ -158,7 +158,9 @@ export function createWebhookServer({ profiles, dispatch = runJob, prepare = pre
   });
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+const invokedDirectly = process.argv[1]
+  && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+if (process.env.WEBHOOK_AUTOSTART === 'true' || invokedDirectly) {
   const directory = path.resolve(process.env.MERGE4APPSTORE_PROFILES_DIR || path.join(ROOT, 'profiles'));
   const profiles = loadProfiles(directory);
   const port = Number(process.env.WEBHOOK_PORT || 8787);
