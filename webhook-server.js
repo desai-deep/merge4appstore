@@ -91,6 +91,10 @@ export function singleHeader(value) {
   return typeof value === 'string' ? value : '';
 }
 
+export function webhookDeliveryKey(provider, instance, delivery) {
+  return `${provider}:${instance}:${delivery}`;
+}
+
 export function normalizePreparePayload(payload) {
   return {
     ...payload,
@@ -181,7 +185,7 @@ export function createWebhookServer({ profiles, dispatch = runJob, prepare = pre
         const event = singleHeader(request.headers['x-github-event']);
         const delivery = singleHeader(request.headers['x-github-delivery']);
         if (!delivery) return send(response, 400, { error: 'Missing delivery id' });
-        deliveryKey = `github:${delivery}`;
+        deliveryKey = webhookDeliveryKey('github', instance, delivery);
         jobs = jobsForGitHubEvent(entry.profile, event, payload, delivery);
       } else if (xcodeMatch) {
         let suppliedToken;
@@ -191,7 +195,7 @@ export function createWebhookServer({ profiles, dispatch = runJob, prepare = pre
           return send(response, 401, { error: 'Invalid token' });
         }
         const fingerprint = crypto.createHash('sha256').update(rawBody).digest('hex');
-        deliveryKey = `xcode:${fingerprint}`;
+        deliveryKey = webhookDeliveryKey('xcode', instance, fingerprint);
         jobs = jobsForXcodeCloudEvent(entry.profile, payload);
       } else return send(response, 404, { error: 'Not found' });
 

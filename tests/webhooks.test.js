@@ -12,7 +12,14 @@ import {
   verifyGitHubSignature,
   webhookSettings,
 } from '../lib/webhooks.js';
-import { createWebhookServer, loadProfiles, normalizePreparePayload, runJob, singleHeader } from '../webhook-server.js';
+import {
+  createWebhookServer,
+  loadProfiles,
+  normalizePreparePayload,
+  runJob,
+  singleHeader,
+  webhookDeliveryKey,
+} from '../webhook-server.js';
 
 const profile = {
   instance: 'example-ios',
@@ -33,6 +40,17 @@ test('accepts only one security-sensitive HTTP header value', () => {
   assert.equal(singleHeader('one'), 'one');
   assert.equal(singleHeader(['one', 'two']), '');
   assert.equal(singleHeader(undefined), '');
+});
+
+test('namespaces webhook delivery deduplication by profile instance', () => {
+  assert.notEqual(
+    webhookDeliveryKey('xcode', 'one', 'same-payload'),
+    webhookDeliveryKey('xcode', 'two', 'same-payload'),
+  );
+  assert.notEqual(
+    webhookDeliveryKey('github', 'one', 'same-delivery'),
+    webhookDeliveryKey('github', 'two', 'same-delivery'),
+  );
 });
 
 test('defaults to deployed shared webhook secrets and a repository-scoped build token', () => {
