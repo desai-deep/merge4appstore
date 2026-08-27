@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   compareVersions,
+  formatTestFlightNotes,
   inferBuildPurpose,
   nextMinorVersion,
   prepareBuild,
@@ -31,6 +32,23 @@ test('infers build purpose from repository profile branches and pull-request con
   assert.equal(inferBuildPurpose(profile, { branch: 'main' }), 'production');
   assert.equal(inferBuildPurpose(profile, { purpose: 'beta', branch: 'custom' }), 'beta');
   assert.throws(() => inferBuildPurpose(profile, { branch: 'feature' }), /Cannot infer build purpose/);
+});
+
+test('rejects an unsupported client-supplied build purpose as a bad request', () => {
+  const profile = { repository: { beta_branch: 'develop', production_branch: 'main' } };
+  assert.throws(
+    () => inferBuildPurpose(profile, { purpose: 'nightly' }),
+    error => error.statusCode === 400 && /Unsupported build purpose/.test(error.message),
+  );
+});
+
+test('sizes truncated TestFlight notes using the commits remaining after each candidate', () => {
+  const subjects = Array.from({ length: 11 }, (_, index) => `Commit ${index + 1}`);
+  const twoLinesAndSuffix = '• Commit 1\n• Commit 2\n• … 9 more commits';
+  const result = formatTestFlightNotes(subjects, twoLinesAndSuffix.length);
+
+  assert.equal(result.text, twoLinesAndSuffix);
+  assert.equal(result.omitted, 9);
 });
 
 test('prepares version and notes without exposing provider credentials to the app repo', async () => {
