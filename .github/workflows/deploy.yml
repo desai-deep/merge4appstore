@@ -136,9 +136,9 @@ jobs:
             mv .webhook.env.new .webhook.env
 
             set -a
-            . ./.env
             . ./.webhook.env
             set +a
+            export GH_TOKEN="$(node -e "import('dotenv').then(d=>console.log(d.config({path:'.env',quiet:true}).parsed?.GH_TOKEN||''))")"
 
             export WEBHOOK_HOST=127.0.0.1 WEBHOOK_PORT=8787
             if pm2 describe merge4appstore-webhooks >/dev/null 2>&1; then
