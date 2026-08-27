@@ -71,6 +71,22 @@ test('returns all pull-request commit subjects across paginated results', () => 
   assert.deepEqual(github.getPullRequestCommitSubjects(42), ['First', 'Second']);
 });
 
+test('recovers an open pull request only for the exact branch head commit', () => {
+  const github = new GitHubAPI('example', 'ios');
+  github.exec = () => JSON.stringify([
+    { number: 49, headRefOid: 'abc123', headRefName: 'feature/player', baseRefName: 'develop' },
+  ]);
+
+  assert.deepEqual(
+    github.findOpenPullRequestForCommit('abc123', 'develop', 'feature/player'),
+    { number: '49', headBranch: 'feature/player', baseBranch: 'develop' },
+  );
+  assert.equal(
+    github.findOpenPullRequestForCommit('newer456', 'develop', 'feature/player'),
+    null,
+  );
+});
+
 test('finds one closed PR for the exact source and destination branches', () => {
   const github = new GitHubAPI('desai-deep', 'JamsOnToast');
   github.exec = () => JSON.stringify([

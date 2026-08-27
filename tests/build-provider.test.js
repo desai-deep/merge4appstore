@@ -32,6 +32,7 @@ test('starts an Xcode Cloud build for a provider-neutral intent', async () => {
   assert.deepEqual(result, {
     action: 'started',
     provider: 'xcode_cloud',
+    source: 'branch',
     runId: 'run-1',
     number: 150,
     executionProgress: 'PENDING',
@@ -109,6 +110,7 @@ test('starts a pull request workflow through the Apple SCM pull request', async 
       assert.equal(number, '49');
       return { id: 'apple-pr-49', number: '49' };
     },
+    getWorkflowBranchReference: async () => ({ id: 'branch-ref' }),
     startWorkflowBuild: async (workflowId, sourceReferenceId, options) => {
       started = { workflowId, sourceReferenceId, options };
       return { runId: 'run-pr', number: 151, executionProgress: 'PENDING' };
@@ -124,12 +126,42 @@ test('starts a pull request workflow through the Apple SCM pull request', async 
   });
   assert.equal(result.action, 'started');
   assert.equal(result.runId, 'run-pr');
+  assert.equal(result.source, 'pull_request');
+});
+
+test('falls back to the source branch when Apple rejects a manual pull-request build', async () => {
+  const starts = [];
+  const provider = new XcodeCloudBuildProvider({
+    getWorkflowRunStatus: async () => ({ found: false }),
+    getWorkflowPullRequest: async () => ({ id: 'apple-pr-49', number: '49' }),
+    getWorkflowBranchReference: async () => ({ id: 'branch-ref' }),
+    startWorkflowBuild: async (workflowId, sourceReferenceId, options) => {
+      starts.push({ workflowId, sourceReferenceId, options });
+      if (options?.pullRequestId) {
+        const error = new Error('Manual pull request is not associated with this workflow');
+        error.statusCode = 409;
+        throw error;
+      }
+      return { runId: 'run-fallback', number: 152, executionProgress: 'PENDING' };
+    },
+  });
+
+  const result = await provider.trigger({ ...intent(), pullRequest: '49' });
+
+  assert.deepEqual(starts, [
+    { workflowId: 'workflow-pr', sourceReferenceId: null, options: { pullRequestId: 'apple-pr-49' } },
+    { workflowId: 'workflow-pr', sourceReferenceId: 'branch-ref', options: undefined },
+  ]);
+  assert.equal(result.action, 'started');
+  assert.equal(result.source, 'branch_fallback');
+  assert.equal(result.runId, 'run-fallback');
 });
 
 test('reports a transient error when Apple has not mirrored the pull request', async () => {
   const provider = new XcodeCloudBuildProvider({
     getWorkflowRunStatus: async () => ({ found: false }),
     getWorkflowPullRequest: async () => null,
+    getWorkflowBranchReference: async () => ({ id: 'branch-ref' }),
   });
 
   await assert.rejects(

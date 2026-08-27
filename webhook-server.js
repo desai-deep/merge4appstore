@@ -80,15 +80,28 @@ function send(response, statusCode, body) {
 }
 
 async function prepareRequest(entry, payload) {
-  const purpose = inferBuildPurpose(entry.profile, payload);
+  const github = new GitHubAPI(entry.profile.repository.owner, entry.profile.repository.name);
+  let normalizedPayload = payload;
+  if (!payload.pull_request && payload.commit && payload.branch) {
+    const betaBranch = entry.profile.repository.beta_branch || 'develop';
+    const pullRequest = github.findOpenPullRequestForCommit(payload.commit, betaBranch, payload.branch);
+    if (pullRequest) {
+      normalizedPayload = {
+        ...payload,
+        purpose: 'pull_request',
+        pull_request: pullRequest.number,
+        target_branch: pullRequest.baseBranch,
+      };
+    }
+  }
+  const purpose = inferBuildPurpose(entry.profile, normalizedPayload);
   const build = resolveBuildPurpose(entry.profile, purpose);
   const asc = new AppStoreConnectAPI(
     process.env.APP_STORE_CONNECT_API_KEY_ID,
     process.env.APP_STORE_CONNECT_ISSUER_ID,
     process.env.APP_STORE_CONNECT_API_KEY_CONTENT,
   );
-  const github = new GitHubAPI(entry.profile.repository.owner, entry.profile.repository.name);
-  return prepareBuild({ profile: entry.profile, build, payload, asc, github });
+  return prepareBuild({ profile: entry.profile, build, payload: normalizedPayload, asc, github });
 }
 
 export function createWebhookServer({ profiles, dispatch = runJob, prepare = prepareRequest }) {
