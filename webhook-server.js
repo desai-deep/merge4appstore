@@ -87,6 +87,10 @@ function send(response, statusCode, body) {
   response.end(JSON.stringify(body));
 }
 
+export function singleHeader(value) {
+  return typeof value === 'string' ? value : '';
+}
+
 export function normalizePreparePayload(payload) {
   return {
     ...payload,
@@ -162,7 +166,7 @@ export function createWebhookServer({ profiles, dispatch = runJob, prepare = pre
       let jobs;
       let deliveryKey;
       if (prepareMatch) {
-        const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, '') || '';
+        const bearer = singleHeader(request.headers.authorization).replace(/^Bearer\s+/i, '');
         if (!settings.buildToken || !safeEqual(bearer, settings.buildToken)) {
           return send(response, 401, { error: 'Invalid build token' });
         }
@@ -170,11 +174,12 @@ export function createWebhookServer({ profiles, dispatch = runJob, prepare = pre
         return send(response, 200, prepared);
       } else if (githubMatch) {
         if (!settings.githubSecret) return send(response, 503, { error: 'GitHub webhook secret is not configured' });
-        if (!verifyGitHubSignature(rawBody, request.headers['x-hub-signature-256'], settings.githubSecret)) {
+        const signature = singleHeader(request.headers['x-hub-signature-256']);
+        if (!verifyGitHubSignature(rawBody, signature, settings.githubSecret)) {
           return send(response, 401, { error: 'Invalid signature' });
         }
-        const event = request.headers['x-github-event'];
-        const delivery = request.headers['x-github-delivery'];
+        const event = singleHeader(request.headers['x-github-event']);
+        const delivery = singleHeader(request.headers['x-github-delivery']);
         if (!delivery) return send(response, 400, { error: 'Missing delivery id' });
         deliveryKey = `github:${delivery}`;
         jobs = jobsForGitHubEvent(entry.profile, event, payload, delivery);

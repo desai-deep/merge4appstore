@@ -12,7 +12,7 @@ import {
   verifyGitHubSignature,
   webhookSettings,
 } from '../lib/webhooks.js';
-import { createWebhookServer, loadProfiles, normalizePreparePayload, runJob } from '../webhook-server.js';
+import { createWebhookServer, loadProfiles, normalizePreparePayload, runJob, singleHeader } from '../webhook-server.js';
 
 const profile = {
   instance: 'example-ios',
@@ -26,6 +26,13 @@ test('validates GitHub HMAC signatures against the raw body', () => {
   const signature = `sha256=${crypto.createHmac('sha256', 'secret').update(body).digest('hex')}`;
   assert.equal(verifyGitHubSignature(body, signature, 'secret'), true);
   assert.equal(verifyGitHubSignature(body, signature, 'wrong'), false);
+  assert.equal(verifyGitHubSignature(body, [signature, signature], 'secret'), false);
+});
+
+test('accepts only one security-sensitive HTTP header value', () => {
+  assert.equal(singleHeader('one'), 'one');
+  assert.equal(singleHeader(['one', 'two']), '');
+  assert.equal(singleHeader(undefined), '');
 });
 
 test('defaults to deployed shared webhook secrets and a repository-scoped build token', () => {
