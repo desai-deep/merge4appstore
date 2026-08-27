@@ -86,6 +86,7 @@ jobs:
             fi
             ss -lnt 2>/dev/null | sed -n '1,30p' || true
             pm2 jlist 2>/dev/null | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{for(const p of JSON.parse(s||"[]")) console.log(`pm2=${p.name}:${p.pm2_env?.status}:${p.pm2_env?.pm_cwd}`)})' || true
+            pm2 logs merge4appstore-webhooks --lines 50 --nostream 2>/dev/null || true
           ENDSSH
 
       - name: Deploy to VPS
