@@ -82,6 +82,23 @@ export function runJob(entry, job, spawnProcess = spawn) {
   });
 }
 
+export function createSerialDispatcher(dispatch = runJob) {
+  const queues = new Map();
+
+  return (entry, job) => {
+    const key = entry.profile.instance;
+    const previous = queues.get(key) || Promise.resolve();
+    const current = previous
+      .catch(() => {})
+      .then(() => dispatch(entry, job));
+    const tracked = current.finally(() => {
+      if (queues.get(key) === tracked) queues.delete(key);
+    });
+    queues.set(key, tracked);
+    return tracked;
+  };
+}
+
 function send(response, statusCode, body) {
   response.writeHead(statusCode, { 'content-type': 'application/json' });
   response.end(JSON.stringify(body));
@@ -133,6 +150,7 @@ async function prepareRequest(entry, payload) {
 }
 
 export function createWebhookServer({ profiles, dispatch = runJob, prepare = prepareRequest }) {
+  const enqueue = createSerialDispatcher(dispatch);
   const seen = new Map();
   const remember = key => {
     const now = Date.now();
@@ -201,7 +219,7 @@ export function createWebhookServer({ profiles, dispatch = runJob, prepare = pre
 
       if (!remember(deliveryKey)) return send(response, 200, { accepted: true, duplicate: true });
       send(response, 202, { accepted: true, jobs: jobs.map(job => `${job.mode}${job.purpose ? `:${job.purpose}` : ''}`) });
-      for (const job of jobs) await dispatch(entry, job);
+      for (const job of jobs) await enqueue(entry, job);
     } catch (error) {
       if (!response.headersSent) send(response, error.statusCode || 500, { error: error.message });
       console.error(error);
