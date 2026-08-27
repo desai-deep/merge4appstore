@@ -148,15 +148,14 @@ jobs:
             fi
             pm2 save
 
-            cat > /etc/nginx/snippets/merge4appstore-webhooks.conf <<'NGINX'
-            location /merge4appstore/ {
-                proxy_pass http://127.0.0.1:8787/;
-                proxy_http_version 1.1;
-                proxy_set_header Host $host;
-                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                proxy_set_header X-Forwarded-Proto $scheme;
-            }
-            NGINX
+            printf '%s\n' \
+              'location /merge4appstore/ {' \
+              '    proxy_pass http://127.0.0.1:8787/;' \
+              '    proxy_http_version 1.1;' \
+              '    proxy_set_header Host $host;' \
+              '    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;' \
+              '    proxy_set_header X-Forwarded-Proto $scheme;' \
+              '}' > /etc/nginx/snippets/merge4appstore-webhooks.conf
 
             nginx_config="$(grep -Rls 'server_name api\.runningorder\.app' /etc/nginx/sites-enabled /etc/nginx/conf.d | head -1)"
             if [ -z "$nginx_config" ]; then
