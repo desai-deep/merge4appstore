@@ -35,16 +35,39 @@ test('infers build purpose from repository profile branches and pull-request con
 
 test('prepares version and notes without exposing provider credentials to the app repo', async () => {
   const profile = { repository: { owner: 'example', name: 'ios', beta_branch: 'develop' } };
-  const build = { purpose: 'pull_request', appRole: 'uat', appId: '1', workflowId: 'wf-pr' };
+  const build = { purpose: 'pull_request', appRole: 'uat', appId: '1', workflowId: 'wf-pr', includeCommits: true };
   const payload = { repository: 'example/ios', workflow_id: 'wf-pr', commit: 'abc', branch: 'feature', target_branch: 'develop', pull_request: 42, current_marketing_version: '1.4' };
-  const asc = { appId: null, getAppStoreVersions: async () => ({ data: [] }) };
+  const asc = {
+    appId: null,
+    getAppStoreVersions: async () => ({ data: [] }),
+    getPublishedWorkflowCommits: async () => [{ commitSha: 'previous' }],
+  };
   const github = {
     getCommitSubject: () => 'Fallback subject',
-    getPRDetails: () => ({ title: 'Freshen controls' }),
+    getPRDetails: () => ({ title: 'Freshen controls', body: 'Please verify playback and lock-screen controls.' }),
     findPullRequestTitleForCommit: () => null,
+    getCommitSubjectsSince: () => ({ baseCommit: 'previous', subjects: ['Add playback state', 'Fix lock screen'] }),
+    getPullRequestCommitSubjects: () => [],
   };
   assert.deepEqual(await prepareBuild({ profile, build, payload, asc, github }), {
-    role: 'uat', purpose: 'pull_request', marketing_version: '1.4', testflight_notes: 'Freshen controls', warnings: [],
+    role: 'uat',
+    purpose: 'pull_request',
+    marketing_version: '1.4',
+    testflight_notes: 'Please verify playback and lock-screen controls.\n\nCommits since the last published build:\n\n• Add playback state\n• Fix lock screen',
+    warnings: [],
   });
   assert.equal(asc.appId, '1');
+});
+
+test('beta notes default to a summary without listing commits', async () => {
+  const profile = { repository: { owner: 'example', name: 'ios', beta_branch: 'develop' } };
+  const build = { purpose: 'beta', appRole: 'prod', appId: '1', workflowId: 'wf-beta', includeCommits: false };
+  const payload = { repository: 'example/ios', commit: 'abc', branch: 'develop', current_marketing_version: '1.4' };
+  const asc = { appId: null, getAppStoreVersions: async () => ({ data: [] }) };
+  const github = {
+    getCommitSubject: () => 'Merge feature',
+    findPullRequestTitleForCommit: () => 'Improve playback',
+  };
+  const result = await prepareBuild({ profile, build, payload, asc, github });
+  assert.equal(result.testflight_notes, 'Improve playback');
 });

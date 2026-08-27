@@ -647,3 +647,50 @@ test('does not use an ambiguous Xcode Cloud build-number fallback', async () => 
 
   assert.deepEqual(await asc.getBuildSource('build-101', '101'), { found: false });
 });
+
+test('finds uploaded commits for one configured workflow', async () => {
+  const asc = createASCWithVersions({ data: [], included: [] });
+  asc.getAppId = async () => 'app-1';
+  asc.request = async endpoint => {
+    assert.match(endpoint, /filter\[app\]=app-1/);
+    return { data: [
+      { id: 'build-2', attributes: { version: '2', uploadedDate: '2026-08-27T02:00:00Z' } },
+      { id: 'build-1', attributes: { version: '1', uploadedDate: '2026-08-27T01:00:00Z' } },
+    ] };
+  };
+  asc.getBuildSource = async buildId => buildId === 'build-2'
+    ? { found: true, workflowId: 'other', commitSha: 'other-commit' }
+    : { found: true, workflowId: 'workflow-1', commitSha: 'ancestor' };
+  assert.deepEqual(await asc.getPublishedWorkflowCommits('workflow-1'), [{
+    commitSha: 'ancestor', buildId: 'build-1', buildNumber: '1', uploadedDate: '2026-08-27T01:00:00Z',
+  }]);
+});
+
+test('updates or creates English TestFlight build notes', async () => {
+  const asc = createASCWithVersions({ data: [], included: [] });
+  const requests = [];
+  asc.request = async (endpoint, options = {}) => {
+    requests.push({ endpoint, options });
+    if (endpoint === '/builds/build-1/betaBuildLocalizations') {
+      return { data: [{ id: 'localization-1', attributes: { locale: 'en-US' } }] };
+    }
+    return { data: { id: 'localization-new' } };
+  };
+  assert.deepEqual(await asc.updateBetaBuildNotes('build-1', 'New notes'), {
+    created: false, localizationId: 'localization-1',
+  });
+  assert.equal(requests[1].endpoint, '/betaBuildLocalizations/localization-1');
+  assert.equal(JSON.parse(requests[1].options.body).data.attributes.whatsNew, 'New notes');
+
+  requests.length = 0;
+  asc.request = async (endpoint, options = {}) => {
+    requests.push({ endpoint, options });
+    if (endpoint.includes('betaBuildLocalizations') && !options.method) return { data: [] };
+    return { data: { id: 'localization-new' } };
+  };
+  assert.deepEqual(await asc.updateBetaBuildNotes('build-2', 'First notes'), {
+    created: true, localizationId: 'localization-new',
+  });
+  assert.equal(requests[1].endpoint, '/betaBuildLocalizations');
+  assert.equal(JSON.parse(requests[1].options.body).data.relationships.build.data.id, 'build-2');
+});

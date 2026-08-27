@@ -98,7 +98,22 @@ test('resolves provider-neutral build purposes to app workflows', () => {
     appIdentifier: 'com.example.app.uat',
     appName: 'Example UAT',
     workflowId: 'uat-pr-workflow',
+    includeCommits: true,
   });
+  assert.equal(resolveBuildPurpose(profile, 'beta').includeCommits, false);
+  assert.equal(resolveBuildPurpose(profile, 'production').includeCommits, false);
+});
+
+test('allows commit-list defaults to be overridden per build purpose', () => {
+  const profile = profileFixture();
+  profile.build.purposes.pull_request.include_commits = false;
+  profile.build.purposes.beta.include_commits = true;
+  const validated = validateRepositoryProfile(profile);
+  assert.equal(resolveBuildPurpose(validated, 'pull_request').includeCommits, false);
+  assert.equal(resolveBuildPurpose(validated, 'beta').includeCommits, true);
+
+  profile.build.purposes.beta.include_commits = 'yes';
+  assert.throws(() => validateRepositoryProfile(profile), /include_commits must be a boolean/);
 });
 
 test('allows each build purpose to override the default trigger mode', () => {

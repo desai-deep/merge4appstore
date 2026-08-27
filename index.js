@@ -13,6 +13,7 @@
  *   node index.js sync               # Run only release sync
  *   node index.js expire             # Expire builds from closed PRs targeting BETA_BRANCH
  *   node index.js trigger            # Trigger a configured build purpose
+ *   node index.js notes              # Refresh TestFlight notes after a PR body edit
  *   node index.js --config profiles/my-app.env
  *   node index.js --profile profiles/my-repository.yml
  *   DRY_RUN=true node index.js       # Dry run mode
@@ -91,6 +92,7 @@ import { runReleaseSync } from './lib/sync.js';
 import { runClosedPRBuildExpiry } from './lib/expire.js';
 import { XcodeCloudBuildProvider } from './lib/build-provider.js';
 import { buildIntentFromEnvironment, runManagedBuildTrigger, waitForBuildCompletion } from './lib/trigger.js';
+import { refreshTestFlightNotes } from './lib/refresh-notes.js';
 
 async function main() {
   const DRY_RUN = process.env.DRY_RUN === 'true';
@@ -152,6 +154,18 @@ async function main() {
   };
 
   try {
+    if (mode === 'notes') {
+      if (!repositoryProfile) throw new Error('notes mode requires --profile');
+      const purpose = process.env.BUILD_PURPOSE || 'pull_request';
+      const build = applyBuildPurposeProfile(repositoryProfile, purpose);
+      const { asc, github } = createClients();
+      await refreshTestFlightNotes(asc, github, build, {
+        commit: process.env.BUILD_COMMIT_SHA || '',
+        branch: process.env.BUILD_BRANCH || '',
+        pull_request: process.env.BUILD_PULL_REQUEST || null,
+      }, DRY_RUN);
+    }
+
     if (mode === 'trigger') {
       if (!repositoryProfile) {
         throw new Error('trigger mode requires --profile');

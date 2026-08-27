@@ -34,8 +34,10 @@ build:
   purposes:
     pull_request:
       workflow: pull_requests
+      include_commits: true
     beta:
       workflow: beta
+      include_commits: false
     production:
       workflow: production
 

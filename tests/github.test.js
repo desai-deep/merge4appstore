@@ -46,6 +46,31 @@ Bug fixes and review handling improvements
   );
 });
 
+test('selects the newest published ancestor and returns every comparison commit', () => {
+  const github = new GitHubAPI('example', 'ios');
+  github.exec = args => {
+    const endpoint = args.at(-1);
+    if (endpoint.includes('newest...head')) return JSON.stringify([{ status: 'diverged', commits: [] }]);
+    return JSON.stringify([{ status: 'ahead', commits: [
+      { commit: { message: 'First change\n\nDetails' } },
+      { commit: { message: 'Second change' } },
+    ] }]);
+  };
+  assert.deepEqual(github.getCommitSubjectsSince(['newest', 'ancestor'], 'head'), {
+    baseCommit: 'ancestor',
+    subjects: ['First change', 'Second change'],
+  });
+});
+
+test('returns all pull-request commit subjects across paginated results', () => {
+  const github = new GitHubAPI('example', 'ios');
+  github.exec = () => JSON.stringify([
+    [{ commit: { message: 'First' } }],
+    [{ commit: { message: 'Second\nBody' } }],
+  ]);
+  assert.deepEqual(github.getPullRequestCommitSubjects(42), ['First', 'Second']);
+});
+
 test('finds one closed PR for the exact source and destination branches', () => {
   const github = new GitHubAPI('desai-deep', 'JamsOnToast');
   github.exec = () => JSON.stringify([

@@ -121,8 +121,10 @@ build:
       app: internal
       workflow: pull_requests
       trigger_mode: managed # requires Xcode Cloud's Manual Start PR option
+      include_commits: true  # default for pull-request builds
     beta:
       workflow: beta
+      include_commits: false # default for beta and production builds
     production:
       workflow: production
 ```
@@ -256,6 +258,15 @@ ci:
   prepare:
     token_env: MERGE4APPSTORE_BUILD_TOKEN_MY_REPOSITORY
 ```
+
+For pull-request builds, TestFlight notes contain the current PR body followed
+by every commit since the newest uploaded build from the same workflow whose
+commit is an ancestor of the current head. The first build of a PR falls back
+to all commits in that PR. `build.purposes.<purpose>.include_commits` overrides
+the default: `true` for `pull_request`, `false` for `beta` and `production`.
+When a PR body is edited, the signed GitHub webhook refreshes the English
+TestFlight localization for every active uploaded build of that PR commit; no
+rebuild is required.
 
 ## Automatic VPS Deploy
 

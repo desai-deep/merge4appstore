@@ -29,6 +29,14 @@ test('maps pull request lifecycle events to trigger and expiry jobs', () => {
     mode: 'trigger', purpose: 'pull_request', commitSha: 'abc123', branch: 'feature', pullRequest: '42', deliveryId: 'one',
   }]);
   assert.deepEqual(jobsForGitHubEvent(profile, 'pull_request', { action: 'closed', pull_request, repository }, 'two'), [{ mode: 'expire', deliveryId: 'two' }]);
+  assert.deepEqual(jobsForGitHubEvent(profile, 'pull_request', {
+    action: 'edited', pull_request, repository, changes: { body: { from: 'Old notes' } },
+  }, 'three'), [{
+    mode: 'notes', purpose: 'pull_request', commitSha: 'abc123', branch: 'feature', pullRequest: '42', deliveryId: 'three',
+  }]);
+  assert.deepEqual(jobsForGitHubEvent(profile, 'pull_request', {
+    action: 'edited', pull_request, repository, changes: { title: { from: 'Old title' } },
+  }, 'four'), []);
 });
 
 test('maps beta and production pushes to their managed build purposes', () => {

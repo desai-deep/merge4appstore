@@ -13,6 +13,8 @@
     "sync:dry": "DRY_RUN=true node index.js sync",
     "expire": "node index.js expire",
     "expire:dry": "DRY_RUN=true node index.js expire",
+    "notes": "node index.js notes",
+    "notes:dry": "DRY_RUN=true node index.js notes",
     "trigger": "node index.js trigger",
     "trigger:dry": "DRY_RUN=true node index.js trigger",
     "webhooks": "node webhook-server.js",

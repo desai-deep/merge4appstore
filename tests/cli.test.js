@@ -41,6 +41,10 @@ test('accepts the managed build trigger mode', () => {
   assert.equal(parseCliArgs(['trigger'], '/srv/merge4appstore', {}).mode, 'trigger');
 });
 
+test('accepts the TestFlight notes refresh mode', () => {
+  assert.equal(parseCliArgs(['notes'], '/srv/merge4appstore', {}).mode, 'notes');
+});
+
 test('supports an environment-selected config', () => {
   assert.equal(
     parseCliArgs([], '/srv/merge4appstore', { MERGE4APPSTORE_ENV: '/etc/jams.env' }).configPath,

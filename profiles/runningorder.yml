@@ -40,9 +40,11 @@ build:
     pull_request:
       app: uat
       workflow: pull_requests
+      include_commits: true
     beta:
       app: prod
       workflow: beta
+      include_commits: false
     production:
       app: prod
       workflow: production
