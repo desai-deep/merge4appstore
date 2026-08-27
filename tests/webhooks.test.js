@@ -6,6 +6,7 @@ import {
   jobsForXcodeCloudEvent,
   verifyGitHubSignature,
 } from '../lib/webhooks.js';
+import { createWebhookServer } from '../webhook-server.js';
 
 const profile = {
   instance: 'example-ios',
@@ -46,4 +47,27 @@ test('runs deploy only for a successful completed production workflow', () => {
   assert.deepEqual(jobsForXcodeCloudEvent(profile, payload), [{ mode: 'deploy', deliveryId: 'build-1' }]);
   payload.ciWorkflow.id = 'wf-pr';
   assert.deepEqual(jobsForXcodeCloudEvent(profile, payload), []);
+});
+
+test('protects the build preparation endpoint with its repository token', async t => {
+  const environmentName = 'MERGE4APPSTORE_BUILD_TOKEN_EXAMPLE_IOS';
+  process.env[environmentName] = 'build-secret';
+  t.after(() => delete process.env[environmentName]);
+  const server = createWebhookServer({
+    profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
+    prepare: async (_entry, payload) => ({ purpose: payload.purpose, marketing_version: '1.5', testflight_notes: 'Notes' }),
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const { port } = server.address();
+  const url = `http://127.0.0.1:${port}/v1/builds/prepare/example-ios`;
+  const denied = await fetch(url, { method: 'POST', body: '{}' });
+  assert.equal(denied.status, 401);
+  const accepted = await fetch(url, {
+    method: 'POST',
+    headers: { authorization: 'Bearer build-secret', 'content-type': 'application/json' },
+    body: JSON.stringify({ purpose: 'beta' }),
+  });
+  assert.equal(accepted.status, 200);
+  assert.equal((await accepted.json()).marketing_version, '1.5');
 });

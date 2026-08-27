@@ -13,6 +13,10 @@ webhooks:
   xcode_cloud:
     token_env: XCODE_CLOUD_WEBHOOK_TOKEN
 
+ci:
+  prepare:
+    token_env: MERGE4APPSTORE_BUILD_TOKEN
+
 apps:
   prod:
     app_id: "6497231574"

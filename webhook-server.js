@@ -10,6 +10,10 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { loadRepositoryProfile } from './lib/profile.js';
+import { resolveBuildPurpose } from './lib/profile.js';
+import { AppStoreConnectAPI } from './lib/app-store-connect.js';
+import { GitHubAPI } from './lib/github.js';
+import { prepareBuild } from './lib/build-prepare.js';
 import {
   jobsForGitHubEvent,
   jobsForXcodeCloudEvent,
@@ -72,7 +76,18 @@ function send(response, statusCode, body) {
   response.end(JSON.stringify(body));
 }
 
-export function createWebhookServer({ profiles, dispatch = runJob }) {
+async function prepareRequest(entry, payload) {
+  const build = resolveBuildPurpose(entry.profile, payload.purpose);
+  const asc = new AppStoreConnectAPI(
+    process.env.APP_STORE_CONNECT_API_KEY_ID,
+    process.env.APP_STORE_CONNECT_ISSUER_ID,
+    process.env.APP_STORE_CONNECT_API_KEY_CONTENT,
+  );
+  const github = new GitHubAPI(entry.profile.repository.owner, entry.profile.repository.name);
+  return prepareBuild({ profile: entry.profile, build, payload, asc, github });
+}
+
+export function createWebhookServer({ profiles, dispatch = runJob, prepare = prepareRequest }) {
   const seen = new Map();
   const remember = key => {
     const now = Date.now();
@@ -92,9 +107,10 @@ export function createWebhookServer({ profiles, dispatch = runJob }) {
       }
       if (request.method !== 'POST') return send(response, 404, { error: 'Not found' });
 
+      const prepareMatch = url.pathname.match(/^\/v1\/builds\/prepare\/([^/]+)$/);
       const githubMatch = url.pathname.match(/^\/webhooks\/github\/([^/]+)$/);
       const xcodeMatch = url.pathname.match(/^\/webhooks\/xcode-cloud\/([^/]+)\/([^/]+)$/);
-      const instance = decodeURIComponent(githubMatch?.[1] || xcodeMatch?.[1] || '');
+      const instance = decodeURIComponent(prepareMatch?.[1] || githubMatch?.[1] || xcodeMatch?.[1] || '');
       const entry = profiles[instance];
       if (!entry) return send(response, 404, { error: 'Unknown instance' });
 
@@ -106,7 +122,14 @@ export function createWebhookServer({ profiles, dispatch = runJob }) {
       const settings = webhookSettings(entry.profile);
       let jobs;
       let deliveryKey;
-      if (githubMatch) {
+      if (prepareMatch) {
+        const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, '') || '';
+        if (!settings.buildToken || !safeEqual(bearer, settings.buildToken)) {
+          return send(response, 401, { error: 'Invalid build token' });
+        }
+        const prepared = await prepare(entry, payload);
+        return send(response, 200, prepared);
+      } else if (githubMatch) {
         if (!settings.githubSecret) return send(response, 503, { error: 'GitHub webhook secret is not configured' });
         if (!verifyGitHubSignature(rawBody, request.headers['x-hub-signature-256'], settings.githubSecret)) {
           return send(response, 401, { error: 'Invalid signature' });

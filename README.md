@@ -227,6 +227,34 @@ The VPS deployment starts the listener with PM2, configures the signed GitHub
 hooks, and proxies it at `https://api.runningorder.app/merge4appstore/`. A
 manual deployment can set `pause_cron: true` for an isolated webhook test.
 
+### Thin Xcode Cloud preparation
+
+App repositories no longer need App Store Connect or GitHub credentials in
+Xcode Cloud. Their post-clone hook sends build context and the committed
+marketing version to:
+
+```http
+POST /v1/builds/prepare/:instance
+Authorization: Bearer <repository-scoped token>
+```
+
+The service verifies the repository, purpose, branch or pull request, commit,
+and configured workflow. It returns the centrally selected marketing version,
+app role, and TestFlight notes. The checked-out repository applies those
+non-secret values before running its project preparation command. The only
+Xcode Cloud secrets/configuration required for this adapter are:
+
+- `MERGE4APPSTORE_BUILD_TOKEN`: repository-scoped preparation credential;
+- `MERGE4APPSTORE_URL`: HTTPS service base URL.
+
+Profiles select the runtime secret name without storing its value:
+
+```yaml
+ci:
+  prepare:
+    token_env: MERGE4APPSTORE_BUILD_TOKEN
+```
+
 ## Automatic VPS Deploy
 
 This repo can deploy itself to the VPS on every push to `main` using `.github/workflows/deploy.yml`.

@@ -98,10 +98,12 @@ jobs:
           PAUSE_CRON: ${{ inputs.pause_cron || 'false' }}
           GH_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
           XCODE_CLOUD_WEBHOOK_TOKEN: ${{ secrets.XCODE_CLOUD_WEBHOOK_TOKEN }}
+          MERGE4APPSTORE_BUILD_TOKEN: ${{ secrets.MERGE4APPSTORE_BUILD_TOKEN }}
         run: |
           umask 077
-          printf 'GH_WEBHOOK_SECRET=%s\nXCODE_CLOUD_WEBHOOK_TOKEN=%s\n' \
-            "$GH_WEBHOOK_SECRET" "$XCODE_CLOUD_WEBHOOK_TOKEN" > /tmp/merge4appstore-webhook.env
+          printf 'GH_WEBHOOK_SECRET=%s\nXCODE_CLOUD_WEBHOOK_TOKEN=%s\nMERGE4APPSTORE_BUILD_TOKEN=%s\n' \
+            "$GH_WEBHOOK_SECRET" "$XCODE_CLOUD_WEBHOOK_TOKEN" "$MERGE4APPSTORE_BUILD_TOKEN" \
+            > /tmp/merge4appstore-webhook.env
           scp -i ~/.ssh/deploy_key /tmp/merge4appstore-webhook.env \
             "$VPS_USER@$VPS_HOST:$DEPLOY_DIR/.webhook.env.new"
           ssh -i ~/.ssh/deploy_key "$VPS_USER@$VPS_HOST" \
