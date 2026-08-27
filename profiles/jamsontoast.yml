@@ -16,7 +16,7 @@ webhooks:
 
 ci:
   prepare:
-    token_env: MERGE4APPSTORE_BUILD_TOKEN
+    token_env: MERGE4APPSTORE_BUILD_TOKEN_JAMSONTOAST
 
 apps:
   prod:

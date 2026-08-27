@@ -252,7 +252,7 @@ Profiles select the runtime secret name without storing its value:
 ```yaml
 ci:
   prepare:
-    token_env: MERGE4APPSTORE_BUILD_TOKEN
+    token_env: MERGE4APPSTORE_BUILD_TOKEN_MY_REPOSITORY
 ```
 
 ## Automatic VPS Deploy

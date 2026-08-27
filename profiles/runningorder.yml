@@ -15,7 +15,7 @@ webhooks:
 
 ci:
   prepare:
-    token_env: MERGE4APPSTORE_BUILD_TOKEN
+    token_env: MERGE4APPSTORE_BUILD_TOKEN_RUNNINGORDER_IOS
 
 apps:
   prod:
