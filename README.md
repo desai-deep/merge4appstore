@@ -203,6 +203,30 @@ Pull-request workflows use **Manual Start - Branch, Pull Request**.
 */5 * * * * cd /path/to/merge4appstore && node index.js --profile profiles/jamsontoast.yml >> logs/cron.log 2>&1
 ```
 
+Cron is the reconciliation fallback. The primary event path is `npm run
+webhooks`, exposed behind HTTPS:
+
+- `POST /webhooks/github/:instance` verifies GitHub's raw-body HMAC SHA-256
+  signature and handles PR open/update/close plus beta and production pushes.
+- `POST /webhooks/xcode-cloud/:instance/:token` accepts Xcode Cloud build
+  lifecycle events. Because Apple doesn't document a signing header for these
+  events, use a high-entropy URL token and never store it in profile YAML.
+- `GET /health` reports the configured instances without exposing secrets.
+
+Each profile can select environment variable names without containing values:
+
+```yaml
+webhooks:
+  github:
+    secret_env: GH_WEBHOOK_SECRET
+  xcode_cloud:
+    token_env: XCODE_CLOUD_WEBHOOK_TOKEN
+```
+
+The VPS deployment starts the listener with PM2, configures the signed GitHub
+hooks, and proxies it at `https://api.runningorder.app/merge4appstore/`. A
+manual deployment can set `pause_cron: true` for an isolated webhook test.
+
 ## Automatic VPS Deploy
 
 This repo can deploy itself to the VPS on every push to `main` using `.github/workflows/deploy.yml`.

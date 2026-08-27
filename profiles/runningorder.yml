@@ -7,6 +7,12 @@ repository:
   production_branch: main
   beta_branch: develop
 
+webhooks:
+  github:
+    secret_env: GH_WEBHOOK_SECRET
+  xcode_cloud:
+    token_env: XCODE_CLOUD_WEBHOOK_TOKEN
+
 apps:
   prod:
     app_id: "6497231574"

@@ -8,6 +8,12 @@ repository:
   beta_branch: develop
   ios_repo_path: ""
 
+webhooks:
+  github:
+    secret_env: GH_WEBHOOK_SECRET
+  xcode_cloud:
+    token_env: XCODE_CLOUD_WEBHOOK_TOKEN
+
 apps:
   prod:
     app_id: "1303194454"

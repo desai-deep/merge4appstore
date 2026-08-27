@@ -11,6 +11,10 @@ on:
         description: Inspect VPS webhook readiness without deploying
         type: boolean
         default: false
+      pause_cron:
+        description: Pause merge4appstore profile cron jobs while testing webhooks
+        type: boolean
+        default: false
 
 jobs:
   test:
@@ -90,8 +94,18 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           DEPLOY_DIR: ${{ secrets.SERVER_DIR }}
+          DEPLOY_SHA: ${{ github.sha }}
+          PAUSE_CRON: ${{ inputs.pause_cron || 'false' }}
+          GH_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
+          XCODE_CLOUD_WEBHOOK_TOKEN: ${{ secrets.XCODE_CLOUD_WEBHOOK_TOKEN }}
         run: |
-          ssh -i ~/.ssh/deploy_key "$VPS_USER@$VPS_HOST" "DEPLOY_DIR='$DEPLOY_DIR' bash -s" <<'ENDSSH'
+          umask 077
+          printf 'GH_WEBHOOK_SECRET=%s\nXCODE_CLOUD_WEBHOOK_TOKEN=%s\n' \
+            "$GH_WEBHOOK_SECRET" "$XCODE_CLOUD_WEBHOOK_TOKEN" > /tmp/merge4appstore-webhook.env
+          scp -i ~/.ssh/deploy_key /tmp/merge4appstore-webhook.env \
+            "$VPS_USER@$VPS_HOST:$DEPLOY_DIR/.webhook.env.new"
+          ssh -i ~/.ssh/deploy_key "$VPS_USER@$VPS_HOST" \
+            "DEPLOY_DIR='$DEPLOY_DIR' DEPLOY_SHA='$DEPLOY_SHA' PAUSE_CRON='$PAUSE_CRON' bash -s" <<'ENDSSH'
             set -e
 
             echo "Starting merge4appstore deployment..."
@@ -106,8 +120,8 @@ jobs:
             node --version || { echo "Node.js not found"; exit 1; }
             npm --version || { echo "npm not found"; exit 1; }
 
-            git fetch origin main
-            git reset --hard origin/main
+            git fetch origin "$DEPLOY_SHA"
+            git reset --hard "$DEPLOY_SHA"
 
             COMMIT_SHA=$(git rev-parse --short HEAD)
             COMMIT_MSG=$(git log -1 --pretty=%B | head -1)
@@ -117,6 +131,62 @@ jobs:
 
             npm test
             npm run validate:profiles
+
+            umask 077
+            mv .webhook.env.new .webhook.env
+
+            set -a
+            . ./.env
+            . ./.webhook.env
+            set +a
+
+            export WEBHOOK_HOST=127.0.0.1 WEBHOOK_PORT=8787
+            if pm2 describe merge4appstore-webhooks >/dev/null 2>&1; then
+              pm2 restart merge4appstore-webhooks --update-env
+            else
+              pm2 start webhook-server.js --name merge4appstore-webhooks
+            fi
+            pm2 save
+
+            cat > /etc/nginx/snippets/merge4appstore-webhooks.conf <<'NGINX'
+            location /merge4appstore/ {
+                proxy_pass http://127.0.0.1:8787/;
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+            NGINX
+
+            nginx_config="$(grep -Rls 'server_name api\.runningorder\.app' /etc/nginx/sites-enabled /etc/nginx/conf.d | head -1)"
+            if [ -z "$nginx_config" ]; then
+              echo "Could not find api.runningorder.app nginx configuration"
+              exit 1
+            fi
+            if ! grep -q 'merge4appstore-webhooks.conf' "$nginx_config"; then
+              perl -0pi -e 's{(listen 443 ssl http2;.*?server_name api\.runningorder\.app;\n)}{$1    include /etc/nginx/snippets/merge4appstore-webhooks.conf;\n}s' "$nginx_config"
+            fi
+            nginx -t
+            systemctl reload nginx
+
+            for profile_file in profiles/*.yml; do
+              instance="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>console.log(loadRepositoryProfile(process.argv[1]).instance))" "$profile_file")"
+              repository="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>{const p=loadRepositoryProfile(process.argv[1]);console.log(p.repository.owner+'/'+p.repository.name)})" "$profile_file")"
+              webhook_url="https://api.runningorder.app/merge4appstore/webhooks/github/$instance"
+              hook_id="$(gh api "repos/$repository/hooks" --jq ".[] | select(.config.url == \"$webhook_url\") | .id" | head -1)"
+              if [ -n "$hook_id" ]; then
+                gh api --method PATCH "repos/$repository/hooks/$hook_id" \
+                  -F active=true -f 'events[]=push' -f 'events[]=pull_request' \
+                  -f "config[url]=$webhook_url" -f 'config[content_type]=json' \
+                  -f "config[secret]=$GH_WEBHOOK_SECRET" >/dev/null
+              else
+                gh api --method POST "repos/$repository/hooks" \
+                  -f name=web -F active=true -f 'events[]=push' -f 'events[]=pull_request' \
+                  -f "config[url]=$webhook_url" -f 'config[content_type]=json' \
+                  -f "config[secret]=$GH_WEBHOOK_SECRET" >/dev/null
+              fi
+              echo "Configured GitHub webhook for $repository"
+            done
 
             echo "Configuring repository profiles..."
             shopt -s nullglob
@@ -136,7 +206,15 @@ jobs:
               current_crontab="$(printf '%s\n%s\n' "$current_crontab" "$cron_line")"
             done
 
-            if (( ${#repository_profiles[@]} > 0 )); then
+            if [ "$PAUSE_CRON" = "true" ]; then
+              crontab -l > .merge4appstore-crontab.backup 2>/dev/null || true
+              for profile_file in "${repository_profiles[@]}"; do
+                marker="# merge4appstore:$(basename "$profile_file" .yml)"
+                current_crontab="$(printf '%s\n' "$current_crontab" | grep -Fv "$marker" || true)"
+              done
+              printf '%s\n' "$current_crontab" | sed '/^[[:space:]]*$/d' | crontab -
+              echo "Paused merge4appstore profile cron jobs"
+            elif (( ${#repository_profiles[@]} > 0 )); then
               printf '%s\n' "$current_crontab" | sed '/^[[:space:]]*$/d' | crontab -
               echo "Configured ${#repository_profiles[@]} repository profile cron job(s)"
             fi
@@ -146,4 +224,4 @@ jobs:
 
       - name: Cleanup SSH key
         if: always()
-        run: rm -f ~/.ssh/deploy_key
+        run: rm -f ~/.ssh/deploy_key /tmp/merge4appstore-webhook.env
