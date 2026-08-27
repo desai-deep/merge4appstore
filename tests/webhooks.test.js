@@ -3,13 +3,15 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import {
   jobsForGitHubEvent,
   jobsForXcodeCloudEvent,
   verifyGitHubSignature,
 } from '../lib/webhooks.js';
-import { createWebhookServer, loadProfiles, normalizePreparePayload } from '../webhook-server.js';
+import { createWebhookServer, loadProfiles, normalizePreparePayload, runJob } from '../webhook-server.js';
 
 const profile = {
   instance: 'example-ios',
@@ -61,6 +63,22 @@ test('normalizes full Git refs in build preparation payloads', () => {
   });
 });
 
+test('settles a webhook job when its child process cannot start', async () => {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  const result = runJob(
+    { profile, profilePath: '/tmp/example.yml' },
+    { mode: 'trigger', purpose: 'pull_request' },
+    () => {
+      queueMicrotask(() => child.emit('error', new Error('spawn failed')));
+      return child;
+    },
+  );
+
+  assert.equal(await result, 1);
+});
+
 test('runs deploy only for a successful completed production workflow', () => {
   const payload = {
     metadata: { attributes: { eventType: 'BUILD_COMPLETED' } },
@@ -93,6 +111,24 @@ test('protects the build preparation endpoint with its repository token', async 
   });
   assert.equal(accepted.status, 200);
   assert.equal((await accepted.json()).marketing_version, '1.5');
+});
+
+test('rejects malformed Xcode webhook token encoding without a server error', async t => {
+  process.env.XCODE_CLOUD_WEBHOOK_TOKEN = 'xcode-secret';
+  t.after(() => delete process.env.XCODE_CLOUD_WEBHOOK_TOKEN);
+  const server = createWebhookServer({
+    profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const { port } = server.address();
+
+  const response = await fetch(`http://127.0.0.1:${port}/webhooks/xcode-cloud/example-ios/%E0%A4%A`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}',
+  });
+  assert.equal(response.status, 401);
 });
 
 test('rejects duplicate profile instances instead of silently replacing one', t => {

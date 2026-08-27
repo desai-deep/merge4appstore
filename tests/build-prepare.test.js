@@ -42,6 +42,26 @@ test('rejects an unsupported client-supplied build purpose as a bad request', ()
   );
 });
 
+test('classifies prepare payload validation failures as bad requests', async () => {
+  const profile = { repository: { owner: 'example', name: 'ios', beta_branch: 'develop', production_branch: 'main' } };
+  const validPayload = { repository: 'example/ios', commit: 'abc', branch: 'feature', target_branch: 'develop', pull_request: 42, current_marketing_version: '1.4' };
+  const pullRequestBuild = { purpose: 'pull_request', appRole: 'prod', appId: '1', workflowId: 'wf-pr', includeCommits: true };
+  const cases = [
+    [{ ...pullRequestBuild }, { ...validPayload, repository: 'wrong/ios' }, /Repository does not match profile/],
+    [{ ...pullRequestBuild }, { ...validPayload, workflow_id: 'wrong' }, /Workflow does not match build purpose/],
+    [{ ...pullRequestBuild }, { ...validPayload, target_branch: 'main' }, /Pull-request builds must target develop/],
+    [{ ...pullRequestBuild, purpose: 'beta' }, { ...validPayload, pull_request: null, branch: 'feature' }, /Beta builds must use develop/],
+    [{ ...pullRequestBuild, purpose: 'production' }, { ...validPayload, pull_request: null, branch: 'develop' }, /Production builds must use main/],
+  ];
+
+  for (const [build, payload, message] of cases) {
+    await assert.rejects(
+      prepareBuild({ profile, build, payload, asc: {}, github: {} }),
+      error => error.statusCode === 400 && message.test(error.message),
+    );
+  }
+});
+
 test('sizes truncated TestFlight notes using the commits remaining after each candidate', () => {
   const subjects = Array.from({ length: 11 }, (_, index) => `Commit ${index + 1}`);
   const twoLinesAndSuffix = '• Commit 1\n• Commit 2\n• … 9 more commits';

@@ -54,7 +54,7 @@ function readBody(request, limit = 1024 * 1024) {
   });
 }
 
-function runJob(entry, job) {
+export function runJob(entry, job, spawnProcess = spawn) {
   const args = [path.join(ROOT, 'index.js'), job.mode, '--profile', entry.profilePath];
   const environment = { ...process.env };
   if (job.purpose) environment.BUILD_PURPOSE = job.purpose;
@@ -64,13 +64,21 @@ function runJob(entry, job) {
   if (job.deliveryId) environment.BUILD_SOURCE_DELIVERY_ID = job.deliveryId;
 
   return new Promise(resolve => {
-    const child = spawn(process.execPath, args, { cwd: ROOT, env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
-    child.stdout.pipe(process.stdout);
-    child.stderr.pipe(process.stderr);
-    child.on('exit', code => {
+    const child = spawnProcess(process.execPath, args, { cwd: ROOT, env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
+    let settled = false;
+    const finish = code => {
+      if (settled) return;
+      settled = true;
       console.log(`${new Date().toISOString()} webhook job ${entry.profile.instance}:${job.mode}${job.purpose ? `:${job.purpose}` : ''} exited ${code}`);
       resolve(code);
+    };
+    child.stdout.pipe(process.stdout);
+    child.stderr.pipe(process.stderr);
+    child.once('error', error => {
+      console.error(`${new Date().toISOString()} webhook job ${entry.profile.instance}:${job.mode} failed to start: ${error.message}`);
+      finish(1);
     });
+    child.once('exit', code => finish(code));
   });
 }
 
@@ -169,7 +177,10 @@ export function createWebhookServer({ profiles, dispatch = runJob, prepare = pre
         deliveryKey = `github:${delivery}`;
         jobs = jobsForGitHubEvent(entry.profile, event, payload, delivery);
       } else if (xcodeMatch) {
-        if (!settings.xcodeToken || !safeEqual(decodeURIComponent(xcodeMatch[2]), settings.xcodeToken)) {
+        let suppliedToken;
+        try { suppliedToken = decodeURIComponent(xcodeMatch[2]); }
+        catch { return send(response, 401, { error: 'Invalid token' }); }
+        if (!settings.xcodeToken || !safeEqual(suppliedToken, settings.xcodeToken)) {
           return send(response, 401, { error: 'Invalid token' });
         }
         const fingerprint = crypto.createHash('sha256').update(rawBody).digest('hex');
