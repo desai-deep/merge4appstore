@@ -145,6 +145,8 @@ jobs:
             . ./.webhook.env
             set +a
             export GH_TOKEN="$(node -e "import('dotenv').then(d=>console.log(d.config({path:'.env',quiet:true}).parsed?.GH_TOKEN||''))")"
+            shopt -s nullglob
+            repository_profiles=(profiles/*.yml profiles/*.yaml)
 
             export WEBHOOK_AUTOSTART=true WEBHOOK_HOST=127.0.0.1 WEBHOOK_PORT=8787
             if pm2 describe merge4appstore-webhooks >/dev/null 2>&1; then
@@ -159,7 +161,7 @@ jobs:
               sleep 1
             done
             curl --fail --silent http://127.0.0.1:8787/health >/dev/null
-            for profile_file in profiles/*.yml; do
+            for profile_file in "${repository_profiles[@]}"; do
               instance="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>console.log(loadRepositoryProfile(process.argv[1]).instance))" "$profile_file")"
               repository="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>{const p=loadRepositoryProfile(process.argv[1]);console.log(p.repository.owner+'/'+p.repository.name)})" "$profile_file")"
               beta_branch="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>{const p=loadRepositoryProfile(process.argv[1]);console.log(p.repository.beta_branch||'develop')})" "$profile_file")"
@@ -193,7 +195,7 @@ jobs:
             nginx -t
             systemctl reload nginx
 
-            for profile_file in profiles/*.yml; do
+            for profile_file in "${repository_profiles[@]}"; do
               instance="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>console.log(loadRepositoryProfile(process.argv[1]).instance))" "$profile_file")"
               repository="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>{const p=loadRepositoryProfile(process.argv[1]);console.log(p.repository.owner+'/'+p.repository.name)})" "$profile_file")"
               webhook_url="https://api.runningorder.app/merge4appstore/webhooks/github/$instance"
@@ -213,13 +215,12 @@ jobs:
             done
 
             echo "Configuring repository profiles..."
-            shopt -s nullglob
-            repository_profiles=(profiles/*.yml)
             current_crontab="$(crontab -l 2>/dev/null || true)"
             printf -v deploy_dir_quoted '%q' "$DEPLOY_DIR"
 
             for profile_file in "${repository_profiles[@]}"; do
-              profile_name="$(basename "$profile_file" .yml)"
+              profile_name="$(basename "$profile_file")"
+              profile_name="${profile_name%.*}"
               marker="# merge4appstore:${profile_name}"
 
               DRY_RUN=true node index.js deploy --profile "$profile_file"
@@ -233,7 +234,8 @@ jobs:
             if [ "$PAUSE_CRON" = "true" ]; then
               crontab -l > .merge4appstore-crontab.backup 2>/dev/null || true
               for profile_file in "${repository_profiles[@]}"; do
-                marker="# merge4appstore:$(basename "$profile_file" .yml)"
+                profile_name="$(basename "$profile_file")"
+                marker="# merge4appstore:${profile_name%.*}"
                 current_crontab="$(printf '%s\n' "$current_crontab" | grep -Fv "$marker" || true)"
               done
               printf '%s\n' "$current_crontab" | sed '/^[[:space:]]*$/d' | crontab -

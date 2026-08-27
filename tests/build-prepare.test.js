@@ -49,6 +49,8 @@ test('classifies prepare payload validation failures as bad requests', async () 
   const cases = [
     [{ ...pullRequestBuild }, { ...validPayload, repository: 'wrong/ios' }, /Repository does not match profile/],
     [{ ...pullRequestBuild }, { ...validPayload, workflow_id: 'wrong' }, /Workflow does not match build purpose/],
+    [{ ...pullRequestBuild }, { ...validPayload, commit: '' }, /Commit is required/],
+    [{ ...pullRequestBuild }, { ...validPayload, current_marketing_version: 'version one' }, /Invalid marketing version/],
     [{ ...pullRequestBuild }, { ...validPayload, target_branch: 'main' }, /Pull-request builds must target develop/],
     [{ ...pullRequestBuild, purpose: 'beta' }, { ...validPayload, pull_request: null, branch: 'feature' }, /Beta builds must use develop/],
     [{ ...pullRequestBuild, purpose: 'production' }, { ...validPayload, pull_request: null, branch: 'develop' }, /Production builds must use main/],

@@ -164,6 +164,12 @@ test('requires destructive cleanup to name an exact workflow', () => {
   assert.throws(() => validateRepositoryProfile(profile), /requires workflow/);
 });
 
+test('requires deployment to name an exact workflow', () => {
+  const profile = profileFixture();
+  delete profile.automation.deploy.workflow;
+  assert.throws(() => validateRepositoryProfile(profile), /automation\.deploy requires workflow/);
+});
+
 test('rejects non-standard app roles', () => {
   const profile = profileFixture();
   profile.apps.main = profile.apps.prod;
