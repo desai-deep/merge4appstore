@@ -10,6 +10,7 @@ import {
   jobsForGitHubEvent,
   jobsForXcodeCloudEvent,
   verifyGitHubSignature,
+  webhookSettings,
 } from '../lib/webhooks.js';
 import { createWebhookServer, loadProfiles, normalizePreparePayload, runJob } from '../webhook-server.js';
 
@@ -25,6 +26,19 @@ test('validates GitHub HMAC signatures against the raw body', () => {
   const signature = `sha256=${crypto.createHmac('sha256', 'secret').update(body).digest('hex')}`;
   assert.equal(verifyGitHubSignature(body, signature, 'secret'), true);
   assert.equal(verifyGitHubSignature(body, signature, 'wrong'), false);
+});
+
+test('defaults to deployed shared webhook secrets and a repository-scoped build token', () => {
+  const profileWithoutOverrides = { ...profile, webhooks: undefined, ci: undefined };
+  const settings = webhookSettings(profileWithoutOverrides, {
+    GH_WEBHOOK_SECRET: 'github',
+    XCODE_CLOUD_WEBHOOK_TOKEN: 'xcode',
+    MERGE4APPSTORE_BUILD_TOKEN_EXAMPLE_IOS: 'build',
+  });
+
+  assert.equal(settings.githubSecret, 'github');
+  assert.equal(settings.xcodeToken, 'xcode');
+  assert.equal(settings.buildToken, 'build');
 });
 
 test('maps pull request lifecycle events to trigger and expiry jobs', () => {
