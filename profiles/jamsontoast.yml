@@ -1,0 +1,52 @@
+version: 1
+instance: jamsontoast
+
+repository:
+  owner: desai-deep
+  name: JamsOnToast
+  production_branch: main
+  beta_branch: develop
+  ios_repo_path: ""
+
+webhooks:
+  github:
+    secret_env: GH_WEBHOOK_SECRET
+  xcode_cloud:
+    token_env: XCODE_CLOUD_WEBHOOK_TOKEN
+
+ci:
+  prepare:
+    token_env: MERGE4APPSTORE_BUILD_TOKEN_JAMSONTOAST
+
+apps:
+  prod:
+    app_id: "1303194454"
+    bundle_id: com.deepdesai.jamsontoast
+    name: Jams On Toast
+    workflows:
+      pull_requests: 6b0a396c-646c-47d0-8a76-d5f224a2ff28
+      beta: 87040761-AF53-47D4-8239-076B82F1A091
+      production: fb31931a-7a0b-4f77-aa1f-e424f2b8b84d
+
+build:
+  provider: xcode_cloud
+  trigger_mode: managed
+  purposes:
+    pull_request:
+      workflow: pull_requests
+      include_commits: true
+    beta:
+      workflow: beta
+      include_commits: false
+    production:
+      workflow: production
+
+automation:
+  deploy:
+    workflow: production
+    recover_missed_builds: true
+
+  sync: true
+
+  expire:
+    workflow: pull_requests

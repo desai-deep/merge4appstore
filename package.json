@@ -13,7 +13,13 @@
     "sync:dry": "DRY_RUN=true node index.js sync",
     "expire": "node index.js expire",
     "expire:dry": "DRY_RUN=true node index.js expire",
-    "test": "node --test tests/*.test.js"
+    "notes": "node index.js notes",
+    "notes:dry": "DRY_RUN=true node index.js notes",
+    "trigger": "node index.js trigger",
+    "trigger:dry": "DRY_RUN=true node index.js trigger",
+    "webhooks": "node webhook-server.js",
+    "test": "node --test tests/*.test.js",
+    "validate:profiles": "node scripts/validate-profiles.js"
   },
   "keywords": [
     "ios",
@@ -26,7 +32,8 @@
   "author": "Deep Desai",
   "license": "MIT",
   "dependencies": {
-    "dotenv": "^17.0.0"
+    "dotenv": "^17.0.0",
+    "yaml": "^2.9.0"
   },
   "engines": {
     "node": ">=18.0.0"

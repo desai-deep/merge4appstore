@@ -12,7 +12,10 @@
  *   node index.js deploy             # Run only deployment check
  *   node index.js sync               # Run only release sync
  *   node index.js expire             # Expire builds from closed PRs targeting BETA_BRANCH
+ *   node index.js trigger            # Trigger a configured build purpose
+ *   node index.js notes              # Refresh TestFlight notes after a PR body edit
  *   node index.js --config profiles/my-app.env
+ *   node index.js --profile profiles/my-repository.yml
  *   DRY_RUN=true node index.js       # Dry run mode
  *
  * Required environment variables:
@@ -42,6 +45,12 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { parseCliArgs } from './lib/cli.js';
+import {
+  applyAutomationProfile,
+  applyBuildPurposeProfile,
+  applyRepositoryProfile,
+  loadRepositoryProfile,
+} from './lib/profile.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -55,9 +64,21 @@ try {
 }
 
 const dotenvResult = dotenv.config({ path: cli.configPath });
-if (dotenvResult.error) {
+const missingOptionalProfileEnv = cli.profilePath && dotenvResult.error?.code === 'ENOENT';
+if (dotenvResult.error && !missingOptionalProfileEnv) {
   console.error(`ERROR: Could not load config file ${cli.configPath}: ${dotenvResult.error.message}`);
   process.exit(1);
+}
+
+let repositoryProfile = null;
+if (cli.profilePath) {
+  try {
+    repositoryProfile = loadRepositoryProfile(cli.profilePath);
+    applyRepositoryProfile(repositoryProfile);
+  } catch (error) {
+    console.error(`ERROR: Could not load repository profile ${cli.profilePath}: ${error.message}`);
+    process.exit(1);
+  }
 }
 
 // Import modules
@@ -69,6 +90,9 @@ import { acquireLock, releaseLock } from './lib/lock.js';
 import { runDeployCheck } from './lib/deploy.js';
 import { runReleaseSync } from './lib/sync.js';
 import { runClosedPRBuildExpiry } from './lib/expire.js';
+import { XcodeCloudBuildProvider } from './lib/build-provider.js';
+import { buildIntentFromEnvironment, runManagedBuildTrigger, waitForBuildCompletion } from './lib/trigger.js';
+import { refreshTestFlightNotes } from './lib/refresh-notes.js';
 
 async function main() {
   const DRY_RUN = process.env.DRY_RUN === 'true';
@@ -88,51 +112,109 @@ async function main() {
   log('=== merge4appstore ===');
   log(`Mode: ${mode}`);
   log(`Config: ${cli.configPath}`);
+  if (cli.profilePath) log(`Profile: ${cli.profilePath}`);
   if (DRY_RUN) {
     log('DRY RUN MODE - No actual changes will be made');
   }
 
   // Validate required environment variables
-  const requiredVars = [
+  const requiredSharedVars = [
     'APP_STORE_CONNECT_API_KEY_ID',
     'APP_STORE_CONNECT_ISSUER_ID',
     'APP_STORE_CONNECT_API_KEY_CONTENT',
-    'APP_BUNDLE_ID',
-    'APP_NAME',
     'GITHUB_REPO_OWNER',
     'GITHUB_REPO_NAME',
   ];
 
-  for (const varName of requiredVars) {
+  if (!repositoryProfile) requiredSharedVars.push('APP_BUNDLE_ID', 'APP_NAME');
+
+  for (const varName of requiredSharedVars) {
     if (!process.env[varName]) {
       log(`ERROR: Missing required environment variable: ${varName}`);
       process.exit(1);
     }
   }
 
-  // Initialize clients
-  const asc = new AppStoreConnectAPI(
-    process.env.APP_STORE_CONNECT_API_KEY_ID,
-    process.env.APP_STORE_CONNECT_ISSUER_ID,
-    process.env.APP_STORE_CONNECT_API_KEY_CONTENT
-  );
+  const createClients = () => ({
+    asc: new AppStoreConnectAPI(
+      process.env.APP_STORE_CONNECT_API_KEY_ID,
+      process.env.APP_STORE_CONNECT_ISSUER_ID,
+      process.env.APP_STORE_CONNECT_API_KEY_CONTENT
+    ),
+    github: new GitHubAPI(CONFIG.repoOwner, CONFIG.repoName, CONFIG.productionBranch),
+    tags: new GitHubTags(CONFIG.repoOwner, CONFIG.repoName),
+  });
 
-  const github = new GitHubAPI(CONFIG.repoOwner, CONFIG.repoName, CONFIG.productionBranch);
-  const tags = new GitHubTags(CONFIG.repoOwner, CONFIG.repoName);
+  const selectAutomation = name => {
+    if (!repositoryProfile) return { enabled: true, appRole: 'legacy' };
+    const automation = applyAutomationProfile(repositoryProfile, name);
+    if (!automation.enabled) log(`Skipping disabled ${name} automation`);
+    else log(`${name}: using ${automation.appRole} app (${automation.appName}, ${automation.appId})`);
+    return automation;
+  };
 
   try {
+    if (mode === 'notes') {
+      if (!repositoryProfile) throw new Error('notes mode requires --profile');
+      for (const name of ['BUILD_COMMIT_SHA', 'BUILD_BRANCH', 'BUILD_PULL_REQUEST']) {
+        if (!process.env[name]) throw new Error(`notes mode requires ${name}`);
+      }
+      const purpose = process.env.BUILD_PURPOSE || 'pull_request';
+      const build = applyBuildPurposeProfile(repositoryProfile, purpose);
+      const { asc, github } = createClients();
+      await refreshTestFlightNotes(asc, github, build, {
+        commit: process.env.BUILD_COMMIT_SHA,
+        branch: process.env.BUILD_BRANCH,
+        pull_request: process.env.BUILD_PULL_REQUEST,
+      }, DRY_RUN);
+    }
+
+    if (mode === 'trigger') {
+      if (!repositoryProfile) {
+        throw new Error('trigger mode requires --profile');
+      }
+      if (!process.env.BUILD_PURPOSE) throw new Error('trigger mode requires BUILD_PURPOSE');
+      const purpose = process.env.BUILD_PURPOSE;
+      const build = applyBuildPurposeProfile(repositoryProfile, purpose);
+      log(`trigger: using ${build.provider}/${build.appRole} (${build.appName}, ${build.workflowId})`);
+      const { asc, github } = createClients();
+      const provider = new XcodeCloudBuildProvider(asc);
+      const intent = buildIntentFromEnvironment(build);
+      const result = await runManagedBuildTrigger(provider, github, intent, DRY_RUN);
+      if (!DRY_RUN && process.env.BUILD_WAIT_FOR_COMPLETION === 'true' && result.runId) {
+        const completed = await waitForBuildCompletion(provider, result.runId);
+        if (completed.completionStatus !== 'SUCCEEDED') {
+          throw new Error(`Build #${completed.number || completed.runId} completed with ${completed.completionStatus}`);
+        }
+      }
+    }
+
     // Run deploy check
     if (mode === 'deploy' || mode === 'all') {
-      await runDeployCheck(asc, github, DRY_RUN);
+      const automation = selectAutomation('deploy');
+      if (automation.enabled) {
+        const { asc, github } = createClients();
+        await runDeployCheck(asc, github, DRY_RUN);
+      }
     }
 
     // Run release sync
     if (mode === 'sync' || mode === 'all') {
-      await runReleaseSync(asc, tags, github, DRY_RUN);
+      const automation = selectAutomation('sync');
+      if (automation.enabled) {
+        const { asc, tags, github } = createClients();
+        await runReleaseSync(asc, tags, github, DRY_RUN);
+      }
     }
 
-    if (mode === 'expire' || (mode === 'all' && CONFIG.expireMergedBuilds)) {
-      await runClosedPRBuildExpiry(asc, github, DRY_RUN);
+    const shouldRunExpiration = mode === 'expire'
+      || (mode === 'all' && (repositoryProfile || CONFIG.expireMergedBuilds));
+    if (shouldRunExpiration) {
+      const automation = selectAutomation('expire');
+      if (automation.enabled) {
+        const { asc, github } = createClients();
+        await runClosedPRBuildExpiry(asc, github, DRY_RUN);
+      }
     }
 
     log('=== Done ===');

@@ -18,6 +18,17 @@ async function withBranches(fn) {
   }
 }
 
+async function withExpiryWorkflow(workflowId, fn) {
+  const previous = process.env.EXPIRE_XCODE_WORKFLOW_ID;
+  process.env.EXPIRE_XCODE_WORKFLOW_ID = workflowId;
+  try {
+    await fn();
+  } finally {
+    if (previous === undefined) delete process.env.EXPIRE_XCODE_WORKFLOW_ID;
+    else process.env.EXPIRE_XCODE_WORKFLOW_ID = previous;
+  }
+}
+
 test('dry run reports merged feature builds without expiring them', async () => {
   await withBranches(async () => {
     let expireCalls = 0;
@@ -115,4 +126,33 @@ test('keeps protected branch builds and builds without a closed PR', async () =>
       expired: 0,
     });
   });
+});
+
+test('expires only builds from the configured pull-request workflow', async () => {
+  await withBranches(async () => withExpiryWorkflow('pr-workflow', async () => {
+    const expiredBuilds = [];
+    const asc = {
+      getTestFlightCleanupCandidates: async () => ([
+        { buildId: 'pr-build', buildNumber: '201', version: '3.0' },
+        { buildId: 'beta-build', buildNumber: '202', version: '3.0' },
+      ]),
+      getBuildSource: async buildId => ({
+        found: true,
+        commitSha: buildId,
+        sourceBranch: 'feature/closed',
+        workflowId: buildId === 'pr-build' ? 'pr-workflow' : 'beta-workflow',
+        workflowName: buildId === 'pr-build' ? 'Pull Requests' : 'Public Beta',
+      }),
+      expireBuild: async buildId => { expiredBuilds.push(buildId); },
+    };
+    const github = {
+      findClosedPRForBuild: () => ({ number: 51, mergedAt: '2026-08-25T10:00:00Z' }),
+    };
+
+    assert.deepEqual(await runClosedPRBuildExpiry(asc, github, false), {
+      checked: 2,
+      expired: 1,
+    });
+    assert.deepEqual(expiredBuilds, ['pr-build']);
+  }));
 });

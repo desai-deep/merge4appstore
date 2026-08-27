@@ -122,6 +122,84 @@ test('starts a clean workflow build for the selected branch reference', async ()
   assert.equal(asc.ciBuildRuns, null);
 });
 
+test('resolves an open Apple SCM pull request for a workflow', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.request = async endpoint => {
+    if (endpoint === '/ciWorkflows/workflow-1/repository') {
+      return { data: { id: 'repository-1' } };
+    }
+    assert.equal(endpoint, '/scmRepositories/repository-1/pullRequests?limit=200');
+    return {
+      data: [
+        { id: 'closed-pr', attributes: { number: 48, isClosed: true } },
+        {
+          id: 'open-pr',
+          attributes: {
+            number: 49,
+            isClosed: false,
+            sourceBranchName: 'feature',
+            destinationBranchName: 'develop',
+          },
+        },
+      ],
+    };
+  };
+
+  assert.deepEqual(await asc.getWorkflowPullRequest('workflow-1', '49'), {
+    id: 'open-pr',
+    number: '49',
+    sourceBranchName: 'feature',
+    destinationBranchName: 'develop',
+  });
+});
+
+test('starts a clean workflow build for an Apple SCM pull request', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  let request = null;
+  asc.request = async (endpoint, options) => {
+    request = { endpoint, options };
+    return {
+      data: {
+        id: 'run-141',
+        attributes: { number: 141, executionProgress: 'PENDING' },
+      },
+    };
+  };
+
+  await asc.startWorkflowBuild('workflow-1', null, { pullRequestId: 'apple-pr-49' });
+
+  assert.deepEqual(JSON.parse(request.options.body).data.relationships, {
+    workflow: { data: { type: 'ciWorkflows', id: 'workflow-1' } },
+    pullRequest: { data: { type: 'scmPullRequests', id: 'apple-pr-49' } },
+  });
+});
+
+test('normalizes one Xcode Cloud build run', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.request = async endpoint => {
+    assert.equal(endpoint, '/ciBuildRuns/run-140');
+    return {
+      data: {
+        id: 'run-140',
+        attributes: {
+          number: 140,
+          executionProgress: 'COMPLETE',
+          completionStatus: 'SUCCEEDED',
+          sourceCommit: { commitSha: 'abcdef1234567890' },
+        },
+      },
+    };
+  };
+
+  assert.deepEqual(await asc.getBuildRun('run-140'), {
+    runId: 'run-140',
+    number: 140,
+    executionProgress: 'COMPLETE',
+    completionStatus: 'SUCCEEDED',
+    sourceCommit: { commitSha: 'abcdef1234567890' },
+  });
+});
+
 test('reuses an empty review draft instead of creating another submission', async () => {
   const asc = createASCWithVersions({ data: [] });
   asc.getReviewSubmissionIdForVersion = async () => null;
@@ -568,4 +646,82 @@ test('does not use an ambiguous Xcode Cloud build-number fallback', async () => 
   ]);
 
   assert.deepEqual(await asc.getBuildSource('build-101', '101'), { found: false });
+});
+
+test('finds uploaded commits for one configured workflow', async () => {
+  const asc = createASCWithVersions({ data: [], included: [] });
+  asc.getAppId = async () => 'app-1';
+  asc.request = async endpoint => {
+    assert.match(endpoint, /filter\[app\]=app-1/);
+    return { data: [
+      { id: 'build-2', attributes: { version: '2', uploadedDate: '2026-08-27T02:00:00Z' } },
+      { id: 'build-1', attributes: { version: '1', uploadedDate: '2026-08-27T01:00:00Z' } },
+    ] };
+  };
+  let scopedLoads = 0;
+  asc.loadCIBuildRunsForWorkflow = async workflowId => {
+    scopedLoads += 1;
+    assert.equal(workflowId, 'workflow-1');
+    return [{
+      workflowId,
+      run: {
+        attributes: { number: 1, sourceCommit: { commitSha: 'ancestor' } },
+        relationships: { builds: { data: [{ id: 'build-1' }] } },
+      },
+    }];
+  };
+  assert.deepEqual(await asc.getPublishedWorkflowCommits('workflow-1'), [{
+    commitSha: 'ancestor', buildId: 'build-1', buildNumber: '1', uploadedDate: '2026-08-27T01:00:00Z',
+  }]);
+  assert.equal(scopedLoads, 1);
+});
+
+test('finds builds for a commit without enumerating unrelated workflows', async () => {
+  const asc = createASCWithVersions({ data: [], included: [] });
+  asc.getAppId = async () => 'app-1';
+  asc.request = async () => ({ data: [
+    { id: 'build-1', attributes: { version: '1' } },
+    { id: 'build-2', attributes: { version: '2' } },
+  ] });
+  asc.loadCIBuildRuns = async () => { throw new Error('global workflow scan should not run'); };
+  asc.loadCIBuildRunsForWorkflow = async workflowId => [{
+    workflowId,
+    run: {
+      attributes: { sourceCommit: { commitSha: 'head' } },
+      relationships: { builds: { data: [{ id: 'build-2' }] } },
+    },
+  }];
+
+  assert.deepEqual(await asc.getBuildsForWorkflowCommit('workflow-1', 'head'), [
+    { buildId: 'build-2', buildNumber: '2' },
+  ]);
+});
+
+test('updates or creates English TestFlight build notes', async () => {
+  const asc = createASCWithVersions({ data: [], included: [] });
+  const requests = [];
+  asc.request = async (endpoint, options = {}) => {
+    requests.push({ endpoint, options });
+    if (endpoint === '/builds/build-1/betaBuildLocalizations') {
+      return { data: [{ id: 'localization-1', attributes: { locale: 'en-US' } }] };
+    }
+    return { data: { id: 'localization-new' } };
+  };
+  assert.deepEqual(await asc.updateBetaBuildNotes('build-1', 'New notes'), {
+    created: false, localizationId: 'localization-1',
+  });
+  assert.equal(requests[1].endpoint, '/betaBuildLocalizations/localization-1');
+  assert.equal(JSON.parse(requests[1].options.body).data.attributes.whatsNew, 'New notes');
+
+  requests.length = 0;
+  asc.request = async (endpoint, options = {}) => {
+    requests.push({ endpoint, options });
+    if (endpoint.includes('betaBuildLocalizations') && !options.method) return { data: [] };
+    return { data: { id: 'localization-new' } };
+  };
+  assert.deepEqual(await asc.updateBetaBuildNotes('build-2', 'First notes'), {
+    created: true, localizationId: 'localization-new',
+  });
+  assert.equal(requests[1].endpoint, '/betaBuildLocalizations');
+  assert.equal(JSON.parse(requests[1].options.body).data.relationships.build.data.id, 'build-2');
 });

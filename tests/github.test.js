@@ -46,6 +46,59 @@ Bug fixes and review handling improvements
   );
 });
 
+test('selects the newest published ancestor and returns every comparison commit', () => {
+  const github = new GitHubAPI('example', 'ios');
+  github.exec = args => {
+    const endpoint = args.at(-1);
+    if (endpoint.includes('newest...head')) return JSON.stringify([{ status: 'diverged', commits: [] }]);
+    return JSON.stringify([{ status: 'ahead', commits: [
+      { commit: { message: 'First change\n\nDetails' } },
+      { commit: { message: 'Second change' } },
+    ] }]);
+  };
+  assert.deepEqual(github.getCommitSubjectsSince(['newest', 'ancestor'], 'head'), {
+    baseCommit: 'ancestor',
+    subjects: ['First change', 'Second change'],
+  });
+});
+
+test('returns all pull-request commit subjects across paginated results', () => {
+  const github = new GitHubAPI('example', 'ios');
+  github.exec = () => JSON.stringify([
+    [{ commit: { message: 'First' } }],
+    [{ commit: { message: 'Second\nBody' } }],
+  ]);
+  assert.deepEqual(github.getPullRequestCommitSubjects(42), ['First', 'Second']);
+});
+
+test('URL-encodes slash-containing branch names when resolving their head', () => {
+  const github = new GitHubAPI('example', 'ios');
+  let endpoint;
+  github.exec = args => {
+    endpoint = args[1];
+    return 'abc123';
+  };
+
+  assert.equal(github.getBranchHead('feature/player'), 'abc123');
+  assert.equal(endpoint, 'repos/example/ios/commits/feature%2Fplayer');
+});
+
+test('recovers an open pull request only for the exact branch head commit', () => {
+  const github = new GitHubAPI('example', 'ios');
+  github.exec = () => JSON.stringify([
+    { number: 49, headRefOid: 'abc123', headRefName: 'feature/player', baseRefName: 'develop' },
+  ]);
+
+  assert.deepEqual(
+    github.findOpenPullRequestForCommit('abc123', 'develop', 'feature/player'),
+    { number: '49', headBranch: 'feature/player', baseBranch: 'develop' },
+  );
+  assert.equal(
+    github.findOpenPullRequestForCommit('newer456', 'develop', 'feature/player'),
+    null,
+  );
+});
+
 test('finds one closed PR for the exact source and destination branches', () => {
   const github = new GitHubAPI('desai-deep', 'JamsOnToast');
   github.exec = () => JSON.stringify([
