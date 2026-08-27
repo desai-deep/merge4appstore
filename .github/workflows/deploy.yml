@@ -125,7 +125,8 @@ jobs:
             node --version || { echo "Node.js not found"; exit 1; }
             npm --version || { echo "npm not found"; exit 1; }
 
-            git fetch origin "$DEPLOY_SHA"
+            git fetch origin '+refs/heads/*:refs/remotes/origin/*'
+            git cat-file -e "$DEPLOY_SHA^{commit}"
             git reset --hard "$DEPLOY_SHA"
 
             COMMIT_SHA=$(git rev-parse --short HEAD)
