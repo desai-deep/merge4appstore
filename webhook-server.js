@@ -147,7 +147,9 @@ export function createWebhookServer({ profiles, dispatch = runJob, prepare = pre
       const prepareMatch = url.pathname.match(/^\/v1\/builds\/prepare\/([^/]+)$/);
       const githubMatch = url.pathname.match(/^\/webhooks\/github\/([^/]+)$/);
       const xcodeMatch = url.pathname.match(/^\/webhooks\/xcode-cloud\/([^/]+)\/([^/]+)$/);
-      const instance = decodeURIComponent(prepareMatch?.[1] || githubMatch?.[1] || xcodeMatch?.[1] || '');
+      let instance;
+      try { instance = decodeURIComponent(prepareMatch?.[1] || githubMatch?.[1] || xcodeMatch?.[1] || ''); }
+      catch { return send(response, 400, { error: 'Invalid instance' }); }
       const entry = profiles[instance];
       if (!entry) return send(response, 404, { error: 'Unknown instance' });
 

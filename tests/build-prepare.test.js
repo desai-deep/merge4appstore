@@ -112,3 +112,23 @@ test('beta notes default to a summary without listing commits', async () => {
   const result = await prepareBuild({ profile, build, payload, asc, github });
   assert.equal(result.testflight_notes, 'Improve playback');
 });
+
+test('uses the pull request target branch when finding a title fallback', async () => {
+  const profile = { repository: { owner: 'example', name: 'ios', beta_branch: 'develop' } };
+  const build = { purpose: 'pull_request', appRole: 'prod', appId: '1', workflowId: 'wf-pr', includeCommits: false };
+  const payload = { repository: 'example/ios', commit: 'abc', branch: 'feature/player', target_branch: 'develop', pull_request: 42, current_marketing_version: '1.4' };
+  const asc = { appId: null, getAppStoreVersions: async () => ({ data: [] }) };
+  let titleBranch;
+  const github = {
+    getCommitSubject: () => 'Commit subject',
+    getPRDetails: () => null,
+    findPullRequestTitleForCommit: (_commit, branch) => {
+      titleBranch = branch;
+      return 'Improve playback';
+    },
+  };
+
+  const result = await prepareBuild({ profile, build, payload, asc, github });
+  assert.equal(titleBranch, 'develop');
+  assert.equal(result.testflight_notes, 'Improve playback');
+});

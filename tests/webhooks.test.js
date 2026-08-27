@@ -145,6 +145,21 @@ test('rejects malformed Xcode webhook token encoding without a server error', as
   assert.equal(response.status, 401);
 });
 
+test('rejects malformed instance encoding as a bad request', async t => {
+  const server = createWebhookServer({
+    profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const { port } = server.address();
+
+  const response = await fetch(`http://127.0.0.1:${port}/webhooks/github/%E0%A4%A`, {
+    method: 'POST',
+    body: '{}',
+  });
+  assert.equal(response.status, 400);
+});
+
 test('rejects duplicate profile instances instead of silently replacing one', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'merge4appstore-profiles-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
