@@ -1,9 +1,26 @@
 # merge4appstore
 
-Automated iOS App Store deployment and release sync. Monitors TestFlight builds from Xcode Cloud, submits them for App Store review, and tags releases when they go live.
+Automated iOS build and release orchestration around GitHub, Xcode Cloud,
+TestFlight, and App Store Connect. It starts the correct Xcode Cloud workflow,
+prepares versions and TestFlight notes centrally, removes obsolete PR builds,
+submits production builds for review, and tags releases when they go live.
 
 See the [product and Xcode Cloud CI ownership plan](docs/PRODUCT_PLAN.md) for the
-proposed path from the current single-tenant automation to a reusable service.
+path from the current two-repository deployment to a reusable service.
+
+## Current production status
+
+The webhook-managed baseline from PR #19 is deployed for JamsOnToast and
+Running Order. It has been exercised with real PR open, synchronize, close, and
+merge events and real Xcode Cloud archives. Xcode Cloud workflows use manual
+start conditions, so GitHub is the only source of build intent and a push to a
+PR branch does not independently create a second build.
+
+The current deployment is still a single-tenant VPS service. Webhook delivery
+deduplication is in memory, jobs are child processes protected by filesystem
+locks, credentials are shared runtime secrets, and cron remains a five-minute
+reconciliation fallback. These are operational limitations, not the target
+hosted architecture; see the product plan for the migration sequence.
 
 ## What it does
 
@@ -28,21 +45,69 @@ proposed path from the current single-tenant automation to a reusable service.
 - Standard `prod`, `uat`, and `internal` app roles, with `prod` as the default
 - Single combined script for both operations
 
-## How It Works
+## Responsibility boundaries
+
+| Owner | What it owns now |
+| --- | --- |
+| App repository | Apple's required `ci_scripts/ci_post_clone.sh`, reading and applying the current marketing version, writing returned TestFlight notes, and project-specific setup such as installing Tuist and generating the Xcode project |
+| Repository profile in this repo | GitHub branches, logical app roles, App Store Connect app IDs, workflow IDs, build-purpose routing, cleanup policy, and note-generation switches |
+| `merge4appstore` | GitHub/Xcode webhook handling, managed build starts, version policy, note generation, PR-build cleanup, production submission, rejected-version handling, release synchronization, Git tags, and GitHub comments |
+| Xcode Cloud | Checkout, build/test/archive, signing, upload, and TestFlight distribution; workflows are manually startable and do not react directly to Git pushes or PRs |
+| VPS | The webhook process, runtime secrets, HTTPS proxy, five-minute reconciliation cron, locks, and logs |
+| GitHub Actions in this repo | Tests/profile validation on PRs and deployment of `main` to the VPS |
+
+Tuist is not assumed by the control plane. It is only a project-preparation
+detail in the two current app repositories. A repository may instead use a
+committed Xcode project, XcodeGen, Swift Package Manager, or another adapter.
+
+## Event flow
 
 ```
-Xcode Cloud                          Your VPS
-┌─────────────────┐                  ┌─────────────────────────┐
-│ Build Workflow  │                  │  merge4appstore (cron)  │
-│ "Publish to     │──► TestFlight ──►│                         │
-│  App Store"     │                  │  1. Check new builds    │
-└─────────────────┘                  │  2. Find merged PR      │
-                                     │  3. Extract release notes│
-                                     │  4. Submit for review   │
-                                     │  5. Tag when live       │
-                                     │  6. Comment on PR       │
-                                     └─────────────────────────┘
+GitHub push / PR event
+        |
+        v
+signed webhook -> profile -> build intent -> Xcode Cloud manual workflow
+                                      |                 |
+                                      |                 v
+                                      |        post-clone preparation API
+                                      |                 |
+                                      |                 v
+                                      +---------- TestFlight build
+                                                        |
+Xcode Cloud completion webhook -------------------------+
+                                                        v
+                               submission / cleanup / release sync
+                                                        |
+                                                        v
+                                       GitHub comment and release tag
 ```
+
+GitHub event routing is deliberately narrow:
+
+| Event | Action |
+| --- | --- |
+| PR opened, reopened, or synchronized against `beta_branch` | Start or reuse one `pull_request` workflow for the PR head commit |
+| Push to `beta_branch` | Start or reuse one `beta` workflow |
+| Push to `production_branch` | Start or reuse one `production` workflow |
+| PR body edited | Refresh notes on active uploaded builds for that PR commit without rebuilding |
+| PR closed or merged | Run workflow-scoped TestFlight expiry |
+| Successful configured production Xcode workflow | Evaluate App Store submission |
+
+The uniqueness decision is repository + provider + workflow + commit + purpose.
+The trigger path also queries Xcode Cloud before starting a run. This prevents
+GitHub delivery retries and simultaneous PR/push event shapes from starting the
+same workflow twice. A new commit on an open PR does create a new PR build; a
+plain push event for that PR branch does not.
+
+### Current app routing
+
+| Repository | PR builds / cleanup | Beta builds | Production builds / submission / sync |
+| --- | --- | --- | --- |
+| JamsOnToast | `prod` app, PR workflow | `prod` app, beta workflow | `prod` app, production workflow |
+| Running Order | `uat` app, PR workflow | `prod` app, beta workflow | `prod` app, production workflow |
+
+An omitted app selection means `prod`. `internal` is supported exactly like
+`uat`; every build purpose and every automation may override its app independently.
 
 ## Setup
 
@@ -186,10 +251,9 @@ npm run trigger        # Start/reuse the configured build purpose
 npm run trigger:dry    # Resolve a build intent without starting it
 ```
 
-`trigger` is an explicit API/CLI operation in this change. A webhook listener
-can call the same provider-neutral path. Use `shadow` while comparing webhook
-intents with a build provider's native triggers, and `managed` after all native
-automatic triggers have been removed.
+The webhook listener calls the same provider-neutral trigger path as the CLI.
+Use `shadow` while comparing webhook intents with native triggers, and
+`managed` after all native automatic triggers have been removed.
 
 Xcode Cloud is a special case for pull-request builds. Apple rejects API-started
 PR builds when the workflow is deactivated or its enabled start conditions do
@@ -228,9 +292,10 @@ webhooks:
     token_env: XCODE_CLOUD_WEBHOOK_TOKEN
 ```
 
-The VPS deployment starts the listener with PM2, configures the signed GitHub
-hooks, and proxies it at `https://api.runningorder.app/merge4appstore/`. A
-manual deployment can set `pause_cron: true` for an isolated webhook test.
+The VPS deployment starts the listener with PM2, creates or updates the signed
+GitHub hooks, and proxies it at `https://api.runningorder.app/merge4appstore/`.
+Normal deployment enables the fallback cron; a manual deployment can set
+`pause_cron: true` for an isolated webhook test.
 
 ### Thin Xcode Cloud preparation
 
@@ -287,6 +352,57 @@ the default: `true` for `pull_request`, `false` for `beta` and `production`.
 When a PR body is edited, the signed GitHub webhook refreshes the English
 TestFlight localization for every active uploaded build of that PR commit; no
 rebuild is required.
+
+### Marketing-version policy
+
+The app adapter reports its committed marketing version. The preparation
+service validates that value and compares it with App Store Connect for the app
+role selected by the build purpose:
+
+- PR and beta builds consider active and live App Store versions;
+- production builds use the latest live version as the reference;
+- if the repository version is already newer, it is preserved;
+- otherwise the service selects the next minor version.
+
+The service returns the result; the app repository remains responsible for
+applying it to its own project format. No Tuist-specific parsing exists in
+`merge4appstore`.
+
+## App Store release lifecycle
+
+Production processing remains the established `deploy` and `sync` path:
+
+1. A production workflow build is matched to its exact app and workflow.
+2. The corresponding App Store version is found or created, the build is
+   selected, notes are derived from the merged release PR, and review submission
+   is created or resumed.
+3. Existing empty review drafts are reused. Rejected versions and unresolved
+   review issues are reconciled so a later build can continue without creating
+   duplicate submissions.
+4. `sync` watches for `READY_FOR_SALE`, creates the release tag (for example
+   `v1.4-1400`), and updates the corresponding GitHub PR.
+
+Builds selected for any App Store version, builds from permanent branches, and
+builds whose provenance is ambiguous are never expired automatically.
+
+## Known operational limitations
+
+- The webhook server acknowledges after in-memory deduplication, then launches
+  child jobs. Delivery state and jobs do not survive a process restart.
+- Separate close and push deliveries for one repository can arrive together.
+  The current filesystem lock makes one child exit successfully instead of
+  queueing it. The five-minute `all` job can recover cleanup, but beta-trigger
+  recovery is not yet general. Durable per-repository serialization is the
+  highest-priority follow-up.
+- Apple can stop returning a source branch for an uploaded PR build after the
+  PR is merged. Cleanup deliberately fails safe in that case. The hosted design
+  must persist build-to-PR provenance when `BUILD_CREATED` arrives so later
+  expiry does not depend on mutable Apple source metadata.
+- The deployment uses one shared GitHub token and ASC credential set. It is not
+  tenant-isolated and should not be offered as hosted SaaS in this form.
+- Xcode Cloud completion payloads are treated as notifications and actionable
+  state is re-read through App Store Connect. The Xcode URL token is an endpoint
+  secret, not equivalent to a signed provider payload.
 
 ## Automatic VPS Deploy
 

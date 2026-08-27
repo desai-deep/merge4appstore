@@ -1,8 +1,11 @@
 # Product and Xcode Cloud CI ownership plan
 
-Status: proposal  
-Last reviewed: 2026-08-26  
-Depends on: repository app-role profiles introduced by PR #19
+Status: implementation plan informed by the deployed PR #19 baseline
+
+Last reviewed: 2026-08-27
+
+Baseline: PR #19 merged and deployed; app adapters merged in JamsOnToast #54
+and runningorder-ios #131
 
 ## Executive summary
 
@@ -37,39 +40,78 @@ encrypted credential store, GitHub App authentication, onboarding and
 discovery, webhook ingestion, observability, and removal of local repository
 checkout dependencies.
 
+## What the PR #19 implementation proved
+
+The plan is no longer based only on code inspection. The following paths have
+been exercised against GitHub, Xcode Cloud, and App Store Connect:
+
+- both apps use manual Xcode Cloud start conditions and builds are started from
+  signed GitHub webhooks;
+- PR open/synchronize produces one real archive per head commit, while the
+  separate push event for a PR branch does not produce a duplicate;
+- push to `develop` starts the beta workflow for the exact merge commit;
+- PR close expires the matching TestFlight build and leaves other workflows
+  and App Store-selected builds untouched;
+- Running Order routes PR builds and cleanup to UAT while beta and production
+  remain on the production app; Jams routes every purpose to one app;
+- the thin preparation API returns a centrally selected marketing version and
+  notes without assuming Tuist;
+- PR notes contain the body plus all commits since the latest published
+  ancestor build by default, and body edits can refresh notes without a build;
+- production submission, rejection reconciliation, review-draft reuse, live
+  release sync, and tag logic remain the existing modules and passed dry runs;
+- GitHub and Xcode Cloud webhook endpoints, HTTPS routing, PM2 health, profile
+  validation, and deployment all work on the current VPS.
+
+The merge test also exposed two production-relevant gaps:
+
+1. GitHub sends PR-closed and base-branch push deliveries close together. The
+   listener launches both, but the per-instance filesystem lock lets one exit
+   successfully rather than waiting. In the observed test, Jams ran cleanup
+   and skipped beta triggering; Running Order started beta and skipped cleanup.
+2. Apple stopped reporting the source branch for one completed UAT PR build
+   after merge. The cleanup correctly failed safe, but could not prove that the
+   build belonged to the now-closed PR.
+
+The test was recovered manually: Jams beta build #160 and Running beta build
+#1688 were started for their merge commits; Jams PR build #158 and Running UAT
+PR build #556 were expired. The product architecture must solve these cases by
+durably queueing jobs and persisting build provenance, not by adding retries
+around filesystem locks.
+
 ## Current responsibility boundaries
 
 | Owner | Current responsibility |
 | --- | --- |
-| App repository | Version lookup and mutation, TestFlight notes, Tuist installation/project generation, and the `develop` to `main` release PR workflow |
-| Xcode Cloud | Repository checkout, workflow triggers, build/test/archive, signing, upload, TestFlight distribution, and workflow environment secrets |
-| `merge4appstore` | Production submission, live-release synchronization and tagging, closed-PR build expiration, missed-trigger recovery, and GitHub comments |
+| App repository | Thin post-clone adapter, applying the returned marketing version and notes, project-specific setup such as Tuist, and the `develop` to `main` release PR workflow |
+| Xcode Cloud | Repository checkout, manually startable workflows, build/test/archive, signing, upload, TestFlight distribution, and the repository-scoped preparation token |
+| `merge4appstore` | Signed GitHub webhook routing, managed Xcode build starts, version and notes policy, production submission, live-release synchronization and tagging, closed-PR build expiration, missed-production-trigger recovery, and GitHub comments |
 | Repository profile | Branches, app roles, App Store Connect identifiers, Xcode Cloud workflow identifiers, and operation routing |
-| VPS | Runtime credentials, cron scheduling, locks, logs, and the persistent checkout used by optional beta-branch synchronization |
+| VPS | Runtime credentials, webhook service, cron reconciliation, locks, logs, and the optional checkout used by legacy beta-branch synchronization |
 
-PR #19 makes operation routing declarative and gives `prod`, `uat`, and
-`internal` consistent meanings. It does not yet remove duplicated CI logic or
-the operational coupling to one VPS.
+PR #19 makes operation routing declarative, gives `prod`, `uat`, and `internal`
+consistent meanings, and centralizes the shared version and note policy. It
+does not remove the operational coupling to one VPS or make webhook processing
+durable.
 
 ## Current cross-dependencies to remove
 
-1. The two app repositories contain similar but divergent version and
-   TestFlight-note scripts.
-2. Xcode Cloud holds App Store Connect credentials so build scripts can resolve
-   the marketing version.
-3. Xcode Cloud may also hold a GitHub token for PR-title lookup.
-4. The same App Store Connect credential is duplicated between Xcode Cloud and
-   the VPS.
-5. Xcode Cloud workflow IDs and trigger rules are configured manually and can
+1. The two app repositories still vendor similar HTTP/response adapters and
+   project-mutation code rather than consuming a pinned shared CI client.
+2. Xcode Cloud workflow IDs and manual start conditions are configured manually and can
    drift from the tracked profile.
-6. GitHub operations shell out to `gh` using a long-lived token.
-7. Release synchronization can use `IOS_REPO_PATH` to mutate and push from a
+3. GitHub operations shell out to `gh` using a long-lived personal token.
+4. Release synchronization can use `IOS_REPO_PATH` to mutate and push from a
    persistent local checkout.
-8. Each profile is polled every five minutes and coordinated using filesystem
-   locks rather than durable jobs and idempotency records.
-9. Logs are local files without customer-visible history, alerting, or an audit
+5. Webhook jobs and five-minute reconciliation are coordinated by one
+   filesystem lock per repository. Concurrent valid events can be skipped.
+6. Webhook delivery deduplication is an in-memory 24-hour map and is lost on
+   restart; accepted work is not durably recorded before the response.
+7. Apple source-branch metadata is queried at cleanup time rather than retained
+   when the build is created, so a later PR close may become unprovable.
+8. Logs are local files without customer-visible history, alerting, or an audit
    model.
-10. Release behavior assumes specific branches, one release PR, English notes,
+9. Release behavior assumes specific branches, one release PR, English notes,
     and an opinionated App Store submission policy.
 
 ## Target responsibility boundaries
@@ -418,8 +460,8 @@ release pipeline and key management are mature.
 | --- | --- | --- |
 | VPS `.env` | ASC key ID, issuer ID, and base64 `.p8` content | Build inspection, expiration, workflow recovery, submission, and release synchronization |
 | VPS `.env` | `GH_TOKEN` | GitHub reads, comments, tags, and optional pushes through `gh` |
-| Xcode Cloud shared environment | ASC key ID, issuer ID, and `.p8` content | Marketing-version lookup from app-side scripts |
-| Xcode Cloud shared environment | `GITHUB_TOKEN`/`GH_TOKEN` | PR metadata fallback for TestFlight notes |
+| VPS `.webhook.env` | GitHub webhook secret, Xcode webhook URL token, and one repository-scoped preparation token per app repository | Authenticate inbound events and post-clone preparation requests |
+| Xcode Cloud shared environment | `MERGE4APPSTORE_URL` and the repository-scoped preparation token | Call the thin preparation endpoint; no ASC or GitHub credential is required |
 | Deployment repository secrets | VPS host, user, SSH key, and server directory | Deploy the service, not customer automation |
 
 Profiles contain identifiers and policy, not secrets.
@@ -452,6 +494,145 @@ The GitHub App should request the smallest permissions for enabled modules:
 Build tokens must be distinct from interactive/API sessions, scoped to one
 installation and repository, short-lived or readily rotatable, and unable to
 invoke release mutations.
+
+## GitHub App implementation plan
+
+The GitHub App is the next identity and onboarding boundary. It should replace
+both the customer PAT and the deployment step that creates ordinary repository
+webhooks. One installation supplies signed events and short-lived installation
+tokens for only the repositories the customer selected.
+
+### Registration and minimum permissions
+
+Register separate development and production GitHub Apps so test callbacks and
+secrets cannot affect production installations. Configure a setup URL for
+onboarding, an optional user authorization callback only if user-level actions
+become necessary, and the shared product webhook endpoint. Subscribe to:
+
+- `installation` and `installation_repositories` for lifecycle and access
+  changes;
+- `pull_request` for build intent, note refresh, cleanup, and release-PR state;
+- `push` for beta/production build intent and tag/branch reconciliation.
+
+Request these repository permissions initially:
+
+| Permission | Access | Why |
+| --- | --- | --- |
+| Metadata | Read | Required by GitHub Apps and repository identity checks |
+| Contents | Read by default; write when release sync is enabled | Commits, branches, comparisons, release-note ranges, and optional Git tag creation |
+| Pull requests | Read and write | Read PR bodies/commits and post lifecycle comments |
+
+GitHub does not offer separate read and write grants for one permission in the
+same installation, so the product should publish a read-mostly base app and
+decide whether release-tag creation justifies requesting `Contents: write` by
+default. No Actions, Checks, Deployments, Administration, Members, Issues, or
+Secrets permission is required for the baseline. A GitHub App receives its own
+installation webhooks; it should not create a classic hook in every repository.
+
+Avoid user OAuth at first. Installation tokens can perform every current
+repository operation. Add user authorization only if the UI later needs to act
+as a particular person or enumerate organizations before an installation is
+selected.
+
+### Authentication implementation
+
+1. Store the App ID and private key as provider-owned deployment secrets.
+2. Verify every webhook against the GitHub App webhook secret before parsing
+   tenant-controlled fields.
+3. Map `installation.id` plus repository node ID to one tenant/repository
+   record; never select a tenant from a URL slug alone.
+4. Mint a JWT for the GitHub App only long enough to request an installation
+   token. Cache the installation token until shortly before expiry and refresh
+   under a single-flight lock.
+5. Replace `GitHubAPI`/`GitHubTags` shell calls with a typed HTTP client that
+   always receives installation and repository scope explicitly.
+6. Record the GitHub request ID, rate-limit headers, installation ID, repository
+   ID, and operation result in the audit event without recording credentials.
+7. On suspension, uninstall, or repository removal, reject new build tokens,
+   cancel queued mutations for that scope, and retain only the configured audit
+   history.
+
+### Persistent data model
+
+The first database schema should include:
+
+- `tenants` and `github_installations`;
+- `repositories` keyed by immutable GitHub repository ID, with owner/name as
+  mutable display data;
+- versioned `profiles` and module flags;
+- encrypted `asc_credentials` and their validated provider/team metadata;
+- hashed, rotatable `build_tokens` scoped to one repository;
+- `webhook_deliveries` keyed by provider + installation/product + delivery ID;
+- `build_intents` with the durable repository/provider/workflow/commit/purpose
+  uniqueness constraint;
+- `provider_runs` and immutable build-to-PR/workflow/app provenance;
+- `jobs`, attempts, next-run time, terminal reason, and dead-letter state;
+- `audit_events` describing policy version, input IDs, decision, mutation, and
+  external response IDs.
+
+Store accepted webhook delivery and its derived jobs in one transaction before
+returning `202`. Workers should serialize mutations by repository while still
+allowing safe reads in parallel. A PR close and base-branch push must both be
+retained and run in order; neither may be converted into a successful no-op by
+lock contention.
+
+### Onboarding flow
+
+1. User installs the GitHub App on selected repositories.
+2. Setup callback creates or selects the tenant and displays only repositories
+   present in that installation.
+3. User uploads an ASC issuer ID, key ID, and `.p8`; the service encrypts it
+   before persistence and performs read-only validation.
+4. Discovery lists Apple apps, bundle IDs, Xcode Cloud products/workflows, and
+   their supported manual start conditions.
+5. User maps `prod`, optional `uat`/`internal`, branches, and the three build
+   purposes. Each omitted purpose app defaults to `prod`.
+6. Validation checks exact GitHub repository linkage, app/workflow ownership,
+   workflow manual branch/PR support, webhook health, and required GitHub App
+   permissions for the enabled modules.
+7. The App opens a bootstrap PR containing the pinned thin adapter and a
+   repository-scoped build token is added to Xcode Cloud by the user.
+8. Shadow mode records the build that each GitHub event would start. Once the
+   mapping is proven, onboarding instructs the user to remove native automatic
+   Xcode triggers and enables managed mode.
+9. A guided PR open/update/close test proves one build per commit, note refresh,
+   and cleanup. A beta test proves the merge push. Production remains dry-run
+   until explicitly enabled.
+
+GitHub cannot configure Xcode Cloud secrets or all workflow/start-condition UI
+through GitHub permissions. Those Apple steps remain a short guided checklist
+unless future App Store Connect APIs expose safe complete management.
+
+### Delivery slices and acceptance criteria
+
+1. **App identity spike:** authenticate one development installation, list its
+   selected repositories, read a PR/commit, and create/delete a test tag using
+   installation tokens. Prove token refresh and uninstall handling.
+2. **GitHub client migration:** implement a transport interface, contract-test
+   it, replace all `gh` subprocess reads/comments/tags, and run current dry runs
+   with PAT and App transports for comparison.
+3. **Durable ingress and queue:** add the data model, transactional webhook
+   acceptance, per-repository serialization, retries, dead-letter/replay, and
+   durable delivery/build-intent uniqueness.
+4. **Provenance capture:** on intent and Xcode `BUILD_CREATED`, persist the PR,
+   source/target refs, exact commit, app, workflow, provider run, and uploaded
+   build ID. Cleanup must succeed from stored provenance even after Apple drops
+   source metadata, while still corroborating the build through ASC.
+5. **Single-repository shadow migration:** install on JamsOnToast, receive App
+   webhooks alongside the existing hook without mutating twice, compare every
+   derived decision, then remove its classic hook and PAT access.
+6. **Second-app and role test:** migrate Running Order and prove UAT PR cleanup
+   plus production beta/submission isolation.
+7. **Self-service onboarding:** add ASC discovery, profile editor, validation,
+   bootstrap PR, health checks, credential rotation, and disconnect/delete.
+8. **Pilot hardening:** per-tenant quotas, rate-limit/backoff behavior,
+   observability, backups, incident procedures, billing, and several external
+   indie repositories.
+
+The GitHub App milestone is complete only when duplicate deliveries and
+simultaneous close/push events survive worker restarts without a lost or
+duplicated external mutation, revoking one installation affects no other
+tenant, and the VPS no longer needs a customer PAT.
 
 ## Customer onboarding
 
@@ -587,17 +768,37 @@ entry point, not a claim that no private or future implementation exists. Apple
 documents [stopping TestFlight testing as a manual
 operation](https://developer.apple.com/help/app-store-connect/test-a-beta-version/stop-testing-a-build).
 
-## Pricing hypothesis to validate
+## Pricing and infrastructure hypothesis to validate
 
-Do not finalize pricing before interviewing users and measuring release volume.
-A plausible initial structure, intentionally below full release-management
+The direct runtime cost is low because customer-owned Xcode Cloud performs the
+macOS compute, signing, archive, and upload. The service handles small webhook
+payloads, database rows, queue work, and comparatively light GitHub/ASC API
+traffic. One modest application VPS plus managed database/queue can serve many
+indie repositories initially; scale should be based on queued job latency and
+provider calls, not one VPS per repository.
+
+The expensive parts are engineering and support: securely holding ASC private
+keys, backups and audit history, debugging Apple state transitions, customer
+onboarding, and responding to provider changes. Payment fees and support can
+also dominate a $10 annual invoice. Therefore `$10/year/repository` is viable
+as a founding or hobby acquisition tier with fair use and limited support, but
+is unlikely to fund the complete hosted product by itself.
+
+The product should allow unlimited releases on paid indie tiers. We do not pay
+the build-minute cost, so an artificial annual release count would reproduce
+the main weakness of Tramline's hobby plan without protecting a meaningful
+cost. Apply fair-use limits to webhook/API abuse, retained audit history, and
+concurrency instead of charging per release.
+
+A launch structure to test, intentionally below full release-management
 platforms, is:
 
 | Tier | Hypothesis | Intended user |
 | --- | --- | --- |
-| Hobby | Free for 1 app, limited monthly releases, dry runs and PR cleanup | Solo developer validating the integration |
-| Indie | $12-20/app/month | Small apps wanting unattended cleanup, recovery, and submission |
-| Team | $49-79/month including several apps, then per-app overage | Teams needing approvals, audit history, alerts, and shared policies |
+| Self-hosted | Free/open core | Developers willing to operate credentials and infrastructure |
+| Founding Indie | $10/year/repository, unlimited releases, fair use, short history, community support | Early solo developers validating onboarding and reliability |
+| Indie | $29-49/year/repository, unlimited releases and longer history | Sustainable default for maintained hosted automation |
+| Team | $99-199/year including several repositories, then a clear per-repo overage | Teams needing approvals, audit history, alerts, and shared policies |
 | Self-hosted/Enterprise | Annual or contact-sales | Organizations requiring their own infrastructure, SSO, retention, and support |
 
 Charge for a logical product/repository or its release automation, not build
@@ -607,17 +808,44 @@ and customers should not pay three times because one product uses separate
 because the nearest transparent competitor, Tramline, charges $50/month/app for
 its Team tier while offering a broader release-management surface.
 
+### Provider rate limits
+
+Rate limits do not prevent this model if events are webhook-first and state is
+cached. GitHub App installation tokens have a documented minimum REST budget of
+5,000 requests per hour per installation, scaling for larger non-Enterprise
+installations up to 12,500; Enterprise Cloud installations receive 15,000.
+GitHub can also enforce secondary limits, so workers must respect
+`x-ratelimit-*` and `retry-after`, use conditional requests, and avoid polling.
+See [GitHub's current REST rate-limit documentation](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api).
+
+App Store Connect reports the actual rolling-hour budget for the API key in
+every `X-Rate-Limit` header; Apple's example is 3,500 requests/hour but the
+documentation explicitly says actual limits vary. A `429 RATE_LIMIT_EXCEEDED`
+must reschedule rather than spin. See [Apple's App Store Connect rate-limit
+documentation](https://developer.apple.com/documentation/appstoreconnectapi/identifying-rate-limits).
+Because the Apple budget is shared by calls using the same customer key, keep a
+per-credential budget, coalesce build/version reads, cache immutable provider
+objects, and reserve capacity for production submission over low-priority
+reconciliation. This favors customer-owned ASC credentials and webhooks; it
+does not require dedicated infrastructure per repository.
+
 ## Delivery phases
 
-### Phase 0: consolidate the current system
+### Phase 0: consolidate the current system (baseline complete)
 
-- Merge and deploy the role-based profiles.
-- Restrict each PR workflow to the intended target branch.
-- Remove confirmed-unused repository secrets.
-- Document current credential ownership and rotation.
-- Disable or explicitly configure `IOS_REPO_PATH` per profile so one app cannot
+- Completed: merge and deploy role-based profiles for both repositories.
+- Completed: make every Xcode workflow manually startable and route PR events
+  only when the target is the configured beta branch.
+- Completed: remove ASC/GitHub policy credentials from app-side preparation;
+  Xcode keeps only the URL and scoped build token.
+- Completed: document current credential ownership and behavior in the README.
+- Completed: disable `IOS_REPO_PATH` for Jams and scope all optional behavior so
+  one profile cannot
   inherit another app's checkout.
-- Add structured decision output to all dry runs.
+- Completed: validate profiles and run production submission/reconciliation dry
+  runs without changing those established modules.
+- Remaining stabilization: replace skipped-on-lock behavior and retain build
+  provenance before relying on the baseline unattended.
 
 Exit criteria:
 
@@ -625,14 +853,16 @@ Exit criteria:
 - cleanup cannot inspect or expire a build outside its configured PR workflow;
 - no app silently inherits another app's repository path or optional behavior.
 
-### Phase 1: shared CI kit
+### Phase 1: shared CI kit (policy centralized, client packaging remaining)
 
-- Extract environment classification, version resolution, note generation, and
-  diagnostics into a versioned client.
+- Completed: centralize purpose inference, version resolution, note generation,
+  app-role routing, and request validation in the service.
 - Leave only Tuist/project preparation and Apple's required wrapper in app
   repositories.
-- Vendor and pin the first client release.
-- Add contract tests using captured Xcode Cloud environment combinations.
+- Extract the two remaining HTTP/apply adapters into one versioned CI client.
+- Vendor and pin the first client release in both repositories.
+- Add contract tests using captured Xcode Cloud environment combinations,
+  including delayed Apple PR/source discovery and service-unavailable behavior.
 - Let the bot open client-update PRs.
 
 Exit criteria:
@@ -641,23 +871,29 @@ Exit criteria:
 - UAT/internal differences are profile data rather than divergent shell code;
 - a client upgrade can be reviewed and rolled back independently.
 
-### Phase 2: central build preparation and GitHub App
+### Phase 2: central build preparation and GitHub App (partially implemented)
 
 - Implement GitHub App installation authentication and replace `gh` calls.
-- Implement signed GitHub webhook ingestion, durable delivery deduplication,
+- Implemented baseline: signed GitHub webhook ingestion; remaining: durable delivery deduplication,
   and jobs for PR, push, installation, and permission events.
-- Implement Xcode Cloud webhook ingestion for build-created, build-started, and
+- Implemented baseline: token-protected Xcode completion ingestion; remaining:
+  build-created, build-started, and
   build-completed events; corroborate every actionable event through ASC API.
-- Define the provider-neutral `BuildIntent`, `BuildEvent`, and `BuildProvider`
+- Implemented baseline: provider-neutral `BuildIntent` and Xcode provider;
+  remaining: persist `BuildEvent` and provider contracts rather than process-local results.
+- Continue to evolve the `BuildProvider`
   contracts and implement the Xcode Cloud provider using the customer's ASC
   credential.
-- Add managed GitHub-webhook triggers for manual Xcode Cloud branch and PR
-  workflows, with shadow mode and durable duplicate prevention.
+- Implemented baseline: managed GitHub-webhook triggers for manual Xcode Cloud
+  branch and PR workflows, shadow mode, and provider lookup before start;
+  remaining: durable duplicate prevention and queued transient retries.
 - Register signed App Store Connect app webhooks for build, beta, and version
   state changes.
-- Add the repository-scoped build preparation endpoint and idempotency.
-- Store ASC credentials centrally and return only non-secret build inputs.
-- Remove ASC and GitHub credentials from Xcode Cloud after migration.
+- Implemented baseline: repository-scoped build preparation endpoint returning
+  non-secret inputs; remaining: durable request idempotency.
+- Implemented for current apps: ASC/GitHub credentials are centralized and no
+  longer required for preparation in Xcode Cloud; remaining: encrypted
+  per-tenant storage.
 - Move release PR maintenance into GitHub webhooks.
 - Replace local-checkout tag/branch mutations with GitHub API operations.
 
@@ -729,7 +965,7 @@ Exit criteria:
 | Scope expands into full CI/release management | Maintain the initial Xcode Cloud lifecycle wedge and phase-gate broader roadmap items using customer evidence |
 | Competitors add similar cleanup/recovery | Differentiate on Apple-specific correctness, explainable policy, minimal setup, and open/self-hostable components where valuable |
 
-## Decisions required before implementation
+## Product decisions still required
 
 1. Hosted SaaS, self-hosted product, or a shared core supporting both.
 2. Whether build preparation may fall back when the service is unavailable.
@@ -737,22 +973,48 @@ Exit criteria:
 4. Whether profiles remain Git-tracked, become database records, or use Git as
    an optional configuration source.
 5. Which submission and cancellation operations require explicit approval.
-6. Whether the first commercial target is indie developers or mobile teams.
+6. Confirm indie developers as the first commercial target and decide whether
+   `$10/year/repository` is a founding tier or a permanent constrained tier.
 7. Whether the CI client is vendored first or downloaded as a signed artifact.
 8. Required audit retention and regional/security expectations for ASC keys.
 
 ## Immediate next work
 
-1. Complete Phase 0 and verify both existing apps end to end.
-2. Specify a JSON schema for the build preparation request and response.
-3. Extract a pure, tested environment-classification module from the two app
-   script variants.
-4. Prototype a vendored CI client and migrate one app before centralizing
-   credentials.
-5. Prototype GitHub App permissions and installation-token operations.
-6. Interview five Xcode Cloud users before committing to hosted architecture or
-   pricing.
-7. Test the positioning against Runway and Tramline users: the question is not
+1. Fix the observed event-loss race before relying on the merged baseline:
+   queue every accepted webhook job, serialize mutations per repository, make
+   lock contention retryable rather than exit `0`, and add an integration test
+   where PR close and the merge push arrive concurrently.
+2. Persist build provenance at intent creation and `BUILD_CREATED`, then test
+   cleanup after the Apple source branch disappears. Never weaken the existing
+   fail-safe cleanup rule to infer from build number alone.
+3. Register a private development GitHub App with the permissions and events in
+   the GitHub App section. Implement JWT signing, installation-token caching,
+   webhook verification, installation lifecycle handling, and typed PR/commit/
+   comment/tag operations behind a transport interface.
+4. Add Postgres-backed tenants, installations, repositories, delivery records,
+   build intents/runs, jobs, encrypted ASC credential metadata, and audit
+   events. The webhook transaction must commit the delivery and jobs before
+   returning `202`.
+5. Run the GitHub App in shadow mode on JamsOnToast next to the existing classic
+   hook/PAT, compare decisions, then cut over without changing Xcode workflow or
+   App Store submission logic. Repeat with Running Order to exercise split UAT
+   and production roles.
+6. Package and pin the shared CI client, migrate both app adapters, document
+   rollback/service-unavailable behavior, and have the App create update PRs.
+7. Replace five-minute full polling with overdue-state reconciliation every
+   30–60 minutes after durable webhook operation is proven. Keep an explicit
+   manual reconcile command and customer-visible reason for every repair.
+8. Exercise a production submission dry run from stored intent through draft
+   reuse, rejection reconciliation, version selection, release sync, and tag
+   creation using the GitHub App transport. Use the next real release as the
+   supervised live acceptance test with rollback/runbook ready.
+9. Build the minimum onboarding path: install App, upload/validate ASC key,
+   discover apps/workflows, map roles/purposes, validate manual start
+   conditions, open adapter PR, run shadow test, and enable modules.
+10. Interview five Xcode Cloud indie developers and offer the `$10/year`
+   founding tier to measure successful setup, retained use, support minutes,
+   and willingness to pay before fixing long-term pricing.
+11. Test positioning against Runway and Tramline users: the question is not
    whether automation is possible, but whether this narrower Xcode Cloud-native
    workflow is easier, safer, and cheaper enough to switch or supplement their
    current process.
