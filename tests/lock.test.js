@@ -8,6 +8,7 @@ test('waits for a busy repository lock instead of dropping the job', async () =>
   const acquired = await waitForLock({
     timeoutMs: 100,
     retryMs: 1,
+    sleep: async () => {},
     acquire: () => {
       attempts += 1;
       return attempts === 3;
