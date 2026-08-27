@@ -156,7 +156,7 @@ async function main() {
   try {
     if (mode === 'notes') {
       if (!repositoryProfile) throw new Error('notes mode requires --profile');
-      for (const name of ['BUILD_COMMIT_SHA', 'BUILD_BRANCH']) {
+      for (const name of ['BUILD_COMMIT_SHA', 'BUILD_BRANCH', 'BUILD_PULL_REQUEST']) {
         if (!process.env[name]) throw new Error(`notes mode requires ${name}`);
       }
       const purpose = process.env.BUILD_PURPOSE || 'pull_request';
@@ -165,7 +165,7 @@ async function main() {
       await refreshTestFlightNotes(asc, github, build, {
         commit: process.env.BUILD_COMMIT_SHA,
         branch: process.env.BUILD_BRANCH,
-        pull_request: process.env.BUILD_PULL_REQUEST || null,
+        pull_request: process.env.BUILD_PULL_REQUEST,
       }, DRY_RUN);
     }
 

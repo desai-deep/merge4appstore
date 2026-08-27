@@ -176,6 +176,16 @@ test('rejects non-standard app roles', () => {
   assert.throws(() => validateRepositoryProfile(profile), /Unknown app role: main/);
 });
 
+test('requires every configured workflow id to be a non-empty string', () => {
+  const empty = profileFixture();
+  empty.apps.prod.workflows.production = '';
+  assert.throws(() => validateRepositoryProfile(empty), /apps\.prod\.workflows\.production must be a non-empty string/);
+
+  const mapping = profileFixture();
+  mapping.apps.prod.workflows.production = { id: 'workflow' };
+  assert.throws(() => validateRepositoryProfile(mapping), /apps\.prod\.workflows\.production must be a non-empty string/);
+});
+
 test('rejects unsupported profile versions', () => {
   const profile = profileFixture();
   profile.version = 2;
