@@ -9,6 +9,7 @@ test('waits for a busy repository lock instead of dropping the job', async () =>
     timeoutMs: 100,
     retryMs: 1,
     sleep: async () => {},
+    now: () => 0,
     acquire: () => {
       attempts += 1;
       return attempts === 3;
