@@ -175,8 +175,11 @@ Management is explicitly opt-in at every level:
   landscape. Files are grouped by inferred type and ordered alphabetically, so
   use prefixes such as `01-`, `02-`, and `03-`.
 - Explicit `<locale>/screenshots/<APPLE_DISPLAY_TYPE>/` directories remain
-  available as an override for ambiguous or newly introduced dimensions. Flat
-  and explicit assets may coexist and are combined into the selected set.
+  available as an override for ambiguous or newly introduced dimensions. The
+  directory must use Apple's `APP_...` display-type form; values are forwarded
+  to App Store Connect so newly introduced Apple types do not require a
+  merge4appstore release. Flat and explicit assets may coexist and are combined
+  into the selected set.
 - A present display-type directory is authoritative for that locale and type:
   files are uploaded or removed to match the repository. An inferred flat set
   is authoritative whenever at least one flat image resolves to that type.
@@ -184,9 +187,10 @@ Management is explicitly opt-in at every level:
   set, leave a `.gitkeep` file in that display-type directory.
 - Screenshots support PNG and JPEG. A flat image with unknown or ambiguous
   dimensions fails safely and names the explicit directory it needs. App
-  Preview videos support MOV, MP4, and
-  M4V; App Store Connect still validates Apple's size, codec, duration, and
-  device requirements during processing.
+  Preview videos support MOV, MP4, and M4V and always require an explicit
+  `<locale>/previews/<APPLE_PREVIEW_TYPE>/` directory; a misplaced flat preview
+  fails with a clear error. App Store Connect still validates Apple's size,
+  codec, duration, and device requirements during processing.
 
 If `en-US/whats_new.txt` exists, it replaces the usual release-PR-title notes
 for that submission. Other locales and omitted `whats_new` fields retain their
