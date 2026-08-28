@@ -3,6 +3,28 @@ import assert from 'node:assert/strict';
 
 import { GitHubAPI } from '../lib/github.js';
 
+test('updates the existing marked automation comment', () => {
+  const github = new GitHubAPI('example', 'ios');
+  const calls = [];
+  github.exec = args => {
+    calls.push(args);
+    if (args.includes('--slurp')) return JSON.stringify([[
+      { id: 456, body: '<!-- submission:1 -->\nOld failure' },
+    ]]);
+    return '';
+  };
+
+  assert.equal(
+    github.upsertPRComment(12, '<!-- submission:1 -->', '<!-- submission:1 -->\nNew failure'),
+    'updated',
+  );
+  assert.deepEqual(calls[1], [
+    'api', '--method', 'PATCH',
+    'repos/example/ios/issues/comments/456',
+    '-f', 'body=<!-- submission:1 -->\nNew failure',
+  ]);
+});
+
 test('release notes always use the PR title', () => {
   const github = new GitHubAPI('desai-deep', 'merge4appstore');
   const prDetails = {

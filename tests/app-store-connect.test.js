@@ -1,7 +1,39 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { AppStoreConnectAPI } from '../lib/app-store-connect.js';
+import {
+  AppStoreConnectAPI,
+  appStoreErrorDetails,
+  formatAppStoreErrorDetail,
+} from '../lib/app-store-connect.js';
+
+test('surfaces associated App Store errors instead of only the generic wrapper', () => {
+  const details = appStoreErrorDetails({
+    errors: [{
+      code: 'ENTITY_ERROR',
+      detail: 'This resource cannot be reviewed',
+      meta: {
+        associatedErrors: {
+          '/v1/appStoreVersions/version-1': [{
+            code: 'STATE_ERROR.SCREENSHOT_REQUIRED.APP_IPAD_PRO_3GEN_129',
+            title: 'App screenshot missing (APP_IPAD_PRO_3GEN_129)',
+            detail: 'A screenshot with type ipadPro129 is required but was not provided',
+          }],
+        },
+      },
+    }],
+  });
+
+  assert.deepEqual(details, [{
+    code: 'STATE_ERROR.SCREENSHOT_REQUIRED.APP_IPAD_PRO_3GEN_129',
+    title: 'App screenshot missing (APP_IPAD_PRO_3GEN_129)',
+    detail: 'A screenshot with type ipadPro129 is required but was not provided',
+  }]);
+  assert.equal(
+    formatAppStoreErrorDetail(details[0]),
+    'App screenshot missing (APP_IPAD_PRO_3GEN_129): A screenshot with type ipadPro129 is required but was not provided',
+  );
+});
 
 function createASCWithVersions(versions) {
   const asc = new AppStoreConnectAPI('key', 'issuer', Buffer.from('fake-key').toString('base64'));

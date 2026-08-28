@@ -68,9 +68,44 @@ function createGitHub(overrides = {}) {
     getPRDetails: () => ({ title: 'Release build' }),
     extractReleaseNotes: () => 'Release build',
     addPRComment: () => true,
+    upsertPRComment: () => 'created',
     ...overrides,
   };
 }
+
+test('surfaces App Store requirements on the release PR without hiding the failure', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    const failure = new Error('API Error 409: This resource cannot be reviewed');
+    failure.statusCode = 409;
+    failure.appStoreErrors = [{
+      code: 'STATE_ERROR.SCREENSHOT_REQUIRED.APP_IPAD_PRO_3GEN_129',
+      title: 'App screenshot missing (APP_IPAD_PRO_3GEN_129)',
+      detail: 'A screenshot with type ipadPro129 is required but was not provided',
+    }];
+    let posted = null;
+    const asc = createASC({
+      getTestFlightReadyBuilds: async () => ([
+        { buildNumber: '161', version: '1.2', buildId: 'build-161' },
+      ]),
+      getBuildByNumber: async () => ({ buildId: 'build-161', version: '1.2' }),
+      submitForReview: async () => { throw failure; },
+    });
+    const github = createGitHub({
+      upsertPRComment: (prNumber, marker, comment) => {
+        posted = { prNumber, marker, comment };
+        return 'created';
+      },
+    });
+
+    await assert.rejects(runDeployCheck(asc, github, false), error => error === failure);
+    assert.equal(posted.prNumber, 123);
+    assert.match(posted.marker, /version-1\.2:161/);
+    assert.match(posted.comment, /App screenshot missing \(APP_IPAD_PRO_3GEN_129\)/);
+    assert.match(posted.comment, /ipadPro129 is required/);
+    assert.match(posted.comment, /Build #161 remains selected for version 1\.2/);
+    assert.match(posted.comment, /A new build is not required/);
+  });
+});
 
 test('recovers a missed production workflow trigger for a merged PR', async () => {
   await withTriggerRecovery(async () => {
