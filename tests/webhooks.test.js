@@ -91,6 +91,30 @@ test('maps beta and production pushes to their managed build purposes', () => {
   assert.deepEqual(jobsForGitHubEvent(profile, 'push', { ref: 'refs/heads/feature', after: 'ghi', repository }, 'three'), []);
 });
 
+test('deploys metadata-only production pushes without starting a new build', () => {
+  const metadataProfile = { ...profile, metadata: { path: 'AppStore' } };
+  const repository = { full_name: 'example/ios' };
+  const basePayload = {
+    ref: 'refs/heads/main', after: 'def', repository, size: 1,
+    commits: [{ added: [], modified: ['AppStore/en-US/description.txt', 'AppStore/en-US/screenshots/APP_IPHONE_69/01.png'], removed: [] }],
+  };
+
+  assert.deepEqual(jobsForGitHubEvent(metadataProfile, 'push', basePayload, 'metadata'), [
+    { mode: 'deploy', reconcileMetadata: true, deliveryId: 'metadata' },
+  ]);
+  assert.equal(jobsForGitHubEvent(metadataProfile, 'push', {
+    ...basePayload,
+    commits: [{ added: [], modified: ['AppStore/en-US/description.txt', 'Sources/App.swift'], removed: [] }],
+  }, 'mixed')[0].purpose, 'production');
+  assert.equal(jobsForGitHubEvent(metadataProfile, 'push', {
+    ...basePayload, size: 2,
+  }, 'truncated')[0].purpose, 'production');
+  assert.equal(jobsForGitHubEvent({ ...profile, metadata: { path: 'metadata.json' } }, 'push', {
+    ...basePayload,
+    commits: [{ added: [], modified: ['metadata.json'], removed: [] }],
+  }, 'file-path')[0].purpose, 'production');
+});
+
 test('normalizes full Git refs in build preparation payloads', () => {
   assert.deepEqual(normalizePreparePayload({
     branch: 'refs/heads/feature/player',
@@ -117,6 +141,25 @@ test('settles a webhook job when its child process cannot start', async () => {
   );
 
   assert.equal(await result, 1);
+});
+
+test('passes metadata reconciliation intent only to its deploy process', async () => {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  let environment;
+  const result = runJob(
+    { profile, profilePath: '/tmp/example.yml' },
+    { mode: 'deploy', reconcileMetadata: true },
+    (_executable, _args, options) => {
+      environment = options.env;
+      queueMicrotask(() => child.emit('exit', 0));
+      return child;
+    },
+  );
+
+  assert.equal(await result, 0);
+  assert.equal(environment.RECONCILE_METADATA, 'true');
 });
 
 test('serializes simultaneous webhook jobs for one repository', async () => {

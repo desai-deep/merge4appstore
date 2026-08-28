@@ -89,6 +89,9 @@ repository:
   production_branch: main
   beta_branch: develop
 
+metadata: # optional
+  path: AppStore
+
 apps:
   prod:
     app_id: "123456789"
@@ -131,6 +134,76 @@ build:
 
 An automation may also set `app_id`, `bundle_id`, or `app_name` directly as an
 override. Prefer app roles when several values travel together.
+
+### Repository-managed App Store metadata
+
+An app repository may opt in by declaring a `metadata.path` directory in its
+profile. Its filesystem is loaded from the current production-branch head
+immediately before submission, so metadata can be corrected and retried without
+producing another binary. No manifest file is required.
+
+```text
+AppStore/
+├── en-US/
+│   ├── description.txt
+│   ├── keywords.txt
+│   ├── marketing_url.txt
+│   ├── promotional_text.txt
+│   ├── support_url.txt
+│   ├── whats_new.txt
+│   ├── screenshots/
+│   │   ├── 01-iphone-home.png
+│   │   ├── 02-iphone-player.png
+│   │   ├── 01-ipad-library.png
+│   │   └── APP_APPLE_TV/       # optional explicit override
+│   │       └── 01-tv-home.png
+│   └── previews/
+│       └── IPHONE_65/
+│           ├── 01-overview.mov
+│           └── 02-playback.mp4
+└── de-DE/
+    └── description.txt
+```
+
+Management is explicitly opt-in at every level:
+
+- An omitted locale, text file, screenshot directory, or preview directory is
+  left unchanged in App Store Connect.
+- A present text file updates only that field. An empty file clears it.
+- Screenshots may be placed directly in `<locale>/screenshots`. PNG and JPEG
+  pixel dimensions select Apple's display type automatically, in portrait or
+  landscape. Files are grouped by inferred type and ordered alphabetically, so
+  use prefixes such as `01-`, `02-`, and `03-`.
+- Explicit `<locale>/screenshots/<APPLE_DISPLAY_TYPE>/` directories remain
+  available as an override for ambiguous or newly introduced dimensions. The
+  directory must use Apple's `APP_...` display-type form; values are forwarded
+  to App Store Connect so newly introduced Apple types do not require a
+  merge4appstore release. Flat and explicit assets may coexist and are combined
+  into the selected set.
+- A present display-type directory is authoritative for that locale and type:
+  files are uploaded or removed to match the repository. An inferred flat set
+  is authoritative whenever at least one flat image resolves to that type.
+- Git cannot track an empty directory. To clear a managed screenshot or preview
+  set, leave a `.gitkeep` file in that display-type directory.
+- Screenshots support PNG and JPEG. A flat image with unknown or ambiguous
+  dimensions fails safely and names the explicit directory it needs. App
+  Preview videos support MOV, MP4, and M4V and always require an explicit
+  `<locale>/previews/<APPLE_PREVIEW_TYPE>/` directory; a misplaced flat preview
+  fails with a clear error. App Store Connect still validates Apple's size,
+  codec, duration, and device requirements during processing.
+
+If `en-US/whats_new.txt` exists, it replaces the usual release-PR-title notes
+for that submission. Other locales and omitted `whats_new` fields retain their
+normal behavior.
+
+A production push containing only files in the configured metadata directory
+runs deployment reconciliation directly instead of starting Xcode Cloud. Mixed
+code and metadata pushes still use the normal production build path. GitHub
+webhook payloads that might have a truncated commit list also fall back to a
+build, avoiding an unsafe metadata-only classification. The metadata webhook
+sets a one-job reconciliation intent that retries the selected binary after a
+metadata rejection and skips missed-build recovery. For a manual retry, run
+`RECONCILE_METADATA=true node index.js deploy --profile profiles/example.yml`.
 
 ### 3. Run
 
@@ -322,7 +395,7 @@ deployment job is disabled for pull-request events.
 | `APP_STORE_CONNECT_API_KEY_ID` | App Store Connect API Key ID |
 | `APP_STORE_CONNECT_ISSUER_ID` | App Store Connect Issuer ID |
 | `APP_STORE_CONNECT_API_KEY_CONTENT` | API private key (base64 encoded) |
-| `GH_TOKEN` | GitHub token for PR comments |
+| `GH_TOKEN` | GitHub token for PR comments/issues and, when configured, read access to repository metadata/assets |
 App and repository values live in YAML profiles. The legacy environment-only
 configuration remains supported; when no `--profile` is supplied it still
 requires `APP_BUNDLE_ID`, `APP_NAME`, `GITHUB_REPO_OWNER`, and

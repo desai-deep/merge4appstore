@@ -146,6 +146,84 @@ test('keeps a failed draft when the release PR cannot be notified', async () => 
   });
 });
 
+test('syncs repository metadata from production head and honors managed release notes', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    const events = [];
+    const asc = createASC({
+      getTestFlightReadyBuilds: async () => ([
+        { buildNumber: '161', version: '1.2', buildId: 'build-161' },
+      ]),
+      getBuildByNumber: async () => ({ buildId: 'build-161', version: '1.2' }),
+      getAppStoreVersionLocalizations: async () => ([
+        { id: 'localization-en-US', attributes: { locale: 'en-US' } },
+      ]),
+      updateAppStoreVersionLocalization: async (_id, attributes) => events.push(['metadata', attributes]),
+      updateReleaseNotes: async () => assert.fail('PR-title notes must not replace managed whats_new'),
+      selectBuildForVersion: async () => events.push(['select']),
+      submitForReview: async () => events.push(['submit']),
+    });
+    const github = createGitHub({
+      getProductionHead: () => 'production-head',
+      getRepositoryTree: (directory, ref) => {
+        assert.equal(directory, 'AppStore');
+        assert.equal(ref, 'production-head');
+        return [
+          { path: 'AppStore', type: 'tree', sha: 'root' },
+          { path: 'AppStore/en-US/whats_new.txt', type: 'blob', sha: 'notes' },
+        ];
+      },
+      getRepositoryBlob: sha => Buffer.from(sha === 'notes' ? 'Repository notes\n' : ''),
+    });
+
+    await runDeployCheck(asc, github, false, { metadataPath: 'AppStore' });
+    assert.deepEqual(events, [
+      ['metadata', { whatsNew: 'Repository notes' }],
+      ['select'],
+      ['submit'],
+    ]);
+  });
+});
+
+test('metadata reconciliation retries the blocked build without recovering an Xcode build', async () => {
+  await withTriggerRecovery(async () => {
+    let submitted = false;
+    const asc = createASC({
+      checkVersionWithUnresolvedIssues: async () => ({
+        hasUnresolvedIssues: true,
+        buildNumber: '161',
+        version: '1.2',
+        versionId: 'version-1.2',
+        state: 'PREPARE_FOR_SUBMISSION',
+        blockReason: 'unresolved_review',
+      }),
+      getWorkflowRunStatus: async () => assert.fail('metadata reconciliation must skip trigger recovery'),
+      getTestFlightReadyBuilds: async () => ([
+        { buildNumber: '161', version: '1.2', buildId: 'build-161' },
+      ]),
+      getBuildByNumber: async () => ({ buildId: 'build-161', version: '1.2' }),
+      getAppStoreVersionLocalizations: async () => ([
+        { id: 'localization-en-US', attributes: { locale: 'en-US' } },
+      ]),
+      updateAppStoreVersionLocalization: async () => {},
+      submitForReview: async () => { submitted = true; },
+    });
+    const github = createGitHub({
+      getProductionHead: () => 'metadata-head',
+      getRepositoryTree: () => ([
+        { path: 'AppStore', type: 'tree', sha: 'root' },
+        { path: 'AppStore/en-US/promotional_text.txt', type: 'blob', sha: 'promo' },
+      ]),
+      getRepositoryBlob: () => Buffer.from('Updated\n'),
+    });
+
+    await runDeployCheck(asc, github, false, {
+      metadataPath: 'AppStore',
+      reconcileMetadata: true,
+    });
+    assert.equal(submitted, true);
+  });
+});
+
 test('recovers a missed production workflow trigger for a merged PR', async () => {
   await withTriggerRecovery(async () => {
     let started = null;

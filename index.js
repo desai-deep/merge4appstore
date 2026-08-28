@@ -194,7 +194,10 @@ async function main() {
       const automation = selectAutomation('deploy');
       if (automation.enabled) {
         const { asc, github } = createClients();
-        await runDeployCheck(asc, github, DRY_RUN);
+        await runDeployCheck(asc, github, DRY_RUN, {
+          metadataPath: automation.metadataPath,
+          reconcileMetadata: process.env.RECONCILE_METADATA === 'true',
+        });
       }
     }
 

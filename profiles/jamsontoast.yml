@@ -8,6 +8,9 @@ repository:
   beta_branch: develop
   ios_repo_path: ""
 
+metadata:
+  path: AppStore
+
 webhooks:
   github:
     secret_env: GH_WEBHOOK_SECRET

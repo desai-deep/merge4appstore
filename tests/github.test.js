@@ -3,6 +3,49 @@ import assert from 'node:assert/strict';
 
 import { GitHubAPI } from '../lib/github.js';
 
+test('loads repository assets through the Git blob API', () => {
+  const github = new GitHubAPI('example', 'ios');
+  const calls = [];
+  github.exec = args => {
+    calls.push(args);
+    if (args[1].includes('/contents/')) return JSON.stringify({ type: 'file', sha: 'blob-sha' });
+    return JSON.stringify({ encoding: 'base64', content: 'aW1h\nZ2U=' });
+  };
+
+  assert.deepEqual(
+    github.getRepositoryFile('AppStore/screenshots/en-US/iPad 01.png', 'release/1.2'),
+    Buffer.from('image'),
+  );
+  assert.deepEqual(calls, [
+    ['api', 'repos/example/ios/contents/AppStore/screenshots/en-US/iPad%2001.png?ref=release%2F1.2'],
+    ['api', 'repos/example/ios/git/blobs/blob-sha'],
+  ]);
+});
+
+test('lists a metadata subtree from an immutable repository tree', () => {
+  const github = new GitHubAPI('example', 'ios');
+  const calls = [];
+  github.exec = args => {
+    calls.push(args);
+    if (args[1].includes('/commits/')) {
+      return JSON.stringify({ commit: { tree: { sha: 'tree-sha' } } });
+    }
+    return JSON.stringify({ truncated: false, tree: [
+      { path: 'AppStore', type: 'tree', sha: 'root' },
+      { path: 'AppStore/en-US/description.txt', type: 'blob', sha: 'description' },
+      { path: 'Sources/App.swift', type: 'blob', sha: 'source' },
+    ] });
+  };
+
+  assert.deepEqual(github.getRepositoryTree('AppStore', 'release/1.2').map(item => item.sha), [
+    'root', 'description',
+  ]);
+  assert.deepEqual(calls, [
+    ['api', 'repos/example/ios/commits/release%2F1.2'],
+    ['api', 'repos/example/ios/git/trees/tree-sha?recursive=1'],
+  ]);
+});
+
 test('updates the existing marked automation comment', () => {
   const github = new GitHubAPI('example', 'ios');
   const calls = [];
