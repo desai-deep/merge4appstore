@@ -156,3 +156,85 @@ test('expires only builds from the configured pull-request workflow', async () =
     assert.deepEqual(expiredBuilds, ['pr-build']);
   }));
 });
+
+test('expires a PR-workflow build by exact commit when Apple omits its source branch', async () => {
+  await withBranches(async () => withExpiryWorkflow('pr-workflow', async () => {
+    const expiredBuilds = [];
+    const asc = {
+      getTestFlightCleanupCandidates: async () => ([
+        { buildId: 'source-less', buildNumber: '556', version: '1.1' },
+      ]),
+      getBuildSource: async () => ({
+        found: true,
+        commitSha: 'abc123',
+        sourceBranch: null,
+        workflowId: 'pr-workflow',
+        workflowName: 'Pull Requests',
+      }),
+      expireBuild: async buildId => { expiredBuilds.push(buildId); },
+    };
+    const github = {
+      findClosedPRForBuild: (commit, base, head) => {
+        assert.deepEqual([commit, base, head], ['abc123', 'develop', null]);
+        return { number: 131, headBranch: 'codex/thin-xcode-cloud-ci', mergedAt: '2026-08-27T20:08:08Z' };
+      },
+    };
+
+    assert.deepEqual(await runClosedPRBuildExpiry(asc, github, false), {
+      checked: 1,
+      expired: 1,
+    });
+    assert.deepEqual(expiredBuilds, ['source-less']);
+  }));
+});
+
+test('keeps a source-less build outside the configured PR workflow', async () => {
+  await withBranches(async () => withExpiryWorkflow('pr-workflow', async () => {
+    const asc = {
+      getTestFlightCleanupCandidates: async () => ([
+        { buildId: 'beta-build', buildNumber: '1688', version: '1.1' },
+      ]),
+      getBuildSource: async () => ({
+        found: true,
+        commitSha: 'abc123',
+        sourceBranch: null,
+        workflowId: 'beta-workflow',
+        workflowName: 'Public Beta',
+      }),
+      expireBuild: async () => assert.fail('beta build must remain protected'),
+    };
+    const github = {
+      findClosedPRForBuild: () => assert.fail('wrong-workflow build must not query a PR'),
+    };
+
+    assert.deepEqual(await runClosedPRBuildExpiry(asc, github, false), {
+      checked: 1,
+      expired: 0,
+    });
+  }));
+});
+
+test('keeps a source-less build when no exact PR workflow is configured', async () => {
+  await withBranches(async () => withExpiryWorkflow('', async () => {
+    const asc = {
+      getTestFlightCleanupCandidates: async () => ([
+        { buildId: 'source-less', buildNumber: '556', version: '1.1' },
+      ]),
+      getBuildSource: async () => ({
+        found: true,
+        commitSha: 'abc123',
+        sourceBranch: null,
+        workflowId: 'unknown-workflow',
+      }),
+      expireBuild: async () => assert.fail('source-less build must remain protected'),
+    };
+    const github = {
+      findClosedPRForBuild: () => assert.fail('unsafe source-less fallback must not query a PR'),
+    };
+
+    assert.deepEqual(await runClosedPRBuildExpiry(asc, github, false), {
+      checked: 1,
+      expired: 0,
+    });
+  }));
+});

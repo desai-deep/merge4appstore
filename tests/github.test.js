@@ -205,3 +205,33 @@ test('treats a reused closed branch without one commit match as ambiguous', () =
 
   assert.equal(github.findClosedPRForBuild('abc123', 'develop', 'feature/player'), null);
 });
+
+test('uses an exact commit association when Apple omits the source branch', () => {
+  const github = new GitHubAPI('desai-deep', 'JamsOnToast');
+  github.exec = () => JSON.stringify([{
+    number: 54,
+    state: 'closed',
+    closed_at: '2026-08-27T20:08:08Z',
+    merged_at: '2026-08-27T20:08:08Z',
+    head: { ref: 'codex/thin-xcode-cloud-ci' },
+    base: { ref: 'develop' },
+  }]);
+
+  assert.deepEqual(github.findClosedPRForBuild('abc123', 'develop', null), {
+    number: 54,
+    headBranch: 'codex/thin-xcode-cloud-ci',
+    baseBranch: 'develop',
+    mergedAt: '2026-08-27T20:08:08Z',
+    closedAt: '2026-08-27T20:08:08Z',
+  });
+});
+
+test('keeps a source-less build when its commit association is ambiguous', () => {
+  const github = new GitHubAPI('desai-deep', 'JamsOnToast');
+  github.exec = () => JSON.stringify([
+    { number: 53, state: 'closed', head: { ref: 'one' }, base: { ref: 'develop' } },
+    { number: 54, state: 'closed', head: { ref: 'two' }, base: { ref: 'develop' } },
+  ]);
+
+  assert.equal(github.findClosedPRForBuild('abc123', 'develop', null), null);
+});

@@ -86,7 +86,7 @@ import { CONFIG, log } from './lib/config.js';
 import { AppStoreConnectAPI } from './lib/app-store-connect.js';
 import { GitHubAPI } from './lib/github.js';
 import { GitHubTags } from './lib/git.js';
-import { acquireLock, releaseLock } from './lib/lock.js';
+import { releaseLock, waitForLock } from './lib/lock.js';
 import { runDeployCheck } from './lib/deploy.js';
 import { runReleaseSync } from './lib/sync.js';
 import { runClosedPRBuildExpiry } from './lib/expire.js';
@@ -99,9 +99,9 @@ async function main() {
   const { mode } = cli;
 
   // Acquire lock
-  if (!acquireLock()) {
-    log('Another instance is already running, exiting');
-    process.exit(0);
+  if (!await waitForLock()) {
+    log('ERROR: Timed out waiting for another instance; this job was not completed');
+    process.exit(75);
   }
 
   // Ensure lock is released on exit

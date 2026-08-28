@@ -229,6 +229,12 @@ The VPS deployment starts the listener with PM2, configures the signed GitHub
 hooks, and proxies it at `https://api.runningorder.app/merge4appstore/`. A
 manual deployment can set `pause_cron: true` for an isolated webhook test.
 
+Webhook jobs for one repository are serialized. If cron or a manual command
+already holds that repository's lock, a later job waits instead of being
+reported as a successful no-op. The default wait is ten minutes and can be
+overridden with `MERGE4APPSTORE_LOCK_WAIT_MS`; a timeout exits nonzero so the
+incomplete operation remains visible.
+
 ### Thin Xcode Cloud preparation
 
 App repositories no longer need App Store Connect or GitHub credentials in
@@ -336,6 +342,7 @@ requires `APP_BUNDLE_ID`, `APP_NAME`, `GITHUB_REPO_OWNER`, and
 | `IOS_REPO_PATH` | Optional server checkout used to trigger the next beta build |
 | `MERGE4APPSTORE_ENV` | Alternative to the `--config` command-line option |
 | `MERGE4APPSTORE_PROFILE` | Alternative to the `--profile` command-line option |
+| `MERGE4APPSTORE_LOCK_WAIT_MS` | Maximum time to wait for another job for the same repository (default `600000`) |
 | `DRY_RUN` | Set to `true` to run without making changes |
 
 ## Requirements
@@ -358,8 +365,10 @@ The `expire` mode checks each valid, unexpired TestFlight build against its Xcod
 The cleanup skips builds when their source cannot be identified, they came from
 a workflow other than the configured PR workflow, their PR is still open or
 ambiguous, they came from the beta or production branch, or they are selected
-for an App Store version. Use `DRY_RUN=true node index.js expire --profile ...`
-to preview every decision.
+for an App Store version. If Apple retains the exact commit and workflow but
+drops only the source branch, cleanup requires exactly one closed PR associated
+with that commit and targeting the configured beta branch. Use `DRY_RUN=true
+node index.js expire --profile ...` to preview every decision.
 
 ## License
 
