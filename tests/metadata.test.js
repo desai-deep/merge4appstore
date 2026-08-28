@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { discoverLocalizedMetadata, syncLocalizedMetadata } from '../lib/metadata.js';
+import {
+  discoverLocalizedMetadata,
+  imageDimensions,
+  inferScreenshotDisplayType,
+  syncLocalizedMetadata,
+} from '../lib/metadata.js';
 
 function repository(entries, blobs) {
   return {
@@ -10,12 +15,60 @@ function repository(entries, blobs) {
   };
 }
 
+function png(width, height) {
+  const bytes = Buffer.alloc(24);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(bytes);
+  bytes.writeUInt32BE(width, 16);
+  bytes.writeUInt32BE(height, 20);
+  return bytes;
+}
+
+test('infers screenshot sets from flat PNG dimensions in portrait or landscape', () => {
+  assert.equal(inferScreenshotDisplayType(png(1320, 2868)), 'APP_IPHONE_67');
+  assert.equal(inferScreenshotDisplayType(png(2752, 2064)), 'APP_IPAD_PRO_3GEN_129');
+  assert.deepEqual(imageDimensions(png(1179, 2556)), { width: 1179, height: 2556 });
+});
+
+test('reads JPEG dimensions for flat screenshot inference', () => {
+  const bytes = Buffer.from([
+    0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08,
+    0x0a, 0xf0, 0x08, 0x10, 0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x00,
+  ]);
+  assert.deepEqual(imageDimensions(bytes), { width: 2064, height: 2800 });
+  assert.throws(() => inferScreenshotDisplayType(bytes), /unsupported screenshot dimensions/);
+});
+
+test('requires an explicit folder for dimensions shared by Apple TV and Vision Pro', () => {
+  assert.throws(
+    () => inferScreenshotDisplayType(png(3840, 2160), 'AppStore/en-US/screenshots/01.png'),
+    /ambiguous.*APP_APPLE_TV.*APP_APPLE_VISION_PRO/,
+  );
+});
+
+test('groups flat screenshots by inferred dimensions and alphabetizes each set', () => {
+  const blobs = { one: png(2064, 2752), two: png(2064, 2752), phone: png(1320, 2868) };
+  const metadata = discoverLocalizedMetadata([
+    { path: 'AppStore/en-US/screenshots/02-ipad.png', type: 'blob', sha: 'two' },
+    { path: 'AppStore/en-US/screenshots/01-ipad.png', type: 'blob', sha: 'one' },
+    { path: 'AppStore/en-US/screenshots/01-phone.png', type: 'blob', sha: 'phone' },
+  ], 'AppStore', sha => blobs[sha]);
+
+  assert.deepEqual(
+    metadata.localizations['en-US'].screenshots.APP_IPAD_PRO_3GEN_129.map(asset => asset.fileName),
+    ['01-ipad.png', '02-ipad.png'],
+  );
+  assert.deepEqual(
+    metadata.localizations['en-US'].screenshots.APP_IPHONE_67.map(asset => asset.fileName),
+    ['01-phone.png'],
+  );
+});
+
 test('discovers optional text fields and alphabetizes screenshot and preview files', () => {
   const entries = [
     { path: 'AppStore/en-US/description.txt', type: 'blob', sha: 'description' },
-    { path: 'AppStore/en-US/screenshots/APP_IPHONE_69', type: 'tree' },
-    { path: 'AppStore/en-US/screenshots/APP_IPHONE_69/02.png', type: 'blob', sha: 'two' },
-    { path: 'AppStore/en-US/screenshots/APP_IPHONE_69/01.png', type: 'blob', sha: 'one' },
+    { path: 'AppStore/en-US/screenshots/APP_IPHONE_67', type: 'tree' },
+    { path: 'AppStore/en-US/screenshots/APP_IPHONE_67/02.png', type: 'blob', sha: 'two' },
+    { path: 'AppStore/en-US/screenshots/APP_IPHONE_67/01.png', type: 'blob', sha: 'one' },
     { path: 'AppStore/en-US/previews/IPHONE_65', type: 'tree' },
     { path: 'AppStore/en-US/previews/IPHONE_65/01.mov', type: 'blob', sha: 'video' },
   ];
@@ -23,7 +76,7 @@ test('discovers optional text fields and alphabetizes screenshot and preview fil
 
   assert.deepEqual(metadata.localizations['en-US'].attributes, { description: 'description' });
   assert.deepEqual(
-    metadata.localizations['en-US'].screenshots.APP_IPHONE_69.map(asset => asset.fileName),
+    metadata.localizations['en-US'].screenshots.APP_IPHONE_67.map(asset => asset.fileName),
     ['01.png', '02.png'],
   );
   assert.deepEqual(

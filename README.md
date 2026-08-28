@@ -152,11 +152,11 @@ AppStore/
 │   ├── support_url.txt
 │   ├── whats_new.txt
 │   ├── screenshots/
-│   │   ├── APP_IPHONE_69/
-│   │   │   ├── 01-home.png
-│   │   │   └── 02-player.png
-│   │   └── APP_IPAD_PRO_3GEN_129/
-│   │       └── 01-library.png
+│   │   ├── 01-iphone-home.png
+│   │   ├── 02-iphone-player.png
+│   │   ├── 01-ipad-library.png
+│   │   └── APP_APPLE_TV/       # optional explicit override
+│   │       └── 01-tv-home.png
 │   └── previews/
 │       └── IPHONE_65/
 │           ├── 01-overview.mov
@@ -170,12 +170,21 @@ Management is explicitly opt-in at every level:
 - An omitted locale, text file, screenshot directory, or preview directory is
   left unchanged in App Store Connect.
 - A present text file updates only that field. An empty file clears it.
-- A present media directory is authoritative for that locale and display type:
-  files are uploaded or removed to match the repository. Files are ordered
-  alphabetically, so use prefixes such as `01-`, `02-`, and `03-`.
+- Screenshots may be placed directly in `<locale>/screenshots`. PNG and JPEG
+  pixel dimensions select Apple's display type automatically, in portrait or
+  landscape. Files are grouped by inferred type and ordered alphabetically, so
+  use prefixes such as `01-`, `02-`, and `03-`.
+- Explicit `<locale>/screenshots/<APPLE_DISPLAY_TYPE>/` directories remain
+  available as an override for ambiguous or newly introduced dimensions. Flat
+  and explicit assets may coexist and are combined into the selected set.
+- A present display-type directory is authoritative for that locale and type:
+  files are uploaded or removed to match the repository. An inferred flat set
+  is authoritative whenever at least one flat image resolves to that type.
 - Git cannot track an empty directory. To clear a managed screenshot or preview
   set, leave a `.gitkeep` file in that display-type directory.
-- Screenshots support PNG and JPEG. App Preview videos support MOV, MP4, and
+- Screenshots support PNG and JPEG. A flat image with unknown or ambiguous
+  dimensions fails safely and names the explicit directory it needs. App
+  Preview videos support MOV, MP4, and
   M4V; App Store Connect still validates Apple's size, codec, duration, and
   device requirements during processing.
 
