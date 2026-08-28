@@ -213,3 +213,28 @@ test('keeps a source-less build outside the configured PR workflow', async () =>
     });
   }));
 });
+
+test('keeps a source-less build when no exact PR workflow is configured', async () => {
+  await withBranches(async () => withExpiryWorkflow('', async () => {
+    const asc = {
+      getTestFlightCleanupCandidates: async () => ([
+        { buildId: 'source-less', buildNumber: '556', version: '1.1' },
+      ]),
+      getBuildSource: async () => ({
+        found: true,
+        commitSha: 'abc123',
+        sourceBranch: null,
+        workflowId: 'unknown-workflow',
+      }),
+      expireBuild: async () => assert.fail('source-less build must remain protected'),
+    };
+    const github = {
+      findClosedPRForBuild: () => assert.fail('unsafe source-less fallback must not query a PR'),
+    };
+
+    assert.deepEqual(await runClosedPRBuildExpiry(asc, github, false), {
+      checked: 1,
+      expired: 0,
+    });
+  }));
+});
