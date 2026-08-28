@@ -84,7 +84,7 @@ test('adds optional repository metadata only to deployment', () => {
 });
 
 test('requires metadata roots to use a normalized repository directory path', () => {
-  for (const invalid of ['/AppStore', '../AppStore', 'AppStore/../Metadata', 'AppStore\\Metadata']) {
+  for (const invalid of ['.', '/AppStore', '../AppStore', 'AppStore/../Metadata', 'AppStore\\Metadata']) {
     const profile = profileFixture();
     profile.metadata = { path: invalid };
     assert.throws(() => validateRepositoryProfile(profile), /metadata\.path/);
