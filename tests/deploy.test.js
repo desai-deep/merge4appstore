@@ -58,7 +58,7 @@ function createASC(overrides = {}) {
     selectBuildForVersion: async () => {},
     updateReleaseNotes: async () => {},
     submitForReview: async () => {},
-    deleteDraftReviewSubmission: async () => ({ deleted: true, state: 'READY_FOR_REVIEW' }),
+    removeDraftReviewSubmission: async () => ({ removed: true, state: 'READY_FOR_REVIEW' }),
     ...overrides,
   };
 }
@@ -94,9 +94,9 @@ test('surfaces App Store requirements on the release PR without hiding the failu
       ]),
       getBuildByNumber: async () => ({ buildId: 'build-161', version: '1.2' }),
       submitForReview: async () => { throw failure; },
-      deleteDraftReviewSubmission: async submissionId => {
+      removeDraftReviewSubmission: async submissionId => {
         events.push(`delete:${submissionId}`);
-        return { deleted: true, state: 'READY_FOR_REVIEW' };
+        return { removed: true, state: 'READY_FOR_REVIEW' };
       },
     });
     const github = createGitHub({
@@ -134,9 +134,9 @@ test('keeps a failed draft when the release PR cannot be notified', async () => 
       ]),
       getBuildByNumber: async () => ({ buildId: 'build-161', version: '1.2' }),
       submitForReview: async () => { throw failure; },
-      deleteDraftReviewSubmission: async () => {
+      removeDraftReviewSubmission: async () => {
         deleted = true;
-        return { deleted: true, state: 'READY_FOR_REVIEW' };
+        return { removed: true, state: 'READY_FOR_REVIEW' };
       },
     });
     const github = createGitHub({ upsertPRComment: () => false });

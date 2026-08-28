@@ -278,27 +278,34 @@ test('retains the draft submission id when adding its version fails', async () =
   );
 });
 
-test('deletes only a review submission that is still a draft', async () => {
+test('cancels only a review submission that is still a draft', async () => {
   const asc = createASCWithVersions({ data: [] });
   const requests = [];
   asc.request = async (endpoint, options = {}) => {
     requests.push({ endpoint, options });
-    if (options.method === 'DELETE') return null;
+    if (options.method === 'PATCH') return null;
     return { data: { attributes: { state: 'READY_FOR_REVIEW' } } };
   };
 
-  assert.deepEqual(await asc.deleteDraftReviewSubmission('draft-1'), {
-    deleted: true,
+  assert.deepEqual(await asc.removeDraftReviewSubmission('draft-1'), {
+    removed: true,
     state: 'READY_FOR_REVIEW',
   });
   assert.deepEqual(requests.map(request => [request.endpoint, request.options.method]), [
     ['/reviewSubmissions/draft-1?fields[reviewSubmissions]=state', undefined],
-    ['/reviewSubmissions/draft-1', 'DELETE'],
+    ['/reviewSubmissions/draft-1', 'PATCH'],
   ]);
+  assert.deepEqual(JSON.parse(requests[1].options.body), {
+    data: {
+      type: 'reviewSubmissions',
+      id: 'draft-1',
+      attributes: { canceled: true },
+    },
+  });
 
   asc.request = async () => ({ data: { attributes: { state: 'WAITING_FOR_REVIEW' } } });
-  assert.deepEqual(await asc.deleteDraftReviewSubmission('submitted-1'), {
-    deleted: false,
+  assert.deepEqual(await asc.removeDraftReviewSubmission('submitted-1'), {
+    removed: false,
     state: 'WAITING_FOR_REVIEW',
   });
 });
