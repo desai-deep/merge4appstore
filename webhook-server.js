@@ -62,6 +62,7 @@ export function runJob(entry, job, spawnProcess = spawn) {
   if (job.branch) environment.BUILD_BRANCH = job.branch;
   if (job.pullRequest) environment.BUILD_PULL_REQUEST = job.pullRequest;
   if (job.deliveryId) environment.BUILD_SOURCE_DELIVERY_ID = job.deliveryId;
+  if (job.reconcileMetadata) environment.RECONCILE_METADATA = 'true';
 
   return new Promise(resolve => {
     const child = spawnProcess(process.execPath, args, { cwd: ROOT, env: environment, stdio: ['ignore', 'pipe', 'pipe'] });

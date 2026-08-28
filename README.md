@@ -89,6 +89,9 @@ repository:
   production_branch: main
   beta_branch: develop
 
+metadata: # optional
+  path: AppStore/metadata.yml
+
 apps:
   prod:
     app_id: "123456789"
@@ -131,6 +134,55 @@ build:
 
 An automation may also set `app_id`, `bundle_id`, or `app_name` directly as an
 override. Prefer app roles when several values travel together.
+
+### Repository-managed App Store metadata
+
+An app repository may opt in by declaring `metadata.path` in its profile. The
+manifest is loaded from the current production-branch head immediately before
+submission, so metadata can be corrected and retried without producing another
+binary. Repositories without this setting retain the existing deployment flow.
+
+```yaml
+version: 1
+localizations:
+  en-US:
+    description: Optional localized description
+    keywords: music,albums
+    marketing_url: https://example.com
+    promotional_text: Optional promotional text
+    support_url: https://example.com/support
+    whats_new: Optional repository-managed release notes
+    screenshots:
+      APP_IPHONE_69:
+        - screenshots/en-US/iphone-6.9/01.png
+      APP_IPAD_PRO_3GEN_129: []
+  de-DE: {}
+```
+
+Management is explicitly opt-in at every level:
+
+- An omitted locale, field, or screenshot display type is left unchanged in
+  App Store Connect. An empty locale mapping therefore changes nothing.
+- A declared text field updates only that field. An explicit empty string
+  clears that field.
+- A declared screenshot list is authoritative for that locale and display
+  type: files are uploaded, removed, and reordered to match the repository.
+  An explicit empty list clears an existing set; an omitted set is untouched.
+- Screenshot paths are relative to the manifest and must remain within its
+  directory. Filenames must be unique within a display type.
+
+If `en-US.whats_new` is declared, it replaces the usual release-PR-title notes
+for that submission. Other locales and omitted `whats_new` fields retain their
+normal behavior.
+
+A production push containing only files in the configured metadata directory
+runs deployment reconciliation directly instead of starting Xcode Cloud. Mixed
+code and metadata pushes still use the normal production build path. GitHub
+webhook payloads that might have a truncated commit list also fall back to a
+build, avoiding an unsafe metadata-only classification. The metadata webhook
+sets a one-job reconciliation intent that retries the selected binary after a
+metadata rejection and skips missed-build recovery. For a manual retry, run
+`RECONCILE_METADATA=true node index.js deploy --profile profiles/example.yml`.
 
 ### 3. Run
 
@@ -322,7 +374,7 @@ deployment job is disabled for pull-request events.
 | `APP_STORE_CONNECT_API_KEY_ID` | App Store Connect API Key ID |
 | `APP_STORE_CONNECT_ISSUER_ID` | App Store Connect Issuer ID |
 | `APP_STORE_CONNECT_API_KEY_CONTENT` | API private key (base64 encoded) |
-| `GH_TOKEN` | GitHub token for PR comments |
+| `GH_TOKEN` | GitHub token for PR comments/issues and, when configured, read access to repository metadata/assets |
 App and repository values live in YAML profiles. The legacy environment-only
 configuration remains supported; when no `--profile` is supplied it still
 requires `APP_BUNDLE_ID`, `APP_NAME`, `GITHUB_REPO_OWNER`, and

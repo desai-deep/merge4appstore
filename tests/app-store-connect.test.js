@@ -793,3 +793,81 @@ test('updates or creates English TestFlight build notes', async () => {
   assert.equal(requests[1].endpoint, '/betaBuildLocalizations');
   assert.equal(JSON.parse(requests[1].options.body).data.relationships.build.data.id, 'build-2');
 });
+
+test('makes a declared screenshot set match repository order', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.getScreenshotSets = async () => ([
+    { id: 'set-1', attributes: { screenshotDisplayType: 'APP_IPAD_PRO_3GEN_129' } },
+  ]);
+  asc.getScreenshots = async () => ([
+    { id: 'old', attributes: { fileName: 'old.png', sourceFileChecksum: 'old' } },
+    { id: 'two', attributes: { fileName: '02.png', sourceFileChecksum: 'bbb' } },
+  ]);
+  const deleted = [];
+  const uploaded = [];
+  let order = null;
+  asc.deleteScreenshot = async id => { deleted.push(id); };
+  asc.uploadScreenshot = async (_setId, asset) => {
+    uploaded.push(asset.fileName);
+    return { id: `uploaded-${asset.fileName}` };
+  };
+  asc.replaceScreenshotOrder = async (_setId, ids) => { order = ids; };
+
+  assert.deepEqual(await asc.syncScreenshotSet('localization-1', 'APP_IPAD_PRO_3GEN_129', [
+    { fileName: '01.png', checksum: 'aaa', bytes: Buffer.from('one') },
+    { fileName: '02.png', checksum: 'bbb', bytes: Buffer.from('two') },
+  ]), { kept: 1, uploaded: 1, removed: 1 });
+  assert.deepEqual(deleted, ['old']);
+  assert.deepEqual(uploaded, ['01.png']);
+  assert.deepEqual(order, ['uploaded-01.png', 'two']);
+});
+
+test('does not create an absent screenshot set when the declared set is empty', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.getScreenshotSets = async () => [];
+  asc.createScreenshotSet = async () => assert.fail('empty set should not be created');
+
+  assert.deepEqual(
+    await asc.syncScreenshotSet('localization-1', 'APP_IPAD_PRO_3GEN_129', []),
+    { kept: 0, uploaded: 0, removed: 0 },
+  );
+});
+
+test('uploads and commits screenshot bytes using Apple upload operations', async t => {
+  const asc = createASCWithVersions({ data: [] });
+  const requests = [];
+  let poll = 0;
+  asc.request = async (endpoint, options = {}) => {
+    requests.push({ endpoint, options });
+    if (endpoint === '/appScreenshots' && options.method === 'POST') {
+      return { data: { id: 'screenshot-1', attributes: { uploadOperations: [{
+        url: 'https://upload.example/asset', method: 'PUT', offset: 0, length: 5,
+        requestHeaders: [{ name: 'Content-Type', value: 'image/png' }],
+      }] } } };
+    }
+    if (endpoint === '/appScreenshots/screenshot-1' && !options.method) {
+      poll += 1;
+      return { data: { id: 'screenshot-1', attributes: {
+        assetDeliveryState: { state: poll > 1 ? 'COMPLETE' : 'AWAITING_UPLOAD' },
+      } } };
+    }
+    return { data: {} };
+  };
+  const uploads = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    uploads.push({ url, options });
+    return { ok: true, status: 200 };
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const result = await asc.uploadScreenshot('set-1', {
+    fileName: '01.png', bytes: Buffer.from('image'), checksum: 'checksum',
+  }, { pollDelayMs: 0 });
+
+  assert.equal(result.id, 'screenshot-1');
+  assert.equal(uploads[0].url, 'https://upload.example/asset');
+  assert.deepEqual(uploads[0].options.body, Buffer.from('image'));
+  const commit = JSON.parse(requests.find(call => call.options.method === 'PATCH').options.body);
+  assert.deepEqual(commit.data.attributes, { uploaded: true, sourceFileChecksum: 'checksum' });
+});

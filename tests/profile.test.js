@@ -68,8 +68,27 @@ test('defaults each automation to the prod app', () => {
     appName: 'Example',
     workflowId: 'prod-workflow',
     recoverMissedBuilds: false,
+    metadataPath: '',
   });
   assert.equal(resolveAutomation(profile, 'sync').appRole, 'prod');
+});
+
+test('adds optional repository metadata only to deployment', () => {
+  const fixture = profileFixture();
+  fixture.metadata = { path: 'AppStore/metadata.yml' };
+  const profile = validateRepositoryProfile(fixture);
+
+  assert.equal(resolveAutomation(profile, 'deploy').metadataPath, 'AppStore/metadata.yml');
+  assert.equal(resolveAutomation(profile, 'sync').metadataPath, '');
+  assert.equal(resolveAutomation(profile, 'expire').metadataPath, '');
+});
+
+test('requires metadata manifests to use a normalized path inside a directory', () => {
+  for (const invalid of ['/metadata.yml', 'metadata.yml', '../metadata.yml', 'AppStore/../metadata.yml', 'AppStore\\metadata.yml']) {
+    const profile = profileFixture();
+    profile.metadata = { path: invalid };
+    assert.throws(() => validateRepositoryProfile(profile), /metadata\.path/);
+  }
 });
 
 test('routes cleanup to a separate UAT app and PR workflow', () => {
