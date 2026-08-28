@@ -130,7 +130,9 @@ test('syncs only the text fields and media directories present in the tree', asy
   ], { text: 'Neu\n', image: 'image', video: 'video' });
   const calls = [];
   const asc = {
-    findAppStoreVersionLocalization: async (_versionId, locale) => ({ id: `localization-${locale}` }),
+    getAppStoreVersionLocalizations: async () => ([
+      { id: 'localization-de-DE', attributes: { locale: 'de-DE' } },
+    ]),
     updateAppStoreVersionLocalization: async (id, attributes) => calls.push({ id, attributes }),
     syncScreenshotSet: async (id, displayType, assets) => {
       calls.push({ kind: 'screenshots', id, displayType, assets });
@@ -160,7 +162,9 @@ test('omitted media directories and release notes remain unmanaged', async () =>
     { path: 'AppStore/en-US/description.txt', type: 'blob', sha: 'text' },
   ], { text: 'Description' });
   const asc = {
-    findAppStoreVersionLocalization: async () => ({ id: 'localization-1' }),
+    getAppStoreVersionLocalizations: async () => ([
+      { id: 'localization-1', attributes: { locale: 'en-US' } },
+    ]),
     updateAppStoreVersionLocalization: async () => {},
     syncScreenshotSet: async () => assert.fail('no screenshot set is managed'),
     syncPreviewSet: async () => assert.fail('no preview set is managed'),

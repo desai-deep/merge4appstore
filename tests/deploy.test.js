@@ -154,7 +154,9 @@ test('syncs repository metadata from production head and honors managed release 
         { buildNumber: '161', version: '1.2', buildId: 'build-161' },
       ]),
       getBuildByNumber: async () => ({ buildId: 'build-161', version: '1.2' }),
-      findAppStoreVersionLocalization: async (_versionId, locale) => ({ id: `localization-${locale}` }),
+      getAppStoreVersionLocalizations: async () => ([
+        { id: 'localization-en-US', attributes: { locale: 'en-US' } },
+      ]),
       updateAppStoreVersionLocalization: async (_id, attributes) => events.push(['metadata', attributes]),
       updateReleaseNotes: async () => assert.fail('PR-title notes must not replace managed whats_new'),
       selectBuildForVersion: async () => events.push(['select']),
@@ -199,7 +201,9 @@ test('metadata reconciliation retries the blocked build without recovering an Xc
         { buildNumber: '161', version: '1.2', buildId: 'build-161' },
       ]),
       getBuildByNumber: async () => ({ buildId: 'build-161', version: '1.2' }),
-      findAppStoreVersionLocalization: async () => ({ id: 'localization-en-US' }),
+      getAppStoreVersionLocalizations: async () => ([
+        { id: 'localization-en-US', attributes: { locale: 'en-US' } },
+      ]),
       updateAppStoreVersionLocalization: async () => {},
       submitForReview: async () => { submitted = true; },
     });

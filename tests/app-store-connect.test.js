@@ -805,10 +805,12 @@ test('makes a declared screenshot set match repository order', async () => {
   ]);
   const deleted = [];
   const uploaded = [];
+  const events = [];
   let order = null;
-  asc.deleteScreenshot = async id => { deleted.push(id); };
+  asc.deleteScreenshot = async id => { deleted.push(id); events.push(`delete:${id}`); };
   asc.uploadScreenshot = async (_setId, asset) => {
     uploaded.push(asset.fileName);
+    events.push(`upload:${asset.fileName}`);
     return { id: `uploaded-${asset.fileName}` };
   };
   asc.replaceScreenshotOrder = async (_setId, ids) => { order = ids; };
@@ -819,6 +821,7 @@ test('makes a declared screenshot set match repository order', async () => {
   ]), { kept: 1, uploaded: 1, removed: 1 });
   assert.deepEqual(deleted, ['old']);
   assert.deepEqual(uploaded, ['01.png']);
+  assert.deepEqual(events, ['upload:01.png', 'delete:old']);
   assert.deepEqual(order, ['uploaded-01.png', 'two']);
 });
 
@@ -831,6 +834,30 @@ test('does not create an absent screenshot set when the declared set is empty', 
     await asc.syncScreenshotSet('localization-1', 'APP_IPAD_PRO_3GEN_129', []),
     { kept: 0, uploaded: 0, removed: 0 },
   );
+});
+
+test('replaces a full screenshot set one slot at a time and reports every removal', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.getScreenshotSets = async () => ([
+    { id: 'set-1', attributes: { screenshotDisplayType: 'APP_IPHONE_67' } },
+  ]);
+  asc.getScreenshots = async () => Array.from({ length: 10 }, (_, index) => ({
+    id: `old-${index}`,
+    attributes: { fileName: `old-${index}.png`, sourceFileChecksum: `old-${index}` },
+  }));
+  const events = [];
+  asc.deleteScreenshot = async id => { events.push(`delete:${id}`); };
+  asc.uploadScreenshot = async (_setId, asset) => {
+    events.push(`upload:${asset.fileName}`);
+    return { id: 'new-1' };
+  };
+  asc.replaceScreenshotOrder = async () => {};
+
+  assert.deepEqual(await asc.syncScreenshotSet('localization-1', 'APP_IPHONE_67', [
+    { fileName: 'new.png', checksum: 'new', bytes: Buffer.from('new') },
+  ]), { kept: 0, uploaded: 1, removed: 10 });
+  assert.deepEqual(events.slice(0, 2), ['delete:old-0', 'upload:new.png']);
+  assert.equal(events.filter(event => event.startsWith('delete:')).length, 10);
 });
 
 test('uploads and commits screenshot bytes using Apple upload operations', async t => {
@@ -883,10 +910,12 @@ test('makes a declared app preview set match repository order', async () => {
   ]);
   const deleted = [];
   const uploaded = [];
+  const events = [];
   let order = null;
-  asc.deletePreview = async id => { deleted.push(id); };
+  asc.deletePreview = async id => { deleted.push(id); events.push(`delete:${id}`); };
   asc.uploadPreview = async (_setId, asset) => {
     uploaded.push(asset.fileName);
+    events.push(`upload:${asset.fileName}`);
     return { id: `uploaded-${asset.fileName}` };
   };
   asc.replacePreviewOrder = async (_setId, ids) => { order = ids; };
@@ -897,6 +926,7 @@ test('makes a declared app preview set match repository order', async () => {
   ]), { kept: 1, uploaded: 1, removed: 1 });
   assert.deepEqual(deleted, ['old']);
   assert.deepEqual(uploaded, ['01.mov']);
+  assert.deepEqual(events, ['upload:01.mov', 'delete:old']);
   assert.deepEqual(order, ['uploaded-01.mov', 'two']);
 });
 
