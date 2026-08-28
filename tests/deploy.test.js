@@ -165,7 +165,10 @@ test('syncs repository metadata from production head and honors managed release 
       getRepositoryTree: (directory, ref) => {
         assert.equal(directory, 'AppStore');
         assert.equal(ref, 'production-head');
-        return [{ path: 'AppStore/en-US/whats_new.txt', type: 'blob', sha: 'notes' }];
+        return [
+          { path: 'AppStore', type: 'tree', sha: 'root' },
+          { path: 'AppStore/en-US/whats_new.txt', type: 'blob', sha: 'notes' },
+        ];
       },
       getRepositoryBlob: sha => Buffer.from(sha === 'notes' ? 'Repository notes\n' : ''),
     });
@@ -203,6 +206,7 @@ test('metadata reconciliation retries the blocked build without recovering an Xc
     const github = createGitHub({
       getProductionHead: () => 'metadata-head',
       getRepositoryTree: () => ([
+        { path: 'AppStore', type: 'tree', sha: 'root' },
         { path: 'AppStore/en-US/promotional_text.txt', type: 'blob', sha: 'promo' },
       ]),
       getRepositoryBlob: () => Buffer.from('Updated\n'),

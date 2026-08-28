@@ -10,7 +10,10 @@ import {
 
 function repository(entries, blobs) {
   return {
-    getRepositoryTree: () => entries,
+    getRepositoryTree: () => [
+      { path: 'AppStore', type: 'tree', sha: 'root' },
+      ...entries.filter(entry => entry.path !== 'AppStore'),
+    ],
     getRepositoryBlob: sha => Buffer.from(blobs[sha] || ''),
   };
 }
@@ -166,4 +169,19 @@ test('omitted media directories and release notes remain unmanaged', async () =>
     metadataPath: 'AppStore', ref: 'abc', versionId: 'version-1',
   });
   assert.deepEqual([...result.managedWhatsNewLocales], []);
+});
+
+test('fails clearly when the configured metadata root is missing or is a file', async () => {
+  const asc = {};
+  await assert.rejects(syncLocalizedMetadata(asc, {
+    getRepositoryTree: () => [],
+  }, {
+    metadataPath: 'AppStore', ref: 'abc', versionId: 'version-1',
+  }), /Metadata directory AppStore does not exist at abc/);
+
+  await assert.rejects(syncLocalizedMetadata(asc, {
+    getRepositoryTree: () => [{ path: 'AppStore', type: 'blob', sha: 'file' }],
+  }, {
+    metadataPath: 'AppStore', ref: 'abc', versionId: 'version-1',
+  }), /Metadata path AppStore is not a directory at abc/);
 });

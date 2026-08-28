@@ -841,7 +841,7 @@ test('uploads and commits screenshot bytes using Apple upload operations', async
     requests.push({ endpoint, options });
     if (endpoint === '/appScreenshots' && options.method === 'POST') {
       return { data: { id: 'screenshot-1', attributes: { uploadOperations: [{
-        url: 'https://upload.example/asset', method: 'PUT', offset: 0, length: 5,
+        url: 'https://upload.example/asset', method: 'PUT', offset: 0,
         requestHeaders: [{ name: 'Content-Type', value: 'image/png' }],
       }] } } };
     }
@@ -907,7 +907,7 @@ test('uploads and commits app preview video bytes', async t => {
     requests.push({ endpoint, options });
     if (endpoint === '/appPreviews' && options.method === 'POST') {
       return { data: { id: 'preview-1', attributes: { uploadOperations: [{
-        url: 'https://upload.example/video', method: 'PUT', offset: 0, length: 5,
+        url: 'https://upload.example/video', method: 'PUT', offset: 0,
         requestHeaders: [{ name: 'Content-Type', value: 'video/quicktime' }],
       }] } } };
     }
@@ -919,14 +919,19 @@ test('uploads and commits app preview video bytes', async t => {
     }
     return { data: {} };
   };
+  const uploads = [];
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => ({ ok: true, status: 200 });
+  globalThis.fetch = async (_url, options) => {
+    uploads.push(options.body);
+    return { ok: true, status: 200 };
+  };
   t.after(() => { globalThis.fetch = originalFetch; });
 
   const result = await asc.uploadPreview('set-1', {
     fileName: '01.mov', bytes: Buffer.from('video'), checksum: 'checksum',
   }, { pollDelayMs: 0 });
   assert.equal(result.id, 'preview-1');
+  assert.deepEqual(uploads, [Buffer.from('video')]);
   const commit = JSON.parse(requests.find(call => call.options.method === 'PATCH').options.body);
   assert.deepEqual(commit.data.attributes, { uploaded: true, sourceFileChecksum: 'checksum' });
 });
