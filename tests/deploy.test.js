@@ -58,7 +58,7 @@ function createASC(overrides = {}) {
     selectBuildForVersion: async () => {},
     updateReleaseNotes: async () => {},
     submitForReview: async () => {},
-    removeDraftReviewSubmission: async () => ({ removed: true, state: 'READY_FOR_REVIEW' }),
+    removeReviewSubmissionItem: async () => {},
     ...overrides,
   };
 }
@@ -81,6 +81,7 @@ test('surfaces App Store requirements on the release PR without hiding the failu
     const failure = new Error('API Error 409: This resource cannot be reviewed');
     failure.statusCode = 409;
     failure.reviewSubmissionId = 'submission-1';
+    failure.reviewSubmissionItemId = 'item-1';
     failure.appStoreErrors = [{
       code: 'STATE_ERROR.SCREENSHOT_REQUIRED.APP_IPAD_PRO_3GEN_129',
       title: 'App screenshot missing (APP_IPAD_PRO_3GEN_129)',
@@ -94,9 +95,8 @@ test('surfaces App Store requirements on the release PR without hiding the failu
       ]),
       getBuildByNumber: async () => ({ buildId: 'build-161', version: '1.2' }),
       submitForReview: async () => { throw failure; },
-      removeDraftReviewSubmission: async submissionId => {
-        events.push(`delete:${submissionId}`);
-        return { removed: true, state: 'READY_FOR_REVIEW' };
+      removeReviewSubmissionItem: async itemId => {
+        events.push(`delete:${itemId}`);
       },
     });
     const github = createGitHub({
@@ -119,7 +119,7 @@ test('surfaces App Store requirements on the release PR without hiding the failu
     assert.match(posted.comment, /Build #161 remains selected for version 1\.2/);
     assert.match(posted.comment, /A new build is not required/);
     assert.match(posted.comment, /Track remediation in \[#456\]/);
-    assert.deepEqual(events, ['issue', 'comment', 'delete:submission-1']);
+    assert.deepEqual(events, ['issue', 'comment', 'delete:item-1']);
   });
 });
 
@@ -134,7 +134,7 @@ test('keeps a failed draft when the release PR cannot be notified', async () => 
       ]),
       getBuildByNumber: async () => ({ buildId: 'build-161', version: '1.2' }),
       submitForReview: async () => { throw failure; },
-      removeDraftReviewSubmission: async () => {
+      removeReviewSubmissionItem: async () => {
         deleted = true;
         return { removed: true, state: 'READY_FOR_REVIEW' };
       },

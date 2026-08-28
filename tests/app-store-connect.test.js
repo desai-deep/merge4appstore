@@ -242,9 +242,9 @@ test('reuses an empty review draft instead of creating another submission', asyn
     return { data: { id: 'item-1' } };
   };
 
-  const submissionId = await asc.getOrCreateDraftReviewSubmission('version-1');
+  const submission = await asc.getOrCreateDraftReviewSubmission('version-1');
 
-  assert.equal(submissionId, 'draft-1');
+  assert.deepEqual(submission, { submissionId: 'draft-1', itemId: 'item-1' });
   assert.equal(requests.length, 1);
   assert.equal(requests[0].endpoint, '/reviewSubmissionItems');
   assert.deepEqual(JSON.parse(requests[0].options.body), {
@@ -278,35 +278,15 @@ test('retains the draft submission id when adding its version fails', async () =
   );
 });
 
-test('cancels only a review submission that is still a draft', async () => {
+test('removes the failed item from its draft review submission', async () => {
   const asc = createASCWithVersions({ data: [] });
-  const requests = [];
-  asc.request = async (endpoint, options = {}) => {
-    requests.push({ endpoint, options });
-    if (options.method === 'PATCH') return null;
-    return { data: { attributes: { state: 'READY_FOR_REVIEW' } } };
-  };
+  let request = null;
+  asc.request = async (endpoint, options = {}) => { request = { endpoint, options }; };
 
-  assert.deepEqual(await asc.removeDraftReviewSubmission('draft-1'), {
-    removed: true,
-    state: 'READY_FOR_REVIEW',
-  });
-  assert.deepEqual(requests.map(request => [request.endpoint, request.options.method]), [
-    ['/reviewSubmissions/draft-1?fields[reviewSubmissions]=state', undefined],
-    ['/reviewSubmissions/draft-1', 'PATCH'],
-  ]);
-  assert.deepEqual(JSON.parse(requests[1].options.body), {
-    data: {
-      type: 'reviewSubmissions',
-      id: 'draft-1',
-      attributes: { canceled: true },
-    },
-  });
-
-  asc.request = async () => ({ data: { attributes: { state: 'WAITING_FOR_REVIEW' } } });
-  assert.deepEqual(await asc.removeDraftReviewSubmission('submitted-1'), {
-    removed: false,
-    state: 'WAITING_FOR_REVIEW',
+  await asc.removeReviewSubmissionItem('item-1');
+  assert.deepEqual(request, {
+    endpoint: '/reviewSubmissionItems/item-1',
+    options: { method: 'DELETE' },
   });
 });
 
