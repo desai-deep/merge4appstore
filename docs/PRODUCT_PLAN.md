@@ -121,6 +121,11 @@ durable.
    and an opinionated App Store submission policy. Release type is not yet
    profile data; the supervised Jams 1.2 release required an explicit ASC patch
    to `AFTER_APPROVAL` before submission.
+10. App Store metadata eligibility is checked too late. Jams 1.2 selected its
+    successful production build and updated notes, then Apple rejected the
+    review item because native iPad support required a 12.9-inch screenshot.
+    The service logged only the top-level 409 rather than its structured
+    `associatedErrors` media requirement.
 
 ## Target responsibility boundaries
 
@@ -1022,13 +1027,18 @@ Exit criteria:
 9. Add declarative per-deployment App Store release policy (`manual`,
    `after_approval`, or `scheduled` plus date), default conservatively, validate
    it during onboarding, and set/verify `releaseType` before submission.
-10. Build the minimum onboarding path: install App, upload/validate ASC key,
+10. Add an App Store readiness preflight before production build intent:
+    validate required screenshots for every supported device family, version
+    metadata, agreements, compliance, and other submission prerequisites;
+    preserve and display all structured ASC `associatedErrors`. Decide whether
+    customer media is managed by the product or linked back to ASC for action.
+11. Build the minimum onboarding path: install App, upload/validate ASC key,
    discover apps/workflows, map roles/purposes, validate manual start
    conditions, open adapter PR, run shadow test, and enable modules.
-11. Interview five Xcode Cloud indie developers and offer the `$10/year`
+12. Interview five Xcode Cloud indie developers and offer the `$10/year`
    founding tier to measure successful setup, retained use, support minutes,
    and willingness to pay before fixing long-term pricing.
-12. Test positioning against Runway and Tramline users: the question is not
+13. Test positioning against Runway and Tramline users: the question is not
    whether automation is possible, but whether this narrower Xcode Cloud-native
    workflow is easier, safer, and cheaper enough to switch or supplement their
    current process.

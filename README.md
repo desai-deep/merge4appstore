@@ -410,6 +410,11 @@ builds whose provenance is ambiguous are never expired automatically.
   Jams 1.2 release was explicitly set to `AFTER_APPROVAL` through ASC before
   submission; unattended customers need a declarative `manual`,
   `after_approval`, or scheduled policy with a conservative default.
+- Submission eligibility is currently discovered when Apple accepts or rejects
+  the review item. The supervised Jams 1.2 run correctly stopped on Apple's
+  missing 12.9-inch iPad screenshot error after the app added iPad support, but
+  a product should preflight associated metadata/media errors before starting
+  an expensive production build and surface every actionable requirement.
 
 ## Automatic VPS Deploy
 
