@@ -17,10 +17,11 @@ start conditions, so GitHub is the only source of build intent and a push to a
 PR branch does not independently create a second build.
 
 The current deployment is still a single-tenant VPS service. Webhook delivery
-deduplication is in memory, jobs are child processes protected by filesystem
-locks, credentials are shared runtime secrets, and cron remains a five-minute
-reconciliation fallback. These are operational limitations, not the target
-hosted architecture; see the product plan for the migration sequence.
+deduplication is in memory, jobs are child processes serialized per repository
+and protected across processes by waiting filesystem locks, credentials are
+shared runtime secrets, and cron remains a five-minute reconciliation fallback.
+These are operational limitations, not the target hosted architecture; see the
+product plan for the migration sequence.
 
 ## What it does
 
@@ -389,15 +390,17 @@ builds whose provenance is ambiguous are never expired automatically.
 
 - The webhook server acknowledges after in-memory deduplication, then launches
   child jobs. Delivery state and jobs do not survive a process restart.
-- Separate close and push deliveries for one repository can arrive together.
-  The current filesystem lock makes one child exit successfully instead of
-  queueing it. The five-minute `all` job can recover cleanup, but beta-trigger
-  recovery is not yet general. Durable per-repository serialization is the
-  highest-priority follow-up.
+- Jobs are serialized per repository inside the webhook process. CLI, cron,
+  and webhook processes also wait for the repository filesystem lock rather
+  than treating contention as successful completion. This prevents the
+  observed simultaneous PR-close/base-push loss, but it is not a durable queue:
+  accepted work can still be lost if the process restarts.
 - Apple can stop returning a source branch for an uploaded PR build after the
-  PR is merged. Cleanup deliberately fails safe in that case. The hosted design
-  must persist build-to-PR provenance when `BUILD_CREATED` arrives so later
-  expiry does not depend on mutable Apple source metadata.
+  PR is merged. Cleanup can now use the exact source commit only when it maps to
+  one closed PR targeting the configured beta branch and the build came from
+  the configured PR workflow. Ambiguous matches still fail safe. The hosted
+  design should persist build-to-PR provenance when `BUILD_CREATED` arrives so
+  later expiry does not depend on mutable provider metadata or extra API calls.
 - The deployment uses one shared GitHub token and ASC credential set. It is not
   tenant-isolated and should not be offered as hosted SaaS in this form.
 - Xcode Cloud completion payloads are treated as notifications and actionable

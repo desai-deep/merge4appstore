@@ -63,21 +63,25 @@ been exercised against GitHub, Xcode Cloud, and App Store Connect:
 - GitHub and Xcode Cloud webhook endpoints, HTTPS routing, PM2 health, profile
   validation, and deployment all work on the current VPS.
 
-The merge test also exposed two production-relevant gaps:
+The merge test exposed two production-relevant gaps, both mitigated in PR #21:
 
 1. GitHub sends PR-closed and base-branch push deliveries close together. The
-   listener launches both, but the per-instance filesystem lock lets one exit
-   successfully rather than waiting. In the observed test, Jams ran cleanup
-   and skipped beta triggering; Running Order started beta and skipped cleanup.
+   listener originally launched both, but the per-instance filesystem lock let
+   one exit successfully rather than waiting. Jobs are now serialized per
+   repository, and cross-process lock contention waits with a visible timeout.
 2. Apple stopped reporting the source branch for one completed UAT PR build
-   after merge. The cleanup correctly failed safe, but could not prove that the
-   build belonged to the now-closed PR.
+   after merge. Cleanup now requires the configured PR workflow plus one exact
+   commit association to a closed PR targeting the configured beta branch;
+   ambiguous or wrong-workflow builds remain protected.
 
-The test was recovered manually: Jams beta build #160 and Running beta build
-#1688 were started for their merge commits; Jams PR build #158 and Running UAT
-PR build #556 were expired. The product architecture must solve these cases by
-durably queueing jobs and persisting build provenance, not by adding retries
-around filesystem locks.
+The original test was recovered manually: Jams beta build #160 and Running beta
+build #1688 were started for their merge commits; Jams PR build #158 and Running
+UAT PR build #556 were expired. PR #21 then replayed Jams' simultaneous PR-close
+and develop-push deliveries against the VPS: cleanup completed first, the beta
+trigger ran second, and build #160 was reused without a duplicate or skipped
+job. This is the correct single-process baseline. The hosted product still
+needs durable acceptance/queueing and persisted build provenance across
+restarts.
 
 ## Current responsibility boundaries
 
@@ -103,12 +107,14 @@ durable.
 3. GitHub operations shell out to `gh` using a long-lived personal token.
 4. Release synchronization can use `IOS_REPO_PATH` to mutate and push from a
    persistent local checkout.
-5. Webhook jobs and five-minute reconciliation are coordinated by one
-   filesystem lock per repository. Concurrent valid events can be skipped.
+5. Webhook jobs are serialized per repository in-process, and other processes
+   wait on one filesystem lock per repository. This prevents concurrent skips
+   but does not survive a webhook-process restart.
 6. Webhook delivery deduplication is an in-memory 24-hour map and is lost on
    restart; accepted work is not durably recorded before the response.
 7. Apple source-branch metadata is queried at cleanup time rather than retained
-   when the build is created, so a later PR close may become unprovable.
+   when the build is created. Exact commit-to-PR association is a safe fallback,
+   but durable provenance would be faster and independent of later provider data.
 8. Logs are local files without customer-visible history, alerting, or an audit
    model.
 9. Release behavior assumes specific branches, one release PR, English notes,
@@ -844,8 +850,11 @@ does not require dedicated infrastructure per repository.
   inherit another app's checkout.
 - Completed: validate profiles and run production submission/reconciliation dry
   runs without changing those established modules.
-- Remaining stabilization: replace skipped-on-lock behavior and retain build
-  provenance before relying on the baseline unattended.
+- Completed stabilization: serialize webhook jobs per repository, wait on
+  cross-process locks, and safely recover source-less PR ownership from one
+  exact commit association.
+- Remaining stabilization: persist accepted jobs and build provenance across
+  process restarts before treating the baseline as a multi-tenant service.
 
 Exit criteria:
 
@@ -980,10 +989,10 @@ Exit criteria:
 
 ## Immediate next work
 
-1. Fix the observed event-loss race before relying on the merged baseline:
-   queue every accepted webhook job, serialize mutations per repository, make
-   lock contention retryable rather than exit `0`, and add an integration test
-   where PR close and the merge push arrive concurrently.
+1. Preserve the verified PR #21 baseline while adding durable ingress: accepted
+   webhook deliveries and derived jobs must commit before `202`, retain the
+   existing per-repository ordering, and resume after process restart. Keep the
+   concurrent PR-close/merge-push replay as an acceptance test.
 2. Persist build provenance at intent creation and `BUILD_CREATED`, then test
    cleanup after the Apple source branch disappears. Never weaken the existing
    fail-safe cleanup rule to infer from build number alone.
