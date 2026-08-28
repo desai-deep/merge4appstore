@@ -70,6 +70,8 @@ function createGitHub(overrides = {}) {
     extractReleaseNotes: () => 'Release build',
     addPRComment: () => true,
     upsertPRComment: () => 'created',
+    upsertIssue: () => ({ number: 456, url: 'https://github.test/issues/456', action: 'created' }),
+    closeIssueByMarker: () => false,
     ...overrides,
   };
 }
@@ -98,6 +100,10 @@ test('surfaces App Store requirements on the release PR without hiding the failu
       },
     });
     const github = createGitHub({
+      upsertIssue: () => {
+        events.push('issue');
+        return { number: 456, url: 'https://github.test/issues/456', action: 'created' };
+      },
       upsertPRComment: (prNumber, marker, comment) => {
         events.push('comment');
         posted = { prNumber, marker, comment };
@@ -112,7 +118,8 @@ test('surfaces App Store requirements on the release PR without hiding the failu
     assert.match(posted.comment, /ipadPro129 is required/);
     assert.match(posted.comment, /Build #161 remains selected for version 1\.2/);
     assert.match(posted.comment, /A new build is not required/);
-    assert.deepEqual(events, ['comment', 'delete:submission-1']);
+    assert.match(posted.comment, /Track remediation in \[#456\]/);
+    assert.deepEqual(events, ['issue', 'comment', 'delete:submission-1']);
   });
 });
 
