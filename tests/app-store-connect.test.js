@@ -21,6 +21,10 @@ test('surfaces associated App Store errors instead of only the generic wrapper',
           }],
         },
       },
+    }, {
+      code: 'ANOTHER_REQUIREMENT',
+      title: 'Export compliance missing',
+      detail: 'Answer the export compliance questions',
     }],
   });
 
@@ -28,6 +32,10 @@ test('surfaces associated App Store errors instead of only the generic wrapper',
     code: 'STATE_ERROR.SCREENSHOT_REQUIRED.APP_IPAD_PRO_3GEN_129',
     title: 'App screenshot missing (APP_IPAD_PRO_3GEN_129)',
     detail: 'A screenshot with type ipadPro129 is required but was not provided',
+  }, {
+    code: 'ANOTHER_REQUIREMENT',
+    title: 'Export compliance missing',
+    detail: 'Answer the export compliance questions',
   }]);
   assert.equal(
     formatAppStoreErrorDetail(details[0]),
