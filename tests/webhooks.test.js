@@ -13,6 +13,7 @@ import {
   webhookSettings,
 } from '../lib/webhooks.js';
 import {
+  createSerialDispatcher,
   createWebhookServer,
   loadProfiles,
   normalizePreparePayload,
@@ -116,6 +117,33 @@ test('settles a webhook job when its child process cannot start', async () => {
   );
 
   assert.equal(await result, 1);
+});
+
+test('serializes simultaneous webhook jobs for one repository', async () => {
+  const events = [];
+  let releaseFirst;
+  const firstBlocked = new Promise(resolve => { releaseFirst = resolve; });
+  const dispatch = createSerialDispatcher(async (_entry, job) => {
+    events.push(`start:${job.mode}`);
+    if (job.mode === 'expire') await firstBlocked;
+    events.push(`end:${job.mode}`);
+  });
+  const entry = { profile, profilePath: '/tmp/example.yml' };
+
+  const first = dispatch(entry, { mode: 'expire' });
+  await new Promise(resolve => setImmediate(resolve));
+  const second = dispatch(entry, { mode: 'trigger' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, ['start:expire']);
+
+  releaseFirst();
+  await Promise.all([first, second]);
+  assert.deepEqual(events, [
+    'start:expire',
+    'end:expire',
+    'start:trigger',
+    'end:trigger',
+  ]);
 });
 
 test('runs deploy only for a successful completed production workflow', () => {
