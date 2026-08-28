@@ -1,7 +1,47 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { AppStoreConnectAPI } from '../lib/app-store-connect.js';
+import {
+  AppStoreConnectAPI,
+  appStoreErrorDetails,
+  formatAppStoreErrorDetail,
+} from '../lib/app-store-connect.js';
+
+test('surfaces associated App Store errors instead of only the generic wrapper', () => {
+  const details = appStoreErrorDetails({
+    errors: [{
+      code: 'ENTITY_ERROR',
+      detail: 'This resource cannot be reviewed',
+      meta: {
+        associatedErrors: {
+          '/v1/appStoreVersions/version-1': [{
+            code: 'STATE_ERROR.SCREENSHOT_REQUIRED.APP_IPAD_PRO_3GEN_129',
+            title: 'App screenshot missing (APP_IPAD_PRO_3GEN_129)',
+            detail: 'A screenshot with type ipadPro129 is required but was not provided',
+          }],
+        },
+      },
+    }, {
+      code: 'ANOTHER_REQUIREMENT',
+      title: 'Export compliance missing',
+      detail: 'Answer the export compliance questions',
+    }],
+  });
+
+  assert.deepEqual(details, [{
+    code: 'STATE_ERROR.SCREENSHOT_REQUIRED.APP_IPAD_PRO_3GEN_129',
+    title: 'App screenshot missing (APP_IPAD_PRO_3GEN_129)',
+    detail: 'A screenshot with type ipadPro129 is required but was not provided',
+  }, {
+    code: 'ANOTHER_REQUIREMENT',
+    title: 'Export compliance missing',
+    detail: 'Answer the export compliance questions',
+  }]);
+  assert.equal(
+    formatAppStoreErrorDetail(details[0]),
+    'App screenshot missing (APP_IPAD_PRO_3GEN_129): A screenshot with type ipadPro129 is required but was not provided',
+  );
+});
 
 function createASCWithVersions(versions) {
   const asc = new AppStoreConnectAPI('key', 'issuer', Buffer.from('fake-key').toString('base64'));
@@ -210,9 +250,9 @@ test('reuses an empty review draft instead of creating another submission', asyn
     return { data: { id: 'item-1' } };
   };
 
-  const submissionId = await asc.getOrCreateDraftReviewSubmission('version-1');
+  const submission = await asc.getOrCreateDraftReviewSubmission('version-1');
 
-  assert.equal(submissionId, 'draft-1');
+  assert.deepEqual(submission, { submissionId: 'draft-1', itemId: 'item-1' });
   assert.equal(requests.length, 1);
   assert.equal(requests[0].endpoint, '/reviewSubmissionItems');
   assert.deepEqual(JSON.parse(requests[0].options.body), {
@@ -227,6 +267,34 @@ test('reuses an empty review draft instead of creating another submission', asyn
         },
       },
     },
+  });
+});
+
+test('retains the draft submission id when adding its version fails', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.getReviewSubmissionIdForVersion = async () => null;
+  asc.getReusableDraftReviewSubmissionId = async () => 'draft-1';
+  const failure = new Error('Screenshot required');
+  asc.request = async endpoint => {
+    assert.equal(endpoint, '/reviewSubmissionItems');
+    throw failure;
+  };
+
+  await assert.rejects(
+    asc.getOrCreateDraftReviewSubmission('version-1'),
+    error => error === failure && error.reviewSubmissionId === 'draft-1',
+  );
+});
+
+test('removes the failed item from its draft review submission', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  let request = null;
+  asc.request = async (endpoint, options = {}) => { request = { endpoint, options }; };
+
+  await asc.removeReviewSubmissionItem('item-1');
+  assert.deepEqual(request, {
+    endpoint: '/reviewSubmissionItems/item-1',
+    options: { method: 'DELETE' },
   });
 });
 

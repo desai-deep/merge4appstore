@@ -58,6 +58,7 @@ function createASC(overrides = {}) {
     selectBuildForVersion: async () => {},
     updateReleaseNotes: async () => {},
     submitForReview: async () => {},
+    removeReviewSubmissionItem: async () => {},
     ...overrides,
   };
 }
@@ -68,9 +69,82 @@ function createGitHub(overrides = {}) {
     getPRDetails: () => ({ title: 'Release build' }),
     extractReleaseNotes: () => 'Release build',
     addPRComment: () => true,
+    upsertPRComment: () => 'created',
+    upsertIssue: () => ({ number: 456, url: 'https://github.test/issues/456', action: 'created' }),
+    closeIssueByMarker: () => false,
     ...overrides,
   };
 }
+
+test('surfaces App Store requirements on the release PR without hiding the failure', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    const failure = new Error('API Error 409: This resource cannot be reviewed');
+    failure.statusCode = 409;
+    failure.reviewSubmissionId = 'submission-1';
+    failure.reviewSubmissionItemId = 'item-1';
+    failure.appStoreErrors = [{
+      code: 'STATE_ERROR.SCREENSHOT_REQUIRED.APP_IPAD_PRO_3GEN_129',
+      title: 'App screenshot missing (APP_IPAD_PRO_3GEN_129)',
+      detail: 'A screenshot with type ipadPro129 is required but was not provided',
+    }];
+    const events = [];
+    let posted = null;
+    const asc = createASC({
+      getTestFlightReadyBuilds: async () => ([
+        { buildNumber: '161', version: '1.2', buildId: 'build-161' },
+      ]),
+      getBuildByNumber: async () => ({ buildId: 'build-161', version: '1.2' }),
+      submitForReview: async () => { throw failure; },
+      removeReviewSubmissionItem: async itemId => {
+        events.push(`delete:${itemId}`);
+      },
+    });
+    const github = createGitHub({
+      upsertIssue: () => {
+        events.push('issue');
+        return { number: 456, url: 'https://github.test/issues/456', action: 'created' };
+      },
+      upsertPRComment: (prNumber, marker, comment) => {
+        events.push('comment');
+        posted = { prNumber, marker, comment };
+        return 'created';
+      },
+    });
+
+    await assert.rejects(runDeployCheck(asc, github, false), error => error === failure);
+    assert.equal(posted.prNumber, 123);
+    assert.match(posted.marker, /version-1\.2:161/);
+    assert.match(posted.comment, /App screenshot missing \(APP_IPAD_PRO_3GEN_129\)/);
+    assert.match(posted.comment, /ipadPro129 is required/);
+    assert.match(posted.comment, /Build #161 remains selected for version 1\.2/);
+    assert.match(posted.comment, /A new build is not required/);
+    assert.match(posted.comment, /Track remediation in \[#456\]/);
+    assert.deepEqual(events, ['issue', 'comment', 'delete:item-1']);
+  });
+});
+
+test('keeps a failed draft when the release PR cannot be notified', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    const failure = new Error('Submission failed');
+    failure.reviewSubmissionId = 'submission-1';
+    let deleted = false;
+    const asc = createASC({
+      getTestFlightReadyBuilds: async () => ([
+        { buildNumber: '161', version: '1.2', buildId: 'build-161' },
+      ]),
+      getBuildByNumber: async () => ({ buildId: 'build-161', version: '1.2' }),
+      submitForReview: async () => { throw failure; },
+      removeReviewSubmissionItem: async () => {
+        deleted = true;
+        return { removed: true, state: 'READY_FOR_REVIEW' };
+      },
+    });
+    const github = createGitHub({ upsertPRComment: () => false });
+
+    await assert.rejects(runDeployCheck(asc, github, false), error => error === failure);
+    assert.equal(deleted, false);
+  });
+});
 
 test('recovers a missed production workflow trigger for a merged PR', async () => {
   await withTriggerRecovery(async () => {

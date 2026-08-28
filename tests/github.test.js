@@ -3,6 +3,75 @@ import assert from 'node:assert/strict';
 
 import { GitHubAPI } from '../lib/github.js';
 
+test('updates the existing marked automation comment', () => {
+  const github = new GitHubAPI('example', 'ios');
+  const calls = [];
+  github.exec = args => {
+    calls.push(args);
+    if (args.includes('--slurp')) return JSON.stringify([[
+      { id: 456, body: '<!-- submission:1 -->\nOld failure' },
+    ]]);
+    return '';
+  };
+
+  assert.equal(
+    github.upsertPRComment(12, '<!-- submission:1 -->', '<!-- submission:1 -->\nNew failure'),
+    'updated',
+  );
+  assert.deepEqual(calls[1], [
+    'api', '--method', 'PATCH',
+    'repos/example/ios/issues/comments/456',
+    '-f', 'body=<!-- submission:1 -->\nNew failure',
+  ]);
+});
+
+test('reopens and updates a marked release issue', () => {
+  const github = new GitHubAPI('example', 'ios');
+  const calls = [];
+  github.exec = args => {
+    calls.push(args);
+    if (args[0] === 'issue') return JSON.stringify([{
+      number: 45,
+      title: 'Old title',
+      body: '<!-- release:1 -->\nOld failure',
+      state: 'CLOSED',
+      url: 'https://github.test/issues/45',
+    }]);
+    return JSON.stringify({
+      number: 45,
+      html_url: 'https://github.test/issues/45',
+    });
+  };
+
+  assert.deepEqual(
+    github.upsertIssue('<!-- release:1 -->', 'Release blocked', 'New failure'),
+    { number: 45, url: 'https://github.test/issues/45', action: 'reopened' },
+  );
+  assert.ok(calls[1].includes('state=open'));
+});
+
+test('closes an open marked release issue with a resolution comment', () => {
+  const github = new GitHubAPI('example', 'ios');
+  const calls = [];
+  github.exec = args => {
+    calls.push(args);
+    if (args[0] === 'issue') return JSON.stringify([{
+      number: 45,
+      body: '<!-- release:1 -->',
+      state: 'OPEN',
+      url: 'https://github.test/issues/45',
+    }]);
+    return '{}';
+  };
+
+  assert.deepEqual(
+    github.closeIssueByMarker('<!-- release:1 -->', 'Submitted successfully'),
+    { number: 45, url: 'https://github.test/issues/45' },
+  );
+  assert.match(calls[1].join(' '), /issues\/45\/comments/);
+  assert.ok(calls[2].includes('state=closed'));
+});
+
 test('release notes always use the PR title', () => {
   const github = new GitHubAPI('desai-deep', 'merge4appstore');
   const prDetails = {
