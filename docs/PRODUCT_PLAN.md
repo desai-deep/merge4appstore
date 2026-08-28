@@ -118,7 +118,9 @@ durable.
 8. Logs are local files without customer-visible history, alerting, or an audit
    model.
 9. Release behavior assumes specific branches, one release PR, English notes,
-    and an opinionated App Store submission policy.
+   and an opinionated App Store submission policy. Release type is not yet
+   profile data; the supervised Jams 1.2 release required an explicit ASC patch
+   to `AFTER_APPROVAL` before submission.
 
 ## Target responsibility boundaries
 
@@ -1017,13 +1019,16 @@ Exit criteria:
    reuse, rejection reconciliation, version selection, release sync, and tag
    creation using the GitHub App transport. Use the next real release as the
    supervised live acceptance test with rollback/runbook ready.
-9. Build the minimum onboarding path: install App, upload/validate ASC key,
+9. Add declarative per-deployment App Store release policy (`manual`,
+   `after_approval`, or `scheduled` plus date), default conservatively, validate
+   it during onboarding, and set/verify `releaseType` before submission.
+10. Build the minimum onboarding path: install App, upload/validate ASC key,
    discover apps/workflows, map roles/purposes, validate manual start
    conditions, open adapter PR, run shadow test, and enable modules.
-10. Interview five Xcode Cloud indie developers and offer the `$10/year`
+11. Interview five Xcode Cloud indie developers and offer the `$10/year`
    founding tier to measure successful setup, retained use, support minutes,
    and willingness to pay before fixing long-term pricing.
-11. Test positioning against Runway and Tramline users: the question is not
+12. Test positioning against Runway and Tramline users: the question is not
    whether automation is possible, but whether this narrower Xcode Cloud-native
    workflow is easier, safer, and cheaper enough to switch or supplement their
    current process.

@@ -406,6 +406,10 @@ builds whose provenance is ambiguous are never expired automatically.
 - Xcode Cloud completion payloads are treated as notifications and actionable
   state is re-read through App Store Connect. The Xcode URL token is an endpoint
   secret, not equivalent to a signed provider payload.
+- App Store version release policy is not yet a profile field. The supervised
+  Jams 1.2 release was explicitly set to `AFTER_APPROVAL` through ASC before
+  submission; unattended customers need a declarative `manual`,
+  `after_approval`, or scheduled policy with a conservative default.
 
 ## Automatic VPS Deploy
 
