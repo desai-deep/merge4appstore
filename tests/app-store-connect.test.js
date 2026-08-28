@@ -871,3 +871,62 @@ test('uploads and commits screenshot bytes using Apple upload operations', async
   const commit = JSON.parse(requests.find(call => call.options.method === 'PATCH').options.body);
   assert.deepEqual(commit.data.attributes, { uploaded: true, sourceFileChecksum: 'checksum' });
 });
+
+test('makes a declared app preview set match repository order', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.getPreviewSets = async () => ([
+    { id: 'set-1', attributes: { previewType: 'IPHONE_65' } },
+  ]);
+  asc.getPreviews = async () => ([
+    { id: 'old', attributes: { fileName: 'old.mov', sourceFileChecksum: 'old' } },
+    { id: 'two', attributes: { fileName: '02.mov', sourceFileChecksum: 'bbb' } },
+  ]);
+  const deleted = [];
+  const uploaded = [];
+  let order = null;
+  asc.deletePreview = async id => { deleted.push(id); };
+  asc.uploadPreview = async (_setId, asset) => {
+    uploaded.push(asset.fileName);
+    return { id: `uploaded-${asset.fileName}` };
+  };
+  asc.replacePreviewOrder = async (_setId, ids) => { order = ids; };
+
+  assert.deepEqual(await asc.syncPreviewSet('localization-1', 'IPHONE_65', [
+    { fileName: '01.mov', checksum: 'aaa', bytes: Buffer.from('one') },
+    { fileName: '02.mov', checksum: 'bbb', bytes: Buffer.from('two') },
+  ]), { kept: 1, uploaded: 1, removed: 1 });
+  assert.deepEqual(deleted, ['old']);
+  assert.deepEqual(uploaded, ['01.mov']);
+  assert.deepEqual(order, ['uploaded-01.mov', 'two']);
+});
+
+test('uploads and commits app preview video bytes', async t => {
+  const asc = createASCWithVersions({ data: [] });
+  const requests = [];
+  asc.request = async (endpoint, options = {}) => {
+    requests.push({ endpoint, options });
+    if (endpoint === '/appPreviews' && options.method === 'POST') {
+      return { data: { id: 'preview-1', attributes: { uploadOperations: [{
+        url: 'https://upload.example/video', method: 'PUT', offset: 0, length: 5,
+        requestHeaders: [{ name: 'Content-Type', value: 'video/quicktime' }],
+      }] } } };
+    }
+    if (endpoint === '/appPreviews/preview-1' && !options.method) {
+      return { data: { id: 'preview-1', attributes: {
+        assetDeliveryState: { state: 'COMPLETE' },
+        videoDeliveryState: { state: 'COMPLETE' },
+      } } };
+    }
+    return { data: {} };
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, status: 200 });
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const result = await asc.uploadPreview('set-1', {
+    fileName: '01.mov', bytes: Buffer.from('video'), checksum: 'checksum',
+  }, { pollDelayMs: 0 });
+  assert.equal(result.id, 'preview-1');
+  const commit = JSON.parse(requests.find(call => call.options.method === 'PATCH').options.body);
+  assert.deepEqual(commit.data.attributes, { uploaded: true, sourceFileChecksum: 'checksum' });
+});

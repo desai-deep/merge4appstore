@@ -1,118 +1,98 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { parseLocalizedMetadata, syncLocalizedMetadata } from '../lib/metadata.js';
+import { discoverLocalizedMetadata, syncLocalizedMetadata } from '../lib/metadata.js';
 
-test('omitted localized fields and screenshot sets remain unmanaged', () => {
-  assert.deepEqual(parseLocalizedMetadata(`
-version: 1
-localizations:
-  en-US: {}
-  de-DE:
-    description: Beschreibung
-`, 'AppStore/metadata.yml'), {
-    version: 1,
-    localizations: {
-      'en-US': { attributes: {}, screenshots: {} },
-      'de-DE': { attributes: { description: 'Beschreibung' }, screenshots: {} },
-    },
-  });
+function repository(entries, blobs) {
+  return {
+    getRepositoryTree: () => entries,
+    getRepositoryBlob: sha => Buffer.from(blobs[sha] || ''),
+  };
+}
+
+test('discovers optional text fields and alphabetizes screenshot and preview files', () => {
+  const entries = [
+    { path: 'AppStore/en-US/description.txt', type: 'blob', sha: 'description' },
+    { path: 'AppStore/en-US/screenshots/APP_IPHONE_69', type: 'tree' },
+    { path: 'AppStore/en-US/screenshots/APP_IPHONE_69/02.png', type: 'blob', sha: 'two' },
+    { path: 'AppStore/en-US/screenshots/APP_IPHONE_69/01.png', type: 'blob', sha: 'one' },
+    { path: 'AppStore/en-US/previews/IPHONE_65', type: 'tree' },
+    { path: 'AppStore/en-US/previews/IPHONE_65/01.mov', type: 'blob', sha: 'video' },
+  ];
+  const metadata = discoverLocalizedMetadata(entries, 'AppStore', sha => Buffer.from(sha));
+
+  assert.deepEqual(metadata.localizations['en-US'].attributes, { description: 'description' });
+  assert.deepEqual(
+    metadata.localizations['en-US'].screenshots.APP_IPHONE_69.map(asset => asset.fileName),
+    ['01.png', '02.png'],
+  );
+  assert.deepEqual(
+    metadata.localizations['en-US'].previews.IPHONE_65.map(asset => asset.fileName),
+    ['01.mov'],
+  );
 });
 
-test('declared screenshot sets resolve inside the metadata directory and may be empty', () => {
-  const metadata = parseLocalizedMetadata(`
-version: 1
-localizations:
-  en-US:
-    screenshots:
-      APP_IPAD_PRO_3GEN_129:
-        - screenshots/en-US/ipad/01.png
-      APP_IPHONE_69: []
-`, 'AppStore/metadata.yml');
-
-  assert.deepEqual(metadata.localizations['en-US'].screenshots, {
-    APP_IPAD_PRO_3GEN_129: ['AppStore/screenshots/en-US/ipad/01.png'],
-    APP_IPHONE_69: [],
-  });
+test('an existing media directory with only a hidden keep file is authoritative and empty', () => {
+  const metadata = discoverLocalizedMetadata([
+    { path: 'AppStore/en-US/screenshots/APP_IPAD_PRO_3GEN_129', type: 'tree' },
+    { path: 'AppStore/en-US/screenshots/APP_IPAD_PRO_3GEN_129/.gitkeep', type: 'blob', sha: 'keep' },
+  ], 'AppStore', () => Buffer.alloc(0));
+  assert.deepEqual(metadata.localizations['en-US'].screenshots.APP_IPAD_PRO_3GEN_129, []);
 });
 
-test('rejects screenshot paths that escape the metadata directory', () => {
-  assert.throws(() => parseLocalizedMetadata(`
-version: 1
-localizations:
-  en-US:
-    screenshots:
-      APP_IPAD_PRO_3GEN_129:
-        - ../secret.png
-`, 'AppStore/metadata.yml'), /escapes the repository metadata directory/);
+test('rejects unsupported files inside managed media directories', () => {
+  assert.throws(() => discoverLocalizedMetadata([
+    { path: 'AppStore/en-US/previews/IPHONE_65/readme.txt', type: 'blob', sha: 'bad' },
+  ], 'AppStore', () => Buffer.alloc(0)), /Unsupported previews file/);
 });
 
-test('syncs only explicitly declared metadata and screenshot sets', async () => {
-  const files = new Map([
-    ['AppStore/metadata.yml', Buffer.from(`
-version: 1
-localizations:
-  en-US: {}
-  de-DE:
-    promotional_text: Neu
-    screenshots:
-      APP_IPAD_PRO_3GEN_129:
-        - screenshots/de-DE/ipad/01.png
-`)],
-    ['AppStore/screenshots/de-DE/ipad/01.png', Buffer.from('image')],
-  ]);
-  const github = { getRepositoryFile: file => files.get(file) };
+test('syncs only the text fields and media directories present in the tree', async () => {
+  const github = repository([
+    { path: 'AppStore/de-DE/promotional_text.txt', type: 'blob', sha: 'text' },
+    { path: 'AppStore/de-DE/screenshots/APP_IPAD_PRO_3GEN_129', type: 'tree' },
+    { path: 'AppStore/de-DE/screenshots/APP_IPAD_PRO_3GEN_129/01.png', type: 'blob', sha: 'image' },
+    { path: 'AppStore/de-DE/previews/IPAD_PRO_3GEN_129', type: 'tree' },
+    { path: 'AppStore/de-DE/previews/IPAD_PRO_3GEN_129/01.mov', type: 'blob', sha: 'video' },
+  ], { text: 'Neu\n', image: 'image', video: 'video' });
   const calls = [];
   const asc = {
-    findAppStoreVersionLocalization: async (_versionId, locale) => {
-      calls.push(`find:${locale}`);
-      return { id: `localization-${locale}` };
-    },
-    updateAppStoreVersionLocalization: async (id, attributes) => {
-      calls.push({ id, attributes });
-    },
+    findAppStoreVersionLocalization: async (_versionId, locale) => ({ id: `localization-${locale}` }),
+    updateAppStoreVersionLocalization: async (id, attributes) => calls.push({ id, attributes }),
     syncScreenshotSet: async (id, displayType, assets) => {
-      calls.push({ id, displayType, assets });
+      calls.push({ kind: 'screenshots', id, displayType, assets });
+      return { kept: 0, uploaded: 1, removed: 0 };
+    },
+    syncPreviewSet: async (id, displayType, assets) => {
+      calls.push({ kind: 'previews', id, displayType, assets });
       return { kept: 0, uploaded: 1, removed: 0 };
     },
   };
 
   const result = await syncLocalizedMetadata(asc, github, {
-    metadataPath: 'AppStore/metadata.yml',
-    ref: 'abc123',
-    versionId: 'version-1',
+    metadataPath: 'AppStore', ref: 'abc123', versionId: 'version-1',
   });
 
   assert.equal(result.enabled, true);
-  assert.deepEqual(calls.slice(0, 2), [
-    'find:de-DE',
-    { id: 'localization-de-DE', attributes: { promotionalText: 'Neu' } },
-  ]);
-  assert.equal(calls.length, 3);
-  assert.equal(calls[2].displayType, 'APP_IPAD_PRO_3GEN_129');
-  assert.equal(calls[2].assets[0].fileName, '01.png');
-  assert.equal(calls[2].assets[0].checksum, '78805a221a988e79ef3f42d7c5bfd418');
+  assert.deepEqual(calls[0], {
+    id: 'localization-de-DE', attributes: { promotionalText: 'Neu' },
+  });
+  assert.equal(calls[1].kind, 'screenshots');
+  assert.equal(calls[1].assets[0].checksum, '78805a221a988e79ef3f42d7c5bfd418');
+  assert.equal(calls[2].kind, 'previews');
 });
 
-test('an explicitly empty screenshot set is authoritative', async () => {
-  const github = { getRepositoryFile: () => Buffer.from(`
-version: 1
-localizations:
-  en-US:
-    screenshots:
-      APP_IPAD_PRO_3GEN_129: []
-`) };
-  let desired = null;
+test('omitted media directories and release notes remain unmanaged', async () => {
+  const github = repository([
+    { path: 'AppStore/en-US/description.txt', type: 'blob', sha: 'text' },
+  ], { text: 'Description' });
   const asc = {
     findAppStoreVersionLocalization: async () => ({ id: 'localization-1' }),
-    syncScreenshotSet: async (_id, _displayType, assets) => {
-      desired = assets;
-      return { kept: 0, uploaded: 0, removed: 2 };
-    },
+    updateAppStoreVersionLocalization: async () => {},
+    syncScreenshotSet: async () => assert.fail('no screenshot set is managed'),
+    syncPreviewSet: async () => assert.fail('no preview set is managed'),
   };
-
-  await syncLocalizedMetadata(asc, github, {
-    metadataPath: 'AppStore/metadata.yml', ref: 'abc', versionId: 'version-1',
+  const result = await syncLocalizedMetadata(asc, github, {
+    metadataPath: 'AppStore', ref: 'abc', versionId: 'version-1',
   });
-  assert.deepEqual(desired, []);
+  assert.deepEqual([...result.managedWhatsNewLocales], []);
 });

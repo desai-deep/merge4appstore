@@ -92,11 +92,11 @@ test('maps beta and production pushes to their managed build purposes', () => {
 });
 
 test('deploys metadata-only production pushes without starting a new build', () => {
-  const metadataProfile = { ...profile, metadata: { path: 'AppStore/metadata.yml' } };
+  const metadataProfile = { ...profile, metadata: { path: 'AppStore' } };
   const repository = { full_name: 'example/ios' };
   const basePayload = {
     ref: 'refs/heads/main', after: 'def', repository, size: 1,
-    commits: [{ added: [], modified: ['AppStore/metadata.yml', 'AppStore/screenshots/en-US/01.png'], removed: [] }],
+    commits: [{ added: [], modified: ['AppStore/en-US/description.txt', 'AppStore/en-US/screenshots/APP_IPHONE_69/01.png'], removed: [] }],
   };
 
   assert.deepEqual(jobsForGitHubEvent(metadataProfile, 'push', basePayload, 'metadata'), [
@@ -104,7 +104,7 @@ test('deploys metadata-only production pushes without starting a new build', () 
   ]);
   assert.equal(jobsForGitHubEvent(metadataProfile, 'push', {
     ...basePayload,
-    commits: [{ added: [], modified: ['AppStore/metadata.yml', 'Sources/App.swift'], removed: [] }],
+    commits: [{ added: [], modified: ['AppStore/en-US/description.txt', 'Sources/App.swift'], removed: [] }],
   }, 'mixed')[0].purpose, 'production');
   assert.equal(jobsForGitHubEvent(metadataProfile, 'push', {
     ...basePayload, size: 2,

@@ -162,14 +162,15 @@ test('syncs repository metadata from production head and honors managed release 
     });
     const github = createGitHub({
       getProductionHead: () => 'production-head',
-      getRepositoryFile: (file, ref) => {
-        assert.equal(file, 'AppStore/metadata.yml');
+      getRepositoryTree: (directory, ref) => {
+        assert.equal(directory, 'AppStore');
         assert.equal(ref, 'production-head');
-        return Buffer.from(`version: 1\nlocalizations:\n  en-US:\n    whats_new: Repository notes\n`);
+        return [{ path: 'AppStore/en-US/whats_new.txt', type: 'blob', sha: 'notes' }];
       },
+      getRepositoryBlob: sha => Buffer.from(sha === 'notes' ? 'Repository notes\n' : ''),
     });
 
-    await runDeployCheck(asc, github, false, { metadataPath: 'AppStore/metadata.yml' });
+    await runDeployCheck(asc, github, false, { metadataPath: 'AppStore' });
     assert.deepEqual(events, [
       ['metadata', { whatsNew: 'Repository notes' }],
       ['select'],
@@ -201,13 +202,14 @@ test('metadata reconciliation retries the blocked build without recovering an Xc
     });
     const github = createGitHub({
       getProductionHead: () => 'metadata-head',
-      getRepositoryFile: () => Buffer.from(
-        'version: 1\nlocalizations:\n  en-US:\n    promotional_text: Updated\n',
-      ),
+      getRepositoryTree: () => ([
+        { path: 'AppStore/en-US/promotional_text.txt', type: 'blob', sha: 'promo' },
+      ]),
+      getRepositoryBlob: () => Buffer.from('Updated\n'),
     });
 
     await runDeployCheck(asc, github, false, {
-      metadataPath: 'AppStore/metadata.yml',
+      metadataPath: 'AppStore',
       reconcileMetadata: true,
     });
     assert.equal(submitted, true);

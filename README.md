@@ -90,7 +90,7 @@ repository:
   beta_branch: develop
 
 metadata: # optional
-  path: AppStore/metadata.yml
+  path: AppStore
 
 apps:
   prod:
@@ -137,41 +137,49 @@ override. Prefer app roles when several values travel together.
 
 ### Repository-managed App Store metadata
 
-An app repository may opt in by declaring `metadata.path` in its profile. The
-manifest is loaded from the current production-branch head immediately before
-submission, so metadata can be corrected and retried without producing another
-binary. Repositories without this setting retain the existing deployment flow.
+An app repository may opt in by declaring a `metadata.path` directory in its
+profile. Its filesystem is loaded from the current production-branch head
+immediately before submission, so metadata can be corrected and retried without
+producing another binary. No manifest file is required.
 
-```yaml
-version: 1
-localizations:
-  en-US:
-    description: Optional localized description
-    keywords: music,albums
-    marketing_url: https://example.com
-    promotional_text: Optional promotional text
-    support_url: https://example.com/support
-    whats_new: Optional repository-managed release notes
-    screenshots:
-      APP_IPHONE_69:
-        - screenshots/en-US/iphone-6.9/01.png
-      APP_IPAD_PRO_3GEN_129: []
-  de-DE: {}
+```text
+AppStore/
+├── en-US/
+│   ├── description.txt
+│   ├── keywords.txt
+│   ├── marketing_url.txt
+│   ├── promotional_text.txt
+│   ├── support_url.txt
+│   ├── whats_new.txt
+│   ├── screenshots/
+│   │   ├── APP_IPHONE_69/
+│   │   │   ├── 01-home.png
+│   │   │   └── 02-player.png
+│   │   └── APP_IPAD_PRO_3GEN_129/
+│   │       └── 01-library.png
+│   └── previews/
+│       └── IPHONE_65/
+│           ├── 01-overview.mov
+│           └── 02-playback.mp4
+└── de-DE/
+    └── description.txt
 ```
 
 Management is explicitly opt-in at every level:
 
-- An omitted locale, field, or screenshot display type is left unchanged in
-  App Store Connect. An empty locale mapping therefore changes nothing.
-- A declared text field updates only that field. An explicit empty string
-  clears that field.
-- A declared screenshot list is authoritative for that locale and display
-  type: files are uploaded, removed, and reordered to match the repository.
-  An explicit empty list clears an existing set; an omitted set is untouched.
-- Screenshot paths are relative to the manifest and must remain within its
-  directory. Filenames must be unique within a display type.
+- An omitted locale, text file, screenshot directory, or preview directory is
+  left unchanged in App Store Connect.
+- A present text file updates only that field. An empty file clears it.
+- A present media directory is authoritative for that locale and display type:
+  files are uploaded or removed to match the repository. Files are ordered
+  alphabetically, so use prefixes such as `01-`, `02-`, and `03-`.
+- Git cannot track an empty directory. To clear a managed screenshot or preview
+  set, leave a `.gitkeep` file in that display-type directory.
+- Screenshots support PNG and JPEG. App Preview videos support MOV, MP4, and
+  M4V; App Store Connect still validates Apple's size, codec, duration, and
+  device requirements during processing.
 
-If `en-US.whats_new` is declared, it replaces the usual release-PR-title notes
+If `en-US/whats_new.txt` exists, it replaces the usual release-PR-title notes
 for that submission. Other locales and omitted `whats_new` fields retain their
 normal behavior.
 

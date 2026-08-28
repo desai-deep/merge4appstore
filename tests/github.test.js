@@ -22,6 +22,30 @@ test('loads repository assets through the Git blob API', () => {
   ]);
 });
 
+test('lists a metadata subtree from an immutable repository tree', () => {
+  const github = new GitHubAPI('example', 'ios');
+  const calls = [];
+  github.exec = args => {
+    calls.push(args);
+    if (args[1].includes('/commits/')) {
+      return JSON.stringify({ commit: { tree: { sha: 'tree-sha' } } });
+    }
+    return JSON.stringify({ truncated: false, tree: [
+      { path: 'AppStore', type: 'tree', sha: 'root' },
+      { path: 'AppStore/en-US/description.txt', type: 'blob', sha: 'description' },
+      { path: 'Sources/App.swift', type: 'blob', sha: 'source' },
+    ] });
+  };
+
+  assert.deepEqual(github.getRepositoryTree('AppStore', 'release/1.2').map(item => item.sha), [
+    'root', 'description',
+  ]);
+  assert.deepEqual(calls, [
+    ['api', 'repos/example/ios/commits/release%2F1.2'],
+    ['api', 'repos/example/ios/git/trees/tree-sha?recursive=1'],
+  ]);
+});
+
 test('updates the existing marked automation comment', () => {
   const github = new GitHubAPI('example', 'ios');
   const calls = [];

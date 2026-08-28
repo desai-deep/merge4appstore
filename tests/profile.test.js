@@ -75,16 +75,16 @@ test('defaults each automation to the prod app', () => {
 
 test('adds optional repository metadata only to deployment', () => {
   const fixture = profileFixture();
-  fixture.metadata = { path: 'AppStore/metadata.yml' };
+  fixture.metadata = { path: 'AppStore' };
   const profile = validateRepositoryProfile(fixture);
 
-  assert.equal(resolveAutomation(profile, 'deploy').metadataPath, 'AppStore/metadata.yml');
+  assert.equal(resolveAutomation(profile, 'deploy').metadataPath, 'AppStore');
   assert.equal(resolveAutomation(profile, 'sync').metadataPath, '');
   assert.equal(resolveAutomation(profile, 'expire').metadataPath, '');
 });
 
-test('requires metadata manifests to use a normalized path inside a directory', () => {
-  for (const invalid of ['/metadata.yml', 'metadata.yml', '../metadata.yml', 'AppStore/../metadata.yml', 'AppStore\\metadata.yml']) {
+test('requires metadata roots to use a normalized repository directory path', () => {
+  for (const invalid of ['/AppStore', '../AppStore', 'AppStore/../Metadata', 'AppStore\\Metadata']) {
     const profile = profileFixture();
     profile.metadata = { path: invalid };
     assert.throws(() => validateRepositoryProfile(profile), /metadata\.path/);

@@ -9,7 +9,7 @@ repository:
   ios_repo_path: ""
 
 metadata:
-  path: AppStore/metadata.yml
+  path: AppStore
 
 webhooks:
   github:
