@@ -93,6 +93,24 @@ test('an existing media directory with only a hidden keep file is authoritative 
   assert.deepEqual(metadata.localizations['en-US'].screenshots.APP_IPAD_PRO_3GEN_129, []);
 });
 
+test('accepts future Apple-style screenshot types in explicit directories', () => {
+  const metadata = discoverLocalizedMetadata([
+    { path: 'AppStore/en-US/screenshots/APP_IPHONE_FUTURE', type: 'tree' },
+    { path: 'AppStore/en-US/screenshots/APP_IPHONE_FUTURE/01.png', type: 'blob', sha: 'image' },
+  ], 'AppStore', () => Buffer.from('image'));
+  assert.equal(metadata.localizations['en-US'].screenshots.APP_IPHONE_FUTURE.length, 1);
+
+  assert.throws(() => discoverLocalizedMetadata([
+    { path: 'AppStore/en-US/screenshots/not-an-apple-type', type: 'tree' },
+  ], 'AppStore', () => Buffer.alloc(0)), /Invalid screenshot display type directory/);
+});
+
+test('rejects preview files without an explicit display-type directory', () => {
+  assert.throws(() => discoverLocalizedMetadata([
+    { path: 'AppStore/en-US/previews/01.mov', type: 'blob', sha: 'video' },
+  ], 'AppStore', () => Buffer.from('video')), /require an explicit display-type directory/);
+});
+
 test('rejects unsupported files inside managed media directories', () => {
   assert.throws(() => discoverLocalizedMetadata([
     { path: 'AppStore/en-US/previews/IPHONE_65/readme.txt', type: 'blob', sha: 'bad' },

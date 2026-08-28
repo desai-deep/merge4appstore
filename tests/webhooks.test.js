@@ -109,6 +109,10 @@ test('deploys metadata-only production pushes without starting a new build', () 
   assert.equal(jobsForGitHubEvent(metadataProfile, 'push', {
     ...basePayload, size: 2,
   }, 'truncated')[0].purpose, 'production');
+  assert.equal(jobsForGitHubEvent({ ...profile, metadata: { path: 'metadata.json' } }, 'push', {
+    ...basePayload,
+    commits: [{ added: [], modified: ['metadata.json'], removed: [] }],
+  }, 'file-path')[0].purpose, 'production');
 });
 
 test('normalizes full Git refs in build preparation payloads', () => {
