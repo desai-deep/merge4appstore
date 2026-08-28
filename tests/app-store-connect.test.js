@@ -262,6 +262,47 @@ test('reuses an empty review draft instead of creating another submission', asyn
   });
 });
 
+test('retains the draft submission id when adding its version fails', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.getReviewSubmissionIdForVersion = async () => null;
+  asc.getReusableDraftReviewSubmissionId = async () => 'draft-1';
+  const failure = new Error('Screenshot required');
+  asc.request = async endpoint => {
+    assert.equal(endpoint, '/reviewSubmissionItems');
+    throw failure;
+  };
+
+  await assert.rejects(
+    asc.getOrCreateDraftReviewSubmission('version-1'),
+    error => error === failure && error.reviewSubmissionId === 'draft-1',
+  );
+});
+
+test('deletes only a review submission that is still a draft', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  const requests = [];
+  asc.request = async (endpoint, options = {}) => {
+    requests.push({ endpoint, options });
+    if (options.method === 'DELETE') return null;
+    return { data: { attributes: { state: 'READY_FOR_REVIEW' } } };
+  };
+
+  assert.deepEqual(await asc.deleteDraftReviewSubmission('draft-1'), {
+    deleted: true,
+    state: 'READY_FOR_REVIEW',
+  });
+  assert.deepEqual(requests.map(request => [request.endpoint, request.options.method]), [
+    ['/reviewSubmissions/draft-1?fields[reviewSubmissions]=state', undefined],
+    ['/reviewSubmissions/draft-1', 'DELETE'],
+  ]);
+
+  asc.request = async () => ({ data: { attributes: { state: 'WAITING_FOR_REVIEW' } } });
+  assert.deepEqual(await asc.deleteDraftReviewSubmission('submitted-1'), {
+    deleted: false,
+    state: 'WAITING_FOR_REVIEW',
+  });
+});
+
 test('finds an empty ready-for-review draft', async () => {
   const asc = createASCWithVersions({ data: [] });
   asc.getAppId = async () => 'app-1';

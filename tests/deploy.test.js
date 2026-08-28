@@ -58,6 +58,7 @@ function createASC(overrides = {}) {
     selectBuildForVersion: async () => {},
     updateReleaseNotes: async () => {},
     submitForReview: async () => {},
+    deleteDraftReviewSubmission: async () => ({ deleted: true, state: 'READY_FOR_REVIEW' }),
     ...overrides,
   };
 }
@@ -77,11 +78,13 @@ test('surfaces App Store requirements on the release PR without hiding the failu
   await withWorkflowId('workflow-1', async () => {
     const failure = new Error('API Error 409: This resource cannot be reviewed');
     failure.statusCode = 409;
+    failure.reviewSubmissionId = 'submission-1';
     failure.appStoreErrors = [{
       code: 'STATE_ERROR.SCREENSHOT_REQUIRED.APP_IPAD_PRO_3GEN_129',
       title: 'App screenshot missing (APP_IPAD_PRO_3GEN_129)',
       detail: 'A screenshot with type ipadPro129 is required but was not provided',
     }];
+    const events = [];
     let posted = null;
     const asc = createASC({
       getTestFlightReadyBuilds: async () => ([
@@ -89,9 +92,14 @@ test('surfaces App Store requirements on the release PR without hiding the failu
       ]),
       getBuildByNumber: async () => ({ buildId: 'build-161', version: '1.2' }),
       submitForReview: async () => { throw failure; },
+      deleteDraftReviewSubmission: async submissionId => {
+        events.push(`delete:${submissionId}`);
+        return { deleted: true, state: 'READY_FOR_REVIEW' };
+      },
     });
     const github = createGitHub({
       upsertPRComment: (prNumber, marker, comment) => {
+        events.push('comment');
         posted = { prNumber, marker, comment };
         return 'created';
       },
@@ -104,6 +112,30 @@ test('surfaces App Store requirements on the release PR without hiding the failu
     assert.match(posted.comment, /ipadPro129 is required/);
     assert.match(posted.comment, /Build #161 remains selected for version 1\.2/);
     assert.match(posted.comment, /A new build is not required/);
+    assert.deepEqual(events, ['comment', 'delete:submission-1']);
+  });
+});
+
+test('keeps a failed draft when the release PR cannot be notified', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    const failure = new Error('Submission failed');
+    failure.reviewSubmissionId = 'submission-1';
+    let deleted = false;
+    const asc = createASC({
+      getTestFlightReadyBuilds: async () => ([
+        { buildNumber: '161', version: '1.2', buildId: 'build-161' },
+      ]),
+      getBuildByNumber: async () => ({ buildId: 'build-161', version: '1.2' }),
+      submitForReview: async () => { throw failure; },
+      deleteDraftReviewSubmission: async () => {
+        deleted = true;
+        return { deleted: true, state: 'READY_FOR_REVIEW' };
+      },
+    });
+    const github = createGitHub({ upsertPRComment: () => false });
+
+    await assert.rejects(runDeployCheck(asc, github, false), error => error === failure);
+    assert.equal(deleted, false);
   });
 });
 
