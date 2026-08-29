@@ -338,6 +338,12 @@ The VPS deployment starts the listener with PM2, configures the signed GitHub
 hooks, and proxies it at `https://api.runningorder.app/merge4appstore/`. A
 manual deployment can set `pause_cron: true` for an isolated webhook test.
 
+The deployment workflow also exposes a constrained `reconcile_profile` choice
+for an auditable one-off live reconciliation on the VPS. It defaults to `none`;
+selecting a repository runs its deploy reconciliation only after the rollout and
+health checks succeed. Main-branch deployments keep legacy profile cron jobs
+paused by default while webhook delivery is authoritative.
+
 Webhook jobs for one repository are serialized. If cron or a manual command
 already holds that repository's lock, a later job waits instead of being
 reported as a successful no-op. The default wait is ten minutes and can be
