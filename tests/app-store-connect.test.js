@@ -450,6 +450,7 @@ test('finds and cancels a submitted version through appStoreVersionForReview', a
   };
 
   assert.deepEqual(await asc.cancelReview('version-1'), { success: true });
+  assert.match(requests[0].endpoint, /include=appStoreVersionForReview/);
   assert.match(requests[0].endpoint, /fields\[reviewSubmissions\]=state,appStoreVersionForReview/);
   assert.equal(requests.length, 2);
   assert.equal(requests[1].endpoint, '/reviewSubmissions/submission-1');
