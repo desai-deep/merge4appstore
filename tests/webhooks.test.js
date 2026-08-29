@@ -91,6 +91,23 @@ test('maps beta and production pushes to their managed build purposes', () => {
   assert.deepEqual(jobsForGitHubEvent(profile, 'push', { ref: 'refs/heads/feature', after: 'ghi', repository }, 'three'), []);
 });
 
+test('reconciles a configured release PR on beta and production pushes', () => {
+  const releaseProfile = { ...profile, release_pull_request: true };
+  const repository = { full_name: 'example/ios' };
+  assert.deepEqual(jobsForGitHubEvent(releaseProfile, 'push', {
+    ref: 'refs/heads/develop', after: 'abc', repository,
+  }, 'beta-push'), [
+    { mode: 'release-pr', deliveryId: 'beta-push' },
+    { mode: 'trigger', purpose: 'beta', commitSha: 'abc', branch: 'develop', deliveryId: 'beta-push' },
+  ]);
+  assert.deepEqual(jobsForGitHubEvent(releaseProfile, 'push', {
+    ref: 'refs/heads/main', after: 'def', repository,
+  }, 'production-push'), [
+    { mode: 'release-pr', deliveryId: 'production-push' },
+    { mode: 'trigger', purpose: 'production', commitSha: 'def', branch: 'main', deliveryId: 'production-push' },
+  ]);
+});
+
 test('deploys metadata-only production pushes without starting a new build', () => {
   const metadataProfile = { ...profile, metadata: { path: 'AppStore' } };
   const repository = { full_name: 'example/ios' };

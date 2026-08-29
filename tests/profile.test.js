@@ -7,6 +7,7 @@ import {
   applyRepositoryProfile,
   resolveAutomation,
   resolveBuildPurpose,
+  resolveReleasePullRequest,
   validateRepositoryProfile,
 } from '../lib/profile.js';
 
@@ -71,6 +72,33 @@ test('defaults each automation to the prod app', () => {
     metadataPath: '',
   });
   assert.equal(resolveAutomation(profile, 'sync').appRole, 'prod');
+});
+
+test('resolves centralized release pull request policy', () => {
+  const profile = profileFixture();
+  assert.deepEqual(resolveReleasePullRequest(profile), { enabled: false });
+
+  profile.release_pull_request = true;
+  assert.deepEqual(resolveReleasePullRequest(validateRepositoryProfile(profile)), {
+    enabled: true,
+    baseBranch: 'main',
+    headBranch: 'develop',
+    title: 'Bug fixes and performance improvements',
+    noteLimit: 100,
+  });
+});
+
+test('validates release pull request overrides', () => {
+  const profile = profileFixture();
+  profile.release_pull_request = { title: 'Monthly release', note_limit: 25 };
+  const policy = resolveReleasePullRequest(validateRepositoryProfile(profile));
+  assert.equal(policy.title, 'Monthly release');
+  assert.equal(policy.noteLimit, 25);
+
+  profile.release_pull_request.note_limit = 0;
+  assert.throws(() => validateRepositoryProfile(profile), /note_limit must be a positive integer/);
+  profile.release_pull_request = { unknown: true };
+  assert.throws(() => validateRepositoryProfile(profile), /unknown is not supported/);
 });
 
 test('adds optional repository metadata only to deployment', () => {

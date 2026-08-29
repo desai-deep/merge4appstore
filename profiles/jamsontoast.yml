@@ -8,6 +8,8 @@ repository:
   beta_branch: develop
   ios_repo_path: ""
 
+release_pull_request: true
+
 metadata:
   path: AppStore
 

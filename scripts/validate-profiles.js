@@ -4,7 +4,12 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import { loadRepositoryProfile, resolveAutomation, resolveBuildPurpose } from '../lib/profile.js';
+import {
+  loadRepositoryProfile,
+  resolveAutomation,
+  resolveBuildPurpose,
+  resolveReleasePullRequest,
+} from '../lib/profile.js';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const profilesDir = path.join(rootDir, 'profiles');
@@ -33,5 +38,6 @@ for (const file of profileFiles) {
       })
       .join(', ')
     : 'disabled';
-  console.log(`${file}: ${routes}; builds: ${builds}`);
+  const releasePR = resolveReleasePullRequest(profile);
+  console.log(`${file}: ${routes}; builds: ${builds}; release-pr: ${releasePR.enabled ? `${releasePR.headBranch}->${releasePR.baseBranch}` : 'disabled'}`);
 }

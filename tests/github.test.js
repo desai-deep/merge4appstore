@@ -195,6 +195,27 @@ test('URL-encodes slash-containing branch names when resolving their head', () =
   assert.equal(endpoint, 'repos/example/ios/commits/feature%2Fplayer');
 });
 
+test('reads paginated branch comparisons for release PR maintenance', () => {
+  const github = new GitHubAPI('example', 'ios');
+  let args;
+  github.exec = received => {
+    args = received;
+    return JSON.stringify([
+      { status: 'ahead', commits: [{ sha: 'one', commit: { message: 'First' } }] },
+      { commits: [{ sha: 'two', commit: { message: 'Second\nBody' } }] },
+    ]);
+  };
+
+  assert.deepEqual(github.compareBranches('release/1', 'develop/next'), {
+    status: 'ahead',
+    commits: [
+      { sha: 'one', message: 'First' },
+      { sha: 'two', message: 'Second\nBody' },
+    ],
+  });
+  assert.equal(args.at(-1), 'repos/example/ios/compare/release%2F1...develop%2Fnext?per_page=100');
+});
+
 test('recovers an open pull request only for the exact branch head commit', () => {
   const github = new GitHubAPI('example', 'ios');
   github.exec = () => JSON.stringify([

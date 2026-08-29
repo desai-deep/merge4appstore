@@ -14,6 +14,7 @@
  *   node index.js expire             # Expire builds from closed PRs targeting BETA_BRANCH
  *   node index.js trigger            # Trigger a configured build purpose
  *   node index.js notes              # Refresh TestFlight notes after a PR body edit
+ *   node index.js release-pr         # Create or update the beta-to-production release PR
  *   node index.js --config profiles/my-app.env
  *   node index.js --profile profiles/my-repository.yml
  *   DRY_RUN=true node index.js       # Dry run mode
@@ -50,6 +51,7 @@ import {
   applyBuildPurposeProfile,
   applyRepositoryProfile,
   loadRepositoryProfile,
+  resolveReleasePullRequest,
 } from './lib/profile.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -93,6 +95,7 @@ import { runClosedPRBuildExpiry } from './lib/expire.js';
 import { XcodeCloudBuildProvider } from './lib/build-provider.js';
 import { buildIntentFromEnvironment, runManagedBuildTrigger, waitForBuildCompletion } from './lib/trigger.js';
 import { refreshTestFlightNotes } from './lib/refresh-notes.js';
+import { reconcileReleasePullRequest } from './lib/release-pr.js';
 
 async function main() {
   const DRY_RUN = process.env.DRY_RUN === 'true';
@@ -118,13 +121,12 @@ async function main() {
   }
 
   // Validate required environment variables
-  const requiredSharedVars = [
+  const requiredSharedVars = ['GITHUB_REPO_OWNER', 'GITHUB_REPO_NAME'];
+  if (mode !== 'release-pr') requiredSharedVars.push(
     'APP_STORE_CONNECT_API_KEY_ID',
     'APP_STORE_CONNECT_ISSUER_ID',
     'APP_STORE_CONNECT_API_KEY_CONTENT',
-    'GITHUB_REPO_OWNER',
-    'GITHUB_REPO_NAME',
-  ];
+  );
 
   if (!repositoryProfile) requiredSharedVars.push('APP_BUNDLE_ID', 'APP_NAME');
 
@@ -154,6 +156,14 @@ async function main() {
   };
 
   try {
+    if (mode === 'release-pr') {
+      if (!repositoryProfile) throw new Error('release-pr mode requires --profile');
+      const policy = resolveReleasePullRequest(repositoryProfile);
+      if (!policy.enabled) throw new Error('release pull request automation is disabled');
+      const github = new GitHubAPI(CONFIG.repoOwner, CONFIG.repoName, CONFIG.productionBranch);
+      reconcileReleasePullRequest(github, policy, DRY_RUN);
+    }
+
     if (mode === 'notes') {
       if (!repositoryProfile) throw new Error('notes mode requires --profile');
       for (const name of ['BUILD_COMMIT_SHA', 'BUILD_BRANCH', 'BUILD_PULL_REQUEST']) {
