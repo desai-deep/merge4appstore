@@ -59,6 +59,7 @@ function createASC(overrides = {}) {
     updateReleaseNotes: async () => {},
     submitForReview: async () => {},
     removeReviewSubmissionItem: async () => {},
+    waitForVersionEditable: async () => 'PREPARE_FOR_SUBMISSION',
     ...overrides,
   };
 }
@@ -443,6 +444,46 @@ test('submits a newer build after a rejection', async () => {
 
     assert.equal(selectedBuildId, 'build-101');
     assert.equal(submittedVersionId, 'version-1.2.4');
+  });
+});
+
+test('withdraws the current review and submits a newer production build without PR attribution', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    const events = [];
+    const asc = createASC({
+      checkBuildInReview: async () => ({
+        inReview: true,
+        version: '1.2.3',
+        state: 'WAITING_FOR_REVIEW',
+        buildNumber: '100',
+        versionId: 'version-123',
+      }),
+      getTestFlightReadyBuilds: async () => ([
+        { buildNumber: '101', version: '1.2.3', buildId: 'build-101' },
+        { buildNumber: '100', version: '1.2.3', buildId: 'build-100' },
+      ]),
+      getBuildByNumber: async () => ({ buildId: 'build-101', version: '1.2.3' }),
+      cancelReview: async versionId => {
+        events.push(['cancel', versionId]);
+        return { success: true };
+      },
+      waitForVersionEditable: async versionId => {
+        events.push(['editable', versionId]);
+        return 'PREPARE_FOR_SUBMISSION';
+      },
+      selectBuildForVersion: async (versionId, buildId) => events.push(['select', versionId, buildId]),
+      submitForReview: async versionId => events.push(['submit', versionId]),
+    });
+    const github = createGitHub({ findPRFromCommit: () => null });
+
+    await runDeployCheck(asc, github, false);
+
+    assert.deepEqual(events, [
+      ['cancel', 'version-123'],
+      ['editable', 'version-123'],
+      ['select', 'version-1.2.3', 'build-101'],
+      ['submit', 'version-1.2.3'],
+    ]);
   });
 });
 

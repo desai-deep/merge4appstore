@@ -375,6 +375,27 @@ test('removes the failed item from its draft review submission', async () => {
   });
 });
 
+test('waits for a withdrawn App Store version to become editable', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  const states = ['WAITING_FOR_REVIEW', 'PREPARE_FOR_SUBMISSION'];
+  const requests = [];
+  asc.request = async endpoint => {
+    requests.push(endpoint);
+    return { data: { attributes: { appStoreState: states.shift() } } };
+  };
+
+  const state = await asc.waitForVersionEditable('version-1', {
+    pollDelayMs: 0,
+    timeoutMs: 1000,
+  });
+
+  assert.equal(state, 'PREPARE_FOR_SUBMISSION');
+  assert.deepEqual(requests, [
+    '/appStoreVersions/version-1?fields[appStoreVersions]=appStoreState',
+    '/appStoreVersions/version-1?fields[appStoreVersions]=appStoreState',
+  ]);
+});
+
 test('finds an empty ready-for-review draft', async () => {
   const asc = createASCWithVersions({ data: [] });
   asc.getAppId = async () => 'app-1';
