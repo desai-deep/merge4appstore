@@ -579,6 +579,9 @@ The first database schema should include:
 - `build_intents` with the durable repository/provider/workflow/commit/purpose
   uniqueness constraint;
 - `provider_runs` and immutable build-to-PR/workflow/app provenance;
+- `repository_blob_facts` keyed by tenant, immutable GitHub repository ID, and
+  Git blob object ID, containing byte size, detected media format, dimensions,
+  inferred display type, content checksum, parser version, and last-used time;
 - `jobs`, attempts, next-run time, terminal reason, and dead-letter state;
 - `audit_events` describing policy version, input IDs, decision, mutation, and
   external response IDs.
@@ -588,6 +591,83 @@ returning `202`. Workers should serialize mutations by repository while still
 allowing safe reads in parallel. A PR close and base-branch push must both be
 retained and run in order; neither may be converted into a successful no-op by
 lock contention.
+
+### Repository media retrieval and bandwidth
+
+Repository-managed screenshots and App Previews must not require a persistent
+checkout, but the hosted implementation must also avoid downloading every media
+blob during every reconciliation. The first filesystem-driven implementation
+eagerly reads each GitHub blob because the same bytes are used to parse image
+dimensions, calculate Apple's MD5 checksum, and upload a missing asset. That is
+acceptable for the initial two-repository deployment but would turn unchanged
+metadata polling into unnecessary customer and provider bandwidth at hosted
+scale.
+
+Do not make correctness or cost depend on HTTP byte-range reads. PNG dimensions
+need only the first 24 bytes and JPEG dimensions can usually be found in a
+small prefix, but GitHub does not document byte-range support for the Git blob
+endpoint. A range request may return `200` with the complete object. The typed
+GitHub transport should use supported tree and raw-blob APIs and treat partial
+responses only as a future, capability-tested optimization.
+
+Use Git's immutable blob object ID as the durable cache key instead:
+
+1. Resolve the configured production branch to one immutable commit SHA, then
+   load the configured metadata subtree. Retain each blob's path, object ID,
+   and byte size without fetching its body.
+2. Convert the tree into lazy media references. An explicit `APP_...`
+   screenshot directory supplies the display type immediately; a flat
+   screenshot needs inferred dimensions. Preview videos always retain their
+   explicit type.
+3. Batch-load `repository_blob_facts` for all object IDs. A cached object ID
+   supplies dimensions, inferred display type, and MD5 without a media-body
+   request. Cache entries are tenant/repository scoped even if another tenant
+   has the same object ID, avoiding cross-tenant existence or timing signals.
+4. Fetch an unknown blob once. While reading it, enforce the configured size
+   limit, verify PNG/JPEG structure when inference is required, calculate MD5,
+   and persist the resulting facts under a single-flight lock so concurrent
+   jobs do not repeat the download.
+5. Compare the desired filename and cached MD5 with App Store Connect before
+   materializing upload bytes. A known, already-matching asset requires no body
+   download. If Apple needs an upload, fetch or reuse the complete body and
+   stream it through a bounded temporary file because Apple's upload operations
+   may request explicit offsets. Delete the temporary copy after processing.
+6. Optionally retain complete bodies in tenant-scoped encrypted object storage
+   only while an upload or retry is pending. Apply a short TTL and byte quota;
+   GitHub remains the source of truth, so long-lived media storage is not
+   required for cache correctness.
+
+Blob facts are immutable, so branch movement needs no invalidation. Version the
+dimension parser and Apple display-type table separately: a mapping update can
+reclassify cached width/height without downloading the image again, while a
+format-parser change may mark only affected facts for reinspection. Delete or
+expire tenant-scoped facts and temporary objects according to disconnect and
+retention policy. Reject Git LFS pointer blobs clearly until an authenticated
+LFS transport is deliberately supported; never upload the pointer as media.
+
+Record fetched bytes, cache hits/misses, fetch reason (`inspect` or `upload`),
+temporary-object bytes, and per-repository totals. These metrics feed fair-use
+limits and make a sudden provider or parser regression visible. Logs and audit
+events may contain repository/blob IDs and byte counts but never media bytes or
+signed download URLs.
+
+Acceptance criteria:
+
+- after one successful inspection, a reconciliation of an unchanged metadata
+  tree downloads zero screenshot or preview body bytes;
+- an unchanged blob reused at another repository path reuses its facts, while
+  still fetching the body if the resulting Apple asset genuinely needs upload;
+- a new flat PNG/JPEG is downloaded at most once for inspection in concurrent
+  jobs, produces the same portrait/landscape and ambiguity decisions as the
+  existing parser, and reuses that result after restart;
+- explicit display-type directories skip dimension inference but still obtain
+  or reuse MD5 before deciding whether an upload is necessary;
+- dry runs use the same cache and decision path and do not download known
+  unchanged media;
+- failed uploads cannot leave an unbounded temporary copy, and retries either
+  reuse a TTL-cached body or perform one explainable new `upload` fetch;
+- uninstalling one GitHub App installation prevents further reads and removes
+  its retained media data without affecting another tenant.
 
 ### Onboarding flow
 
@@ -624,21 +704,25 @@ unless future App Store Connect APIs expose safe complete management.
 2. **GitHub client migration:** implement a transport interface, contract-test
    it, replace all `gh` subprocess reads/comments/tags, and run current dry runs
    with PAT and App transports for comparison.
-3. **Durable ingress and queue:** add the data model, transactional webhook
+3. **Lazy repository media:** make tree entries and blobs separate transport
+   operations, add persistent blob facts and single-flight inspection, defer
+   complete-body retrieval until cache miss or upload, and prove an unchanged
+   reconciliation transfers zero media bytes.
+4. **Durable ingress and queue:** add the data model, transactional webhook
    acceptance, per-repository serialization, retries, dead-letter/replay, and
    durable delivery/build-intent uniqueness.
-4. **Provenance capture:** on intent and Xcode `BUILD_CREATED`, persist the PR,
+5. **Provenance capture:** on intent and Xcode `BUILD_CREATED`, persist the PR,
    source/target refs, exact commit, app, workflow, provider run, and uploaded
    build ID. Cleanup must succeed from stored provenance even after Apple drops
    source metadata, while still corroborating the build through ASC.
-5. **Single-repository shadow migration:** install on JamsOnToast, receive App
+6. **Single-repository shadow migration:** install on JamsOnToast, receive App
    webhooks alongside the existing hook without mutating twice, compare every
    derived decision, then remove its classic hook and PAT access.
-6. **Second-app and role test:** migrate Running Order and prove UAT PR cleanup
+7. **Second-app and role test:** migrate Running Order and prove UAT PR cleanup
    plus production beta/submission isolation.
-7. **Self-service onboarding:** add ASC discovery, profile editor, validation,
+8. **Self-service onboarding:** add ASC discovery, profile editor, validation,
    bootstrap PR, health checks, credential rotation, and disconnect/delete.
-8. **Pilot hardening:** per-tenant quotas, rate-limit/backoff behavior,
+9. **Pilot hardening:** per-tenant quotas, rate-limit/backoff behavior,
    observability, backups, incident procedures, billing, and several external
    indie repositories.
 
@@ -910,6 +994,9 @@ Exit criteria:
 - Implemented for current apps: ASC/GitHub credentials are centralized and no
   longer required for preparation in Xcode Cloud; remaining: encrypted
   per-tenant storage.
+- Replace eager repository-media reads with lazy GitHub tree/blob references,
+  persisted blob facts, single-flight inspection, and bounded temporary upload
+  storage. Never depend on a local checkout or undocumented byte-range support.
 - Move release PR maintenance into GitHub webhooks.
 - Replace local-checkout tag/branch mutations with GitHub API operations.
 
@@ -925,6 +1012,8 @@ Exit criteria:
 - an Xcode Cloud payload not corroborated through ASC cannot submit or expire a
   build;
 - no hosted operation depends on a persistent app checkout;
+- reconciling an unchanged repository metadata tree transfers zero media-body
+  bytes, including after a worker restart;
 - revoking a GitHub installation or ASC credential stops only that tenant.
 
 ### Phase 3: hosted multi-tenant control plane
@@ -1008,37 +1097,44 @@ Exit criteria:
    webhook verification, installation lifecycle handling, and typed PR/commit/
    comment/tag operations behind a transport interface.
 4. Add Postgres-backed tenants, installations, repositories, delivery records,
-   build intents/runs, jobs, encrypted ASC credential metadata, and audit
-   events. The webhook transaction must commit the delivery and jobs before
-   returning `202`.
-5. Run the GitHub App in shadow mode on JamsOnToast next to the existing classic
+   build intents/runs, jobs, repository blob facts, encrypted ASC credential
+   metadata, and audit events. The webhook transaction must commit the delivery
+   and jobs before returning `202`.
+5. Refactor repository-managed media discovery to keep lazy path/object-ID/size
+   references, cache dimensions/display type/MD5 by tenant, repository, and Git
+   blob object ID, and fetch complete bodies only on cache miss or required
+   upload. Add single-flight inspection, bounded temporary storage, disconnect
+   cleanup, transfer metrics, LFS-pointer rejection, and an acceptance test in
+   which an unchanged reconciliation after process restart downloads zero media
+   bytes.
+6. Run the GitHub App in shadow mode on JamsOnToast next to the existing classic
    hook/PAT, compare decisions, then cut over without changing Xcode workflow or
    App Store submission logic. Repeat with Running Order to exercise split UAT
    and production roles.
-6. Package and pin the shared CI client, migrate both app adapters, document
+7. Package and pin the shared CI client, migrate both app adapters, document
    rollback/service-unavailable behavior, and have the App create update PRs.
-7. Replace five-minute full polling with overdue-state reconciliation every
+8. Replace five-minute full polling with overdue-state reconciliation every
    30–60 minutes after durable webhook operation is proven. Keep an explicit
    manual reconcile command and customer-visible reason for every repair.
-8. Exercise a production submission dry run from stored intent through draft
+9. Exercise a production submission dry run from stored intent through draft
    reuse, rejection reconciliation, version selection, release sync, and tag
    creation using the GitHub App transport. Use the next real release as the
    supervised live acceptance test with rollback/runbook ready.
-9. Add declarative per-deployment App Store release policy (`manual`,
+10. Add declarative per-deployment App Store release policy (`manual`,
    `after_approval`, or `scheduled` plus date), default conservatively, validate
    it during onboarding, and set/verify `releaseType` before submission.
-10. Add an App Store readiness preflight before production build intent:
+11. Add an App Store readiness preflight before production build intent:
     validate required screenshots for every supported device family, version
     metadata, agreements, compliance, and other submission prerequisites;
     preserve and display all structured ASC `associatedErrors`. Decide whether
     customer media is managed by the product or linked back to ASC for action.
-11. Build the minimum onboarding path: install App, upload/validate ASC key,
+12. Build the minimum onboarding path: install App, upload/validate ASC key,
    discover apps/workflows, map roles/purposes, validate manual start
    conditions, open adapter PR, run shadow test, and enable modules.
-12. Interview five Xcode Cloud indie developers and offer the `$10/year`
+13. Interview five Xcode Cloud indie developers and offer the `$10/year`
    founding tier to measure successful setup, retained use, support minutes,
    and willingness to pay before fixing long-term pricing.
-13. Test positioning against Runway and Tramline users: the question is not
+14. Test positioning against Runway and Tramline users: the question is not
    whether automation is possible, but whether this narrower Xcode Cloud-native
    workflow is easier, safer, and cheaper enough to switch or supplement their
    current process.
