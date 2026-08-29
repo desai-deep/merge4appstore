@@ -429,6 +429,33 @@ test('finds and cancels a version review through the app-scoped submissions endp
   assert.equal(JSON.parse(requests[2].options.body).data.attributes.canceled, true);
 });
 
+test('finds and cancels a submitted version through appStoreVersionForReview', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.getAppId = async () => 'app-1';
+  const requests = [];
+  asc.request = async (endpoint, options = {}) => {
+    requests.push({ endpoint, options });
+    if (endpoint.startsWith('/apps/app-1/reviewSubmissions?')) {
+      return {
+        data: [{
+          id: 'submission-1',
+          attributes: { state: 'WAITING_FOR_REVIEW' },
+          relationships: {
+            appStoreVersionForReview: { data: { id: 'version-1' } },
+          },
+        }],
+      };
+    }
+    return { data: { id: 'submission-1' } };
+  };
+
+  assert.deepEqual(await asc.cancelReview('version-1'), { success: true });
+  assert.match(requests[0].endpoint, /fields\[reviewSubmissions\]=state,appStoreVersionForReview/);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].endpoint, '/reviewSubmissions/submission-1');
+  assert.equal(requests[1].options.method, 'PATCH');
+});
+
 test('falls back to a matching non-complete submission when version and submission states differ', async () => {
   const asc = createASCWithVersions({ data: [] });
   asc.getAppId = async () => 'app-1';
