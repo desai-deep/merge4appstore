@@ -145,6 +145,12 @@ producing another binary. No manifest file is required.
 ```text
 AppStore/
 ├── copyright.txt
+├── name.txt                    # default app localization
+├── subtitle.txt
+├── privacy_policy_url.txt
+├── description.txt
+├── screenshots/               # default app localization
+│   └── 01-iphone-home.png
 ├── review/
 │   ├── contact_first_name.txt
 │   ├── contact_last_name.txt
@@ -154,12 +160,6 @@ AppStore/
 │   ├── demo_account_name.txt
 │   └── demo_account_password.txt
 ├── en-US/
-│   ├── name.txt
-│   ├── subtitle.txt
-│   ├── privacy_policy_url.txt
-│   ├── privacy_choices_url.txt
-│   ├── privacy_policy_text.txt
-│   ├── description.txt
 │   ├── keywords.txt
 │   ├── marketing_url.txt
 │   ├── promotional_text.txt
@@ -183,8 +183,8 @@ The filesystem supports these release-editable text fields:
 
 | Scope | Files | App Store Connect fields |
 | --- | --- | --- |
-| Localized App Info | `<locale>/name.txt`, `subtitle.txt`, `privacy_policy_url.txt`, `privacy_choices_url.txt`, `privacy_policy_text.txt` | App name, subtitle, privacy-policy URL, privacy-choices URL, privacy-policy text |
-| Localized version | `<locale>/description.txt`, `keywords.txt`, `marketing_url.txt`, `promotional_text.txt`, `support_url.txt`, `whats_new.txt` | Description, keywords, marketing URL, promotional text, support URL, release notes |
+| Localized App Info | `[<locale>/]name.txt`, `subtitle.txt`, `privacy_policy_url.txt`, `privacy_choices_url.txt`, `privacy_policy_text.txt` | App name, subtitle, privacy-policy URL, privacy-choices URL, privacy-policy text |
+| Localized version | `[<locale>/]description.txt`, `keywords.txt`, `marketing_url.txt`, `promotional_text.txt`, `support_url.txt`, `whats_new.txt` | Description, keywords, marketing URL, promotional text, support URL, release notes |
 | Version | `copyright.txt` | Copyright for this App Store version |
 | App Review | `review/contact_first_name.txt`, `contact_last_name.txt`, `contact_phone.txt`, `contact_email.txt`, `notes.txt`, `demo_account_name.txt`, `demo_account_password.txt` | Review contact, notes, and optional demo credentials |
 
@@ -195,6 +195,11 @@ remove demo access, commit both credential files as empty files. Credentials
 are stored as plaintext in Git, so use this only in a private repository with
 appropriately restricted access. When creating App Review information for the
 first time, all four contact files are required.
+
+Localized text and media may be placed directly under `AppStore/`; those files
+target the app's primary locale reported by App Store Connect. Locale folders
+remain optional explicit overrides. If both forms manage the same field or
+media set, the explicit locale folder wins.
 
 Management is explicitly opt-in at every level:
 

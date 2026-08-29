@@ -55,6 +55,9 @@ test('uses App Store Connect resources for release-editable text metadata', asyn
   const requests = [];
   asc.request = async (endpoint, options = {}) => {
     requests.push({ endpoint, options });
+    if (endpoint === '/apps/app-1?fields[apps]=primaryLocale') {
+      return { data: { id: 'app-1', attributes: { primaryLocale: 'en-US' } } };
+    }
     if (endpoint === '/apps/app-1/appInfos?limit=200') {
       return { data: [{ id: 'info-live', attributes: { state: 'READY_FOR_SALE' } }, {
         id: 'info-editable', attributes: { state: 'PREPARE_FOR_SUBMISSION' },
@@ -65,6 +68,7 @@ test('uses App Store Connect resources for release-editable text metadata', asyn
     return { data: { id: 'created' } };
   };
 
+  assert.equal(await asc.getAppPrimaryLocale(), 'en-US');
   assert.equal((await asc.getEditableAppInfo()).id, 'info-editable');
   assert.deepEqual(await asc.getAppInfoLocalizations('info-editable'), []);
   await asc.updateAppStoreVersion('version-1', { copyright: '2026 Example Ltd' });

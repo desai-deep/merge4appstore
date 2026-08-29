@@ -127,6 +127,25 @@ test('discovers localized App Info, version, and App Review text fields', () => 
   });
 });
 
+test('discovers root-level text and media for the default app localization', () => {
+  const metadata = discoverLocalizedMetadata([
+    { path: 'AppStore/name.txt', type: 'blob', sha: 'name' },
+    { path: 'AppStore/description.txt', type: 'blob', sha: 'description' },
+    { path: 'AppStore/screenshots/01-phone.png', type: 'blob', sha: 'phone' },
+    { path: 'AppStore/previews/IPHONE_65/01-overview.mov', type: 'blob', sha: 'video' },
+  ], 'AppStore', sha => ({
+    name: Buffer.from('Example'),
+    description: Buffer.from('Default description'),
+    phone: png(1320, 2868),
+    video: Buffer.from('video'),
+  })[sha]);
+
+  assert.deepEqual(metadata.defaultLocalization.appInfoAttributes, { name: 'Example' });
+  assert.deepEqual(metadata.defaultLocalization.attributes, { description: 'Default description' });
+  assert.equal(metadata.defaultLocalization.screenshots.APP_IPHONE_67[0].fileName, '01-phone.png');
+  assert.equal(metadata.defaultLocalization.previews.IPHONE_65[0].fileName, '01-overview.mov');
+});
+
 test('an existing media directory with only a hidden keep file is authoritative and empty', () => {
   const metadata = discoverLocalizedMetadata([
     { path: 'AppStore/en-US/screenshots/APP_IPAD_PRO_3GEN_129', type: 'tree' },
@@ -237,6 +256,40 @@ test('syncs App Info, copyright, and App Review fields without touching omitted 
       demoAccountName: 'reviewer',
       demoAccountRequired: true,
     },
+  }]);
+});
+
+test('targets root-level localized metadata at the primary locale with explicit overrides', async () => {
+  const github = repository([
+    { path: 'AppStore/description.txt', type: 'blob', sha: 'default-description' },
+    { path: 'AppStore/subtitle.txt', type: 'blob', sha: 'default-subtitle' },
+    { path: 'AppStore/en-US/description.txt', type: 'blob', sha: 'explicit-description' },
+  ], {
+    'default-description': 'Default description',
+    'default-subtitle': 'Default subtitle',
+    'explicit-description': 'Explicit description',
+  });
+  const calls = [];
+  const asc = {
+    getAppPrimaryLocale: async () => 'en-US',
+    getEditableAppInfo: async () => ({ id: 'app-info-1' }),
+    getAppInfoLocalizations: async () => ([
+      { id: 'app-info-loc-1', attributes: { locale: 'en-US', name: 'Example' } },
+    ]),
+    updateAppInfoLocalization: async (id, attributes) => calls.push({ kind: 'app-info', id, attributes }),
+    getAppStoreVersionLocalizations: async () => ([
+      { id: 'version-loc-1', attributes: { locale: 'en-US' } },
+    ]),
+    updateAppStoreVersionLocalization: async (id, attributes) => calls.push({ kind: 'version', id, attributes }),
+  };
+
+  await syncLocalizedMetadata(asc, github, {
+    metadataPath: 'AppStore', ref: 'abc', versionId: 'version-1',
+  });
+  assert.deepEqual(calls, [{
+    kind: 'app-info', id: 'app-info-loc-1', attributes: { subtitle: 'Default subtitle' },
+  }, {
+    kind: 'version', id: 'version-loc-1', attributes: { description: 'Explicit description' },
   }]);
 });
 
