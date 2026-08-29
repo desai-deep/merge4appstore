@@ -121,7 +121,7 @@ async function main() {
   }
 
   // Validate required environment variables
-  const requiredSharedVars = ['GITHUB_REPO_OWNER', 'GITHUB_REPO_NAME'];
+  const requiredSharedVars = ['GH_TOKEN', 'GITHUB_REPO_OWNER', 'GITHUB_REPO_NAME'];
   if (mode !== 'release-pr') requiredSharedVars.push(
     'APP_STORE_CONNECT_API_KEY_ID',
     'APP_STORE_CONNECT_ISSUER_ID',
