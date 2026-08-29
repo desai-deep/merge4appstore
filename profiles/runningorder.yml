@@ -7,6 +7,8 @@ repository:
   production_branch: main
   beta_branch: develop
 
+release_pull_request: true
+
 webhooks:
   github:
     secret_env: GH_WEBHOOK_SECRET

@@ -45,6 +45,10 @@ test('accepts the TestFlight notes refresh mode', () => {
   assert.equal(parseCliArgs(['notes'], '/srv/merge4appstore', {}).mode, 'notes');
 });
 
+test('accepts the release pull request reconciliation mode', () => {
+  assert.equal(parseCliArgs(['release-pr'], '/srv/merge4appstore', {}).mode, 'release-pr');
+});
+
 test('supports an environment-selected config', () => {
   assert.equal(
     parseCliArgs([], '/srv/merge4appstore', { MERGE4APPSTORE_ENV: '/etc/jams.env' }).configPath,

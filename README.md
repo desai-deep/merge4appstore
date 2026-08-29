@@ -17,6 +17,10 @@ Automated iOS App Store deployment and release sync. Monitors TestFlight builds 
    commit and refusing to duplicate an active run whose commit metadata is not
    available yet.
 
+6. **Release PR Maintenance** - Creates or updates the configured beta-to-production
+   pull request after branch pushes. Its body lists the merged pull requests in
+   the release range rather than their individual commits.
+
 ## Features
 
 - Direct App Store Connect API calls (no Fastlane/Ruby dependency)
@@ -88,6 +92,8 @@ repository:
   name: example-ios
   production_branch: main
   beta_branch: develop
+
+release_pull_request: true # optional; maintained centrally after branch pushes
 
 metadata: # optional
   path: AppStore
@@ -349,6 +355,21 @@ already holds that repository's lock, a later job waits instead of being
 reported as a successful no-op. The default wait is ten minutes and can be
 overridden with `MERGE4APPSTORE_LOCK_WAIT_MS`; a timeout exits nonzero so the
 incomplete operation remains visible.
+
+When `release_pull_request` is enabled, beta and production pushes also
+reconcile the open pull request from `repository.beta_branch` to
+`repository.production_branch`. The default title is “Bug fixes and performance
+improvements”, and the default body limit is 100 merged pull requests. A mapping
+can override either value:
+
+```yaml
+release_pull_request:
+  title: Monthly release
+  note_limit: 50
+```
+
+This policy and its GitHub writes live in merge4appstore; app repositories do
+not need a release-PR workflow or checkout script.
 
 ### Thin Xcode Cloud preparation
 
