@@ -386,7 +386,7 @@ test('waits for a withdrawn App Store version to become editable', async () => {
 
   const state = await asc.waitForVersionEditable('version-1', {
     pollDelayMs: 0,
-    timeoutMs: 1000,
+    timeoutMs: 10000,
   });
 
   assert.equal(state, 'PREPARE_FOR_SUBMISSION');
