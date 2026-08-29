@@ -14,7 +14,15 @@ on:
       pause_cron:
         description: Pause merge4appstore profile cron jobs while testing webhooks
         type: boolean
-        default: false
+        default: true
+      reconcile_profile:
+        description: Run one live deployment reconciliation after rollout
+        type: choice
+        default: none
+        options:
+          - none
+          - jamsontoast
+          - runningorder
 
 jobs:
   test:
@@ -96,7 +104,8 @@ jobs:
           VPS_USER: ${{ secrets.VPS_USER }}
           DEPLOY_DIR: ${{ secrets.SERVER_DIR }}
           DEPLOY_SHA: ${{ github.sha }}
-          PAUSE_CRON: ${{ inputs.pause_cron || 'false' }}
+          PAUSE_CRON: ${{ github.event_name != 'workflow_dispatch' || inputs.pause_cron }}
+          RECONCILE_PROFILE: ${{ inputs.reconcile_profile || 'none' }}
           GH_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
           XCODE_CLOUD_WEBHOOK_TOKEN: ${{ secrets.XCODE_CLOUD_WEBHOOK_TOKEN }}
           MERGE4APPSTORE_BUILD_TOKEN_JAMSONTOAST: ${{ secrets.MERGE4APPSTORE_BUILD_TOKEN_JAMSONTOAST }}
@@ -110,7 +119,7 @@ jobs:
           scp -i ~/.ssh/deploy_key /tmp/merge4appstore-webhook.env \
             "$VPS_USER@$VPS_HOST:$DEPLOY_DIR/.webhook.env.new"
           ssh -i ~/.ssh/deploy_key "$VPS_USER@$VPS_HOST" \
-            "DEPLOY_DIR='$DEPLOY_DIR' DEPLOY_SHA='$DEPLOY_SHA' PAUSE_CRON='$PAUSE_CRON' bash -s" <<'ENDSSH'
+            "DEPLOY_DIR='$DEPLOY_DIR' DEPLOY_SHA='$DEPLOY_SHA' PAUSE_CRON='$PAUSE_CRON' RECONCILE_PROFILE='$RECONCILE_PROFILE' bash -s" <<'ENDSSH'
             set -e
 
             echo "Starting merge4appstore deployment..."
@@ -250,6 +259,15 @@ jobs:
             elif (( ${#repository_profiles[@]} > 0 )); then
               printf '%s\n' "$current_crontab" | sed '/^[[:space:]]*$/d' | crontab -
               echo "Configured ${#repository_profiles[@]} repository profile cron job(s)"
+            fi
+
+            if [ "$RECONCILE_PROFILE" != "none" ]; then
+              case "$RECONCILE_PROFILE" in
+                jamsontoast|runningorder) ;;
+                *) echo "Unsupported reconciliation profile: $RECONCILE_PROFILE"; exit 1 ;;
+              esac
+              echo "Running live deployment reconciliation for $RECONCILE_PROFILE..."
+              node index.js deploy --profile "profiles/${RECONCILE_PROFILE}.yml"
             fi
 
             echo "merge4appstore deployment complete"
