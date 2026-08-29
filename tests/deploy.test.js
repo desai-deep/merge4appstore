@@ -149,6 +149,7 @@ test('keeps a failed draft when the release PR cannot be notified', async () => 
 test('syncs repository metadata from production head and honors managed release notes', async () => {
   await withWorkflowId('workflow-1', async () => {
     const events = [];
+    let issueResolution = null;
     const asc = createASC({
       getTestFlightReadyBuilds: async () => ([
         { buildNumber: '161', version: '1.2', buildId: 'build-161' },
@@ -173,6 +174,10 @@ test('syncs repository metadata from production head and honors managed release 
         ];
       },
       getRepositoryBlob: sha => Buffer.from(sha === 'notes' ? 'Repository notes\n' : ''),
+      closeIssueByMarker: (marker, comment) => {
+        issueResolution = { marker, comment };
+        return { number: 456 };
+      },
     });
 
     await runDeployCheck(asc, github, false, { metadataPath: 'AppStore' });
@@ -181,6 +186,10 @@ test('syncs repository metadata from production head and honors managed release 
       ['select'],
       ['submit'],
     ]);
+    assert.deepEqual(issueResolution, {
+      marker: '<!-- merge4appstore:release-issue:version-1.2 -->',
+      comment: 'Build #161 was successfully submitted to App Store review. Fixing release PR: #123.',
+    });
   });
 });
 
