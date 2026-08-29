@@ -24,7 +24,7 @@
  *   APP_STORE_CONNECT_API_KEY_ID      - App Store Connect API Key ID
  *   APP_STORE_CONNECT_ISSUER_ID       - App Store Connect Issuer ID
  *   APP_STORE_CONNECT_API_KEY_CONTENT - API private key (base64 encoded)
- *   GH_TOKEN                          - GitHub token for PR comments (used by gh CLI)
+ *   GH_TOKEN                          - GitHub token fallback (omit when App credentials are configured)
  *   APP_BUNDLE_ID                     - Your app's bundle identifier
  *   APP_NAME                          - App name (must match App Store Connect)
  *   GITHUB_REPO_OWNER                 - GitHub org/user
@@ -73,6 +73,9 @@ if (dotenvResult.error && !missingOptionalProfileEnv) {
   console.error(`ERROR: Could not load config file ${cli.configPath}: ${dotenvResult.error.message}`);
   process.exit(1);
 }
+// Deployment-owned webhook and GitHub App credentials live separately from
+// the legacy provider .env. Existing process values always take precedence.
+dotenv.config({ path: path.join(__dirname, '.webhook.env'), quiet: true });
 
 let repositoryProfile = null;
 if (cli.profilePath) {
@@ -89,6 +92,7 @@ if (cli.profilePath) {
 import { CONFIG, log } from './lib/config.js';
 import { AppStoreConnectAPI } from './lib/app-store-connect.js';
 import { GitHubAPI } from './lib/github.js';
+import { githubEnvironmentForRepository } from './lib/github-app-auth.js';
 import { GitHubTags } from './lib/git.js';
 import { releaseLock, waitForLock } from './lib/lock.js';
 import { runDeployCheck } from './lib/deploy.js';
@@ -155,14 +159,29 @@ async function main() {
     }
   }
 
+  let githubEnvironment;
+  try {
+    githubEnvironment = await githubEnvironmentForRepository(
+      CONFIG.repoOwner,
+      CONFIG.repoName,
+    );
+  } catch (error) {
+    log(`ERROR: GitHub authentication failed: ${error.message}`);
+    process.exit(1);
+  }
+
   const createClients = () => ({
     asc: new AppStoreConnectAPI(
       process.env.APP_STORE_CONNECT_API_KEY_ID,
       process.env.APP_STORE_CONNECT_ISSUER_ID,
       process.env.APP_STORE_CONNECT_API_KEY_CONTENT
     ),
-    github: new GitHubAPI(CONFIG.repoOwner, CONFIG.repoName, CONFIG.productionBranch),
-    tags: new GitHubTags(CONFIG.repoOwner, CONFIG.repoName),
+    github: new GitHubAPI(CONFIG.repoOwner, CONFIG.repoName, CONFIG.productionBranch, {
+      environment: githubEnvironment,
+    }),
+    tags: new GitHubTags(CONFIG.repoOwner, CONFIG.repoName, {
+      environment: githubEnvironment,
+    }),
   });
 
   const selectAutomation = name => {

@@ -4,6 +4,7 @@ instance: jamsontoast
 repository:
   owner: desai-deep
   name: JamsOnToast
+  github_id: 390842121
   production_branch: main
   beta_branch: develop
   ios_repo_path: ""
