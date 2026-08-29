@@ -335,6 +335,17 @@ test('creates complete App Review information and defaults demo login to not req
   });
 });
 
+test('names the missing repository files for first-time App Review information', async () => {
+  const github = repository([
+    { path: 'AppStore/review/notes.txt', type: 'blob', sha: 'notes' },
+  ], { notes: 'Please test offline.' });
+  const asc = { getAppStoreReviewDetail: async () => null };
+
+  await assert.rejects(syncLocalizedMetadata(asc, github, {
+    metadataPath: 'AppStore', ref: 'abc', versionId: 'version-1',
+  }), /review\/contact_first_name\.txt.*review\/contact_email\.txt/);
+});
+
 test('omitted media directories and release notes remain unmanaged', async () => {
   const github = repository([
     { path: 'AppStore/en-US/description.txt', type: 'blob', sha: 'text' },

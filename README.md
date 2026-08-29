@@ -183,10 +183,10 @@ The filesystem supports these release-editable text fields:
 
 | Scope | Files | App Store Connect fields |
 | --- | --- | --- |
-| Localized App Info | `[<locale>/]name.txt`, `subtitle.txt`, `privacy_policy_url.txt`, `privacy_choices_url.txt`, `privacy_policy_text.txt` | App name, subtitle, privacy-policy URL, privacy-choices URL, privacy-policy text |
-| Localized version | `[<locale>/]description.txt`, `keywords.txt`, `marketing_url.txt`, `promotional_text.txt`, `support_url.txt`, `whats_new.txt` | Description, keywords, marketing URL, promotional text, support URL, release notes |
+| Localized App Info | `[<locale>/]name.txt`, `[<locale>/]subtitle.txt`, `[<locale>/]privacy_policy_url.txt`, `[<locale>/]privacy_choices_url.txt`, `[<locale>/]privacy_policy_text.txt` | App name, subtitle, privacy-policy URL, privacy-choices URL, privacy-policy text |
+| Localized version | `[<locale>/]description.txt`, `[<locale>/]keywords.txt`, `[<locale>/]marketing_url.txt`, `[<locale>/]promotional_text.txt`, `[<locale>/]support_url.txt`, `[<locale>/]whats_new.txt` | Description, keywords, marketing URL, promotional text, support URL, release notes |
 | Version | `copyright.txt` | Copyright for this App Store version |
-| App Review | `review/contact_first_name.txt`, `contact_last_name.txt`, `contact_phone.txt`, `contact_email.txt`, `notes.txt`, `demo_account_name.txt`, `demo_account_password.txt` | Review contact, notes, and optional demo credentials |
+| App Review | `review/contact_first_name.txt`, `review/contact_last_name.txt`, `review/contact_phone.txt`, `review/contact_email.txt`, `review/notes.txt`, `review/demo_account_name.txt`, `review/demo_account_password.txt` | Review contact, notes, and optional demo credentials |
 
 `name.txt` is required only when adding a new App Info locale; existing locales
 may update any subset. Supplying either demo-credential file also reconciles
