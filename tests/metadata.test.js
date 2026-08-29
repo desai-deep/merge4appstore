@@ -88,6 +88,64 @@ test('discovers optional text fields and alphabetizes screenshot and preview fil
   );
 });
 
+test('discovers localized App Info, version, and App Review text fields', () => {
+  const files = {
+    'AppStore/copyright.txt': ['copyright', '2026 Example Ltd\n'],
+    'AppStore/review/contact_first_name.txt': ['first', 'Ada\n'],
+    'AppStore/review/contact_last_name.txt': ['last', 'Lovelace'],
+    'AppStore/review/contact_phone.txt': ['phone', '+44 20 1234 5678'],
+    'AppStore/review/contact_email.txt': ['email', 'review@example.com'],
+    'AppStore/review/notes.txt': ['notes', 'Use the demo account.\n'],
+    'AppStore/review/demo_account_name.txt': ['demo-name', 'reviewer'],
+    'AppStore/review/demo_account_password.txt': ['demo-password', 'secret'],
+    'AppStore/en-US/name.txt': ['name', 'Example'],
+    'AppStore/en-US/subtitle.txt': ['subtitle', 'A useful app'],
+    'AppStore/en-US/privacy_policy_url.txt': ['privacy-url', 'https://example.com/privacy'],
+    'AppStore/en-US/privacy_choices_url.txt': ['choices-url', 'https://example.com/privacy/choices'],
+    'AppStore/en-US/privacy_policy_text.txt': ['privacy-text', 'Privacy details'],
+  };
+  const entries = Object.entries(files).map(([path, [sha]]) => ({ path, type: 'blob', sha }));
+  const blobs = Object.fromEntries(Object.values(files));
+  const metadata = discoverLocalizedMetadata(entries, 'AppStore', sha => Buffer.from(blobs[sha]));
+
+  assert.deepEqual(metadata.versionAttributes, { copyright: '2026 Example Ltd' });
+  assert.deepEqual(metadata.reviewAttributes, {
+    contactFirstName: 'Ada',
+    contactLastName: 'Lovelace',
+    contactPhone: '+44 20 1234 5678',
+    contactEmail: 'review@example.com',
+    notes: 'Use the demo account.',
+    demoAccountName: 'reviewer',
+    demoAccountPassword: 'secret',
+  });
+  assert.deepEqual(metadata.localizations['en-US'].appInfoAttributes, {
+    name: 'Example',
+    subtitle: 'A useful app',
+    privacyPolicyUrl: 'https://example.com/privacy',
+    privacyChoicesUrl: 'https://example.com/privacy/choices',
+    privacyPolicyText: 'Privacy details',
+  });
+});
+
+test('discovers root-level text and media for the default app localization', () => {
+  const metadata = discoverLocalizedMetadata([
+    { path: 'AppStore/name.txt', type: 'blob', sha: 'name' },
+    { path: 'AppStore/description.txt', type: 'blob', sha: 'description' },
+    { path: 'AppStore/screenshots/01-phone.png', type: 'blob', sha: 'phone' },
+    { path: 'AppStore/previews/IPHONE_65/01-overview.mov', type: 'blob', sha: 'video' },
+  ], 'AppStore', sha => ({
+    name: Buffer.from('Example'),
+    description: Buffer.from('Default description'),
+    phone: png(1320, 2868),
+    video: Buffer.from('video'),
+  })[sha]);
+
+  assert.deepEqual(metadata.defaultLocalization.appInfoAttributes, { name: 'Example' });
+  assert.deepEqual(metadata.defaultLocalization.attributes, { description: 'Default description' });
+  assert.equal(metadata.defaultLocalization.screenshots.APP_IPHONE_67[0].fileName, '01-phone.png');
+  assert.equal(metadata.defaultLocalization.previews.IPHONE_65[0].fileName, '01-overview.mov');
+});
+
 test('an existing media directory with only a hidden keep file is authoritative and empty', () => {
   const metadata = discoverLocalizedMetadata([
     { path: 'AppStore/en-US/screenshots/APP_IPAD_PRO_3GEN_129', type: 'tree' },
@@ -155,6 +213,137 @@ test('syncs only the text fields and media directories present in the tree', asy
   assert.equal(calls[1].kind, 'screenshots');
   assert.equal(calls[1].assets[0].checksum, '78805a221a988e79ef3f42d7c5bfd418');
   assert.equal(calls[2].kind, 'previews');
+});
+
+test('syncs App Info, copyright, and App Review fields without touching omitted fields', async () => {
+  const github = repository([
+    { path: 'AppStore/copyright.txt', type: 'blob', sha: 'copyright' },
+    { path: 'AppStore/review/notes.txt', type: 'blob', sha: 'notes' },
+    { path: 'AppStore/review/demo_account_name.txt', type: 'blob', sha: 'demo-name' },
+    { path: 'AppStore/en-US/subtitle.txt', type: 'blob', sha: 'subtitle' },
+  ], {
+    copyright: '2026 Example Ltd\n',
+    notes: 'Please test offline mode.\n',
+    'demo-name': 'reviewer',
+    subtitle: 'Listen differently',
+  });
+  const calls = [];
+  const asc = {
+    getEditableAppInfo: async () => ({ id: 'app-info-1' }),
+    getAppInfoLocalizations: async () => ([
+      { id: 'app-info-loc-1', attributes: { locale: 'en-US', name: 'Example' } },
+    ]),
+    updateAppInfoLocalization: async (id, attributes) => calls.push({ kind: 'app-info', id, attributes }),
+    updateAppStoreVersion: async (id, attributes) => calls.push({ kind: 'version', id, attributes }),
+    getAppStoreReviewDetail: async () => ({
+      id: 'review-1',
+      attributes: { demoAccountPassword: 'existing-password' },
+    }),
+    updateAppStoreReviewDetail: async (id, attributes) => calls.push({ kind: 'review', id, attributes }),
+  };
+
+  await syncLocalizedMetadata(asc, github, {
+    metadataPath: 'AppStore', ref: 'abc', versionId: 'version-1',
+  });
+
+  assert.deepEqual(calls, [{
+    kind: 'app-info', id: 'app-info-loc-1', attributes: { subtitle: 'Listen differently' },
+  }, {
+    kind: 'version', id: 'version-1', attributes: { copyright: '2026 Example Ltd' },
+  }, {
+    kind: 'review', id: 'review-1', attributes: {
+      notes: 'Please test offline mode.',
+      demoAccountName: 'reviewer',
+      demoAccountRequired: true,
+    },
+  }]);
+});
+
+test('targets root-level localized metadata at the primary locale with explicit overrides', async () => {
+  const github = repository([
+    { path: 'AppStore/description.txt', type: 'blob', sha: 'default-description' },
+    { path: 'AppStore/subtitle.txt', type: 'blob', sha: 'default-subtitle' },
+    { path: 'AppStore/en-US/description.txt', type: 'blob', sha: 'explicit-description' },
+  ], {
+    'default-description': 'Default description',
+    'default-subtitle': 'Default subtitle',
+    'explicit-description': 'Explicit description',
+  });
+  const calls = [];
+  const asc = {
+    getAppPrimaryLocale: async () => 'en-US',
+    getEditableAppInfo: async () => ({ id: 'app-info-1' }),
+    getAppInfoLocalizations: async () => ([
+      { id: 'app-info-loc-1', attributes: { locale: 'en-US', name: 'Example' } },
+    ]),
+    updateAppInfoLocalization: async (id, attributes) => calls.push({ kind: 'app-info', id, attributes }),
+    getAppStoreVersionLocalizations: async () => ([
+      { id: 'version-loc-1', attributes: { locale: 'en-US' } },
+    ]),
+    updateAppStoreVersionLocalization: async (id, attributes) => calls.push({ kind: 'version', id, attributes }),
+  };
+
+  await syncLocalizedMetadata(asc, github, {
+    metadataPath: 'AppStore', ref: 'abc', versionId: 'version-1',
+  });
+  assert.deepEqual(calls, [{
+    kind: 'app-info', id: 'app-info-loc-1', attributes: { subtitle: 'Default subtitle' },
+  }, {
+    kind: 'version', id: 'version-loc-1', attributes: { description: 'Explicit description' },
+  }]);
+});
+
+test('requires a name when creating a localized App Info record', async () => {
+  const github = repository([
+    { path: 'AppStore/fr-FR/subtitle.txt', type: 'blob', sha: 'subtitle' },
+  ], { subtitle: 'Écoutez autrement' });
+  const asc = {
+    getEditableAppInfo: async () => ({ id: 'app-info-1' }),
+    getAppInfoLocalizations: async () => [],
+  };
+
+  await assert.rejects(syncLocalizedMetadata(asc, github, {
+    metadataPath: 'AppStore', ref: 'abc', versionId: 'version-1',
+  }), /requires fr-FR\/name.txt/);
+});
+
+test('creates complete App Review information and defaults demo login to not required', async () => {
+  const github = repository([
+    { path: 'AppStore/review/contact_first_name.txt', type: 'blob', sha: 'first' },
+    { path: 'AppStore/review/contact_last_name.txt', type: 'blob', sha: 'last' },
+    { path: 'AppStore/review/contact_phone.txt', type: 'blob', sha: 'phone' },
+    { path: 'AppStore/review/contact_email.txt', type: 'blob', sha: 'email' },
+  ], { first: 'Ada', last: 'Lovelace', phone: '+44 20 1234', email: 'review@example.com' });
+  let created = null;
+  const asc = {
+    getAppStoreReviewDetail: async () => null,
+    createAppStoreReviewDetail: async (versionId, attributes) => { created = { versionId, attributes }; },
+  };
+
+  await syncLocalizedMetadata(asc, github, {
+    metadataPath: 'AppStore', ref: 'abc', versionId: 'version-1',
+  });
+  assert.deepEqual(created, {
+    versionId: 'version-1',
+    attributes: {
+      contactFirstName: 'Ada',
+      contactLastName: 'Lovelace',
+      contactPhone: '+44 20 1234',
+      contactEmail: 'review@example.com',
+      demoAccountRequired: false,
+    },
+  });
+});
+
+test('names the missing repository files for first-time App Review information', async () => {
+  const github = repository([
+    { path: 'AppStore/review/notes.txt', type: 'blob', sha: 'notes' },
+  ], { notes: 'Please test offline.' });
+  const asc = { getAppStoreReviewDetail: async () => null };
+
+  await assert.rejects(syncLocalizedMetadata(asc, github, {
+    metadataPath: 'AppStore', ref: 'abc', versionId: 'version-1',
+  }), /review\/contact_first_name\.txt.*review\/contact_email\.txt/);
 });
 
 test('omitted media directories and release notes remain unmanaged', async () => {

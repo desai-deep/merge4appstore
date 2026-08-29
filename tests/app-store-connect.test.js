@@ -49,6 +49,83 @@ function createASCWithVersions(versions) {
   return asc;
 }
 
+test('uses App Store Connect resources for release-editable text metadata', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.appId = 'app-1';
+  const requests = [];
+  asc.request = async (endpoint, options = {}) => {
+    requests.push({ endpoint, options });
+    if (endpoint === '/apps/app-1?fields[apps]=primaryLocale') {
+      return { data: { id: 'app-1', attributes: { primaryLocale: 'en-US' } } };
+    }
+    if (endpoint === '/apps/app-1/appInfos?limit=200') {
+      return { data: [{ id: 'info-live', attributes: { state: 'READY_FOR_SALE' } }, {
+        id: 'info-editable', attributes: { state: 'PREPARE_FOR_SUBMISSION' },
+      }] };
+    }
+    if (endpoint === '/appInfos/info-editable/appInfoLocalizations?limit=200') return { data: [] };
+    if (endpoint === '/appStoreVersions/version-1/appStoreReviewDetail') return { data: null };
+    return { data: { id: 'created' } };
+  };
+
+  assert.equal(await asc.getAppPrimaryLocale(), 'en-US');
+  assert.equal((await asc.getEditableAppInfo()).id, 'info-editable');
+  assert.deepEqual(await asc.getAppInfoLocalizations('info-editable'), []);
+  await asc.updateAppStoreVersion('version-1', { copyright: '2026 Example Ltd' });
+  await asc.createAppInfoLocalization('info-editable', 'en-US', { name: 'Example' });
+  await asc.updateAppInfoLocalization('localization-1', { subtitle: 'A useful app' });
+  assert.equal(await asc.getAppStoreReviewDetail('version-1'), null);
+  await asc.createAppStoreReviewDetail('version-1', {
+    contactFirstName: 'Ada', demoAccountRequired: false,
+  });
+  await asc.updateAppStoreReviewDetail('review-1', { notes: 'Please test offline.' });
+
+  const writes = requests.filter(request => request.options.method);
+  assert.deepEqual(writes.map(request => [
+    request.endpoint,
+    request.options.method,
+    JSON.parse(request.options.body).data,
+  ]), [[
+    '/appStoreVersions/version-1',
+    'PATCH',
+    { type: 'appStoreVersions', id: 'version-1', attributes: { copyright: '2026 Example Ltd' } },
+  ], [
+    '/appInfoLocalizations',
+    'POST',
+    {
+      type: 'appInfoLocalizations',
+      attributes: { locale: 'en-US', name: 'Example' },
+      relationships: { appInfo: { data: { type: 'appInfos', id: 'info-editable' } } },
+    },
+  ], [
+    '/appInfoLocalizations/localization-1',
+    'PATCH',
+    { type: 'appInfoLocalizations', id: 'localization-1', attributes: { subtitle: 'A useful app' } },
+  ], [
+    '/appStoreReviewDetails',
+    'POST',
+    {
+      type: 'appStoreReviewDetails',
+      attributes: { contactFirstName: 'Ada', demoAccountRequired: false },
+      relationships: { appStoreVersion: { data: { type: 'appStoreVersions', id: 'version-1' } } },
+    },
+  ], [
+    '/appStoreReviewDetails/review-1',
+    'PATCH',
+    { type: 'appStoreReviewDetails', id: 'review-1', attributes: { notes: 'Please test offline.' } },
+  ]]);
+});
+
+test('treats a missing App Review detail as not configured', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.request = async () => {
+    const error = new Error('not found');
+    error.statusCode = 404;
+    throw error;
+  };
+  assert.equal(await asc.getAppStoreReviewDetail('version-1'), null);
+});
+
 test('finds a workflow run for the release commit', async () => {
   const asc = createASCWithVersions({ data: [] });
   asc.getBuildRuns = async () => ({
