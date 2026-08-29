@@ -67,6 +67,7 @@ function githubFixture(overrides = {}) {
     findOpenPullRequest: () => null,
     createPullRequest: () => ({ number: 70, url: 'https://github.com/example/ios/pull/70' }),
     updatePullRequest: () => ({ number: 69, url: 'https://github.com/example/ios/pull/69' }),
+    closePullRequest: () => ({ number: 69, url: 'https://github.com/example/ios/pull/69' }),
     ...overrides,
   };
 }
@@ -82,6 +83,38 @@ test('does not create a release PR when branch trees match', () => {
     action: 'noop', reason: 'contents_match',
   });
   assert.equal(compared, false);
+});
+
+test('closes an existing release PR when branch contents match', () => {
+  let closed;
+  const github = githubFixture({
+    findOpenPullRequest: () => ({ number: 69 }),
+    getBranchSnapshot: branch => ({ sha: `${branch}-sha`, treeSha: 'same-tree' }),
+    closePullRequest: number => {
+      closed = number;
+      return { number, url: 'https://github.com/example/ios/pull/69' };
+    },
+  });
+
+  assert.deepEqual(reconcileReleasePullRequest(github, policy), {
+    action: 'closed', reason: 'contents_match', number: 69,
+    url: 'https://github.com/example/ios/pull/69',
+  });
+  assert.equal(closed, 69);
+});
+
+test('dry run reports a stale release PR without closing it', () => {
+  let closed = false;
+  const github = githubFixture({
+    findOpenPullRequest: () => ({ number: 69 }),
+    getBranchSnapshot: branch => ({ sha: `${branch}-sha`, treeSha: 'same-tree' }),
+    closePullRequest: () => { closed = true; },
+  });
+
+  assert.deepEqual(reconcileReleasePullRequest(github, policy, true), {
+    action: 'would_close', reason: 'contents_match', number: 69,
+  });
+  assert.equal(closed, false);
 });
 
 test('does not create a release PR when the release branch has no commits ahead', () => {

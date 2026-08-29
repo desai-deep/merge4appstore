@@ -101,6 +101,16 @@ test('validates release pull request overrides', () => {
   assert.throws(() => validateRepositoryProfile(profile), /unknown is not supported/);
 });
 
+test('validates release pull request branch configuration', () => {
+  const profile = profileFixture();
+  profile.release_pull_request = true;
+  profile.repository.beta_branch = 42;
+  assert.throws(() => validateRepositoryProfile(profile), /repository\.beta_branch must be a non-empty string/);
+
+  profile.repository.beta_branch = 'main';
+  assert.throws(() => validateRepositoryProfile(profile), /requires different production and beta branches/);
+});
+
 test('adds optional repository metadata only to deployment', () => {
   const fixture = profileFixture();
   fixture.metadata = { path: 'AppStore' };
