@@ -396,10 +396,40 @@ test('waits for a withdrawn App Store version to become editable', async () => {
   ]);
 });
 
+test('finds and cancels a version review through the app-scoped submissions endpoint', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.getAppId = async () => 'app-1';
+  const requests = [];
+  asc.request = async (endpoint, options = {}) => {
+    requests.push({ endpoint, options });
+    if (endpoint.startsWith('/apps/app-1/reviewSubmissions?')) {
+      return {
+        data: [{
+          id: 'submission-1',
+          relationships: { items: { data: [{ id: 'item-1' }] } },
+        }],
+        included: [{
+          type: 'reviewSubmissionItems',
+          id: 'item-1',
+          relationships: { appStoreVersion: { data: { id: 'version-1' } } },
+        }],
+      };
+    }
+    return { data: { id: 'submission-1' } };
+  };
+
+  assert.deepEqual(await asc.cancelReview('version-1'), { success: true });
+  assert.match(requests[0].endpoint, /^\/apps\/app-1\/reviewSubmissions\?/);
+  assert.equal(requests[1].endpoint, '/reviewSubmissions/submission-1');
+  assert.equal(requests[1].options.method, 'PATCH');
+  assert.equal(JSON.parse(requests[1].options.body).data.attributes.canceled, true);
+});
+
 test('finds an empty ready-for-review draft', async () => {
   const asc = createASCWithVersions({ data: [] });
   asc.getAppId = async () => 'app-1';
   asc.request = async endpoint => {
+    assert.match(endpoint, /^\/apps\/app-1\/reviewSubmissions\?/);
     assert.match(endpoint, /filter\[state\]=READY_FOR_REVIEW/);
     return {
       data: [
