@@ -57,3 +57,28 @@ test('uses a release pull request body for matching beta workflow builds', async
   assert.equal(result.updated, 1);
   assert.deepEqual(updated, [{ buildId: 'build-176', notes: 'CI improvements\nacross two lines' }]);
 });
+
+test('does not publish other PR sections when release notes are empty', async () => {
+  const updated = [];
+  const asc = {
+    appId: null,
+    getBuildsForWorkflowCommit: async () => [{ buildId: 'build-176', buildNumber: '176' }],
+    updateBetaBuildNotes: async (buildId, notes) => updated.push({ buildId, notes }),
+  };
+  const github = {
+    getCommitSubject: () => 'Remove app-local release PR automation',
+    getPRDetails: () => ({
+      title: 'Bug fixes and performance improvements',
+      body: '## Release Notes\n\n## Automation\nMaintained automatically.',
+    }),
+  };
+  const build = { purpose: 'beta', appId: 'app-1', workflowId: 'wf-beta', includeCommits: false };
+
+  await refreshTestFlightNotes(asc, github, build, {
+    commit: 'release-head', branch: 'develop', pull_request: '65',
+  });
+
+  assert.deepEqual(updated, [{
+    buildId: 'build-176', notes: 'Bug fixes and performance improvements',
+  }]);
+});
