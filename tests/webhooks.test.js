@@ -295,6 +295,7 @@ test('reports the running deployment identity from the health endpoint', async t
   const response = await fetch(`http://127.0.0.1:${port}/health`);
 
   assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
   assert.deepEqual(await response.json(), {
     ok: true,
     profiles: ['example-ios'],

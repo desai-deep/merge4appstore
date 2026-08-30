@@ -101,7 +101,10 @@ export function createSerialDispatcher(dispatch = runJob) {
 }
 
 function send(response, statusCode, body) {
-  response.writeHead(statusCode, { 'content-type': 'application/json' });
+  response.writeHead(statusCode, {
+    'content-type': 'application/json',
+    'cache-control': 'no-store',
+  });
   response.end(JSON.stringify(body));
 }
 

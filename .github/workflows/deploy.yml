@@ -237,7 +237,7 @@ jobs:
             nginx -t
             systemctl reload nginx
 
-            public_health="$(curl --fail --silent --show-error https://api.runningorder.app/merge4appstore/health)"
+            public_health="$(curl --fail --silent --show-error "https://api.runningorder.app/merge4appstore/health?deployment=$DEPLOY_SHA")"
             HEALTH="$public_health" EXPECTED_SHA="$DEPLOY_SHA" node -e '
               const health = JSON.parse(process.env.HEALTH || "{}");
               if (!health.ok || health.deployment_sha !== process.env.EXPECTED_SHA) {
