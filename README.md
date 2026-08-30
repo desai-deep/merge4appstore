@@ -23,7 +23,8 @@ Automated iOS App Store deployment and release sync. Monitors TestFlight builds 
 
 7. **Automatic PR Rebasing** - Rebases every open pull request targeting the
    beta branch whenever that branch advances. Conflicted or otherwise
-   non-updatable pull requests are skipped without blocking the rest.
+   non-updatable pull requests receive an automation comment and are skipped
+   without blocking the rest.
 
 ## Features
 
