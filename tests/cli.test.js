@@ -49,6 +49,10 @@ test('accepts the release pull request reconciliation mode', () => {
   assert.equal(parseCliArgs(['release-pr'], '/srv/merge4appstore', {}).mode, 'release-pr');
 });
 
+test('accepts the pull request rebase mode', () => {
+  assert.equal(parseCliArgs(['rebase-prs'], '/srv/merge4appstore', {}).mode, 'rebase-prs');
+});
+
 test('supports an environment-selected config', () => {
   assert.equal(
     parseCliArgs([], '/srv/merge4appstore', { MERGE4APPSTORE_ENV: '/etc/jams.env' }).configPath,

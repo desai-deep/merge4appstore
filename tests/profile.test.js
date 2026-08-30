@@ -5,6 +5,7 @@ import {
   applyAutomationProfile,
   applyBuildPurposeProfile,
   applyRepositoryProfile,
+  resolveAutoRebasePullRequests,
   resolveAutomation,
   resolveBuildPurpose,
   resolveReleasePullRequest,
@@ -86,6 +87,29 @@ test('resolves centralized release pull request policy', () => {
     title: 'Bug fixes and performance improvements',
     noteLimit: 100,
   });
+});
+
+test('defaults automatic pull request rebasing on and allows profiles to disable it', () => {
+  const profile = profileFixture();
+  assert.deepEqual(resolveAutoRebasePullRequests(profile), {
+    enabled: true,
+    baseBranch: 'develop',
+  });
+
+  profile.auto_rebase_pull_requests = false;
+  assert.deepEqual(resolveAutoRebasePullRequests(validateRepositoryProfile(profile)), {
+    enabled: false,
+    baseBranch: 'develop',
+  });
+});
+
+test('rejects a non-boolean automatic pull request rebase flag', () => {
+  const profile = profileFixture();
+  profile.auto_rebase_pull_requests = 'yes';
+  assert.throws(
+    () => validateRepositoryProfile(profile),
+    /auto_rebase_pull_requests must be a boolean/,
+  );
 });
 
 test('validates release pull request overrides', () => {

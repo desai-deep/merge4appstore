@@ -8,6 +8,7 @@ repository:
   beta_branch: develop
 
 release_pull_request: true
+auto_rebase_pull_requests: true
 
 webhooks:
   github:

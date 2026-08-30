@@ -21,6 +21,10 @@ Automated iOS App Store deployment and release sync. Monitors TestFlight builds 
    pull request after branch pushes. Its body lists the merged pull requests in
    the release range rather than their individual commits.
 
+7. **Automatic PR Rebasing** - Rebases every open pull request targeting the
+   beta branch whenever that branch advances. Conflicted or otherwise
+   non-updatable pull requests are skipped without blocking the rest.
+
 ## Features
 
 - Direct App Store Connect API calls (no Fastlane/Ruby dependency)
@@ -94,6 +98,7 @@ repository:
   beta_branch: develop
 
 release_pull_request: true # optional; maintained centrally after branch pushes
+auto_rebase_pull_requests: true # optional; defaults to true
 
 metadata: # optional
   path: AppStore

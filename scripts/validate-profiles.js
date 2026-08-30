@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 
 import {
   loadRepositoryProfile,
+  resolveAutoRebasePullRequests,
   resolveAutomation,
   resolveBuildPurpose,
   resolveReleasePullRequest,
@@ -39,5 +40,6 @@ for (const file of profileFiles) {
       .join(', ')
     : 'disabled';
   const releasePR = resolveReleasePullRequest(profile);
-  console.log(`${file}: ${routes}; builds: ${builds}; release-pr: ${releasePR.enabled ? `${releasePR.headBranch}->${releasePR.baseBranch}` : 'disabled'}`);
+  const autoRebase = resolveAutoRebasePullRequests(profile);
+  console.log(`${file}: ${routes}; builds: ${builds}; release-pr: ${releasePR.enabled ? `${releasePR.headBranch}->${releasePR.baseBranch}` : 'disabled'}; auto-rebase: ${autoRebase.enabled ? autoRebase.baseBranch : 'disabled'}`);
 }
