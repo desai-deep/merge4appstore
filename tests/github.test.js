@@ -228,8 +228,12 @@ test('selects the newest published ancestor and returns every comparison commit'
       { commit: { message: 'Second change' } },
     ] }]);
   };
-  assert.deepEqual(github.getCommitSubjectsSince(['newest', 'ancestor'], 'head'), {
+  assert.deepEqual(github.getCommitSubjectsSince([
+    { commitSha: 'newest', buildNumber: '102' },
+    { commitSha: 'ancestor', buildNumber: '101' },
+  ], 'head'), {
     baseCommit: 'ancestor',
+    baseBuildNumber: '101',
     subjects: ['First change', 'Second change'],
   });
 });

@@ -6,7 +6,10 @@ test('refreshes the localization for every published build of the PR commit', as
   const updated = [];
   const asc = {
     appId: null,
-    getPublishedWorkflowCommits: async () => [{ commitSha: 'previous' }, { commitSha: 'head' }],
+    getPublishedWorkflowCommits: async () => [
+      { commitSha: 'previous', buildNumber: '100' },
+      { commitSha: 'head', buildNumber: '101' },
+    ],
     getBuildsForWorkflowCommit: async () => [
       { buildId: 'build-1', buildNumber: '101' },
       { buildId: 'build-2', buildNumber: '102' },
@@ -16,7 +19,7 @@ test('refreshes the localization for every published build of the PR commit', as
   const github = {
     getCommitSubject: () => 'Current subject',
     getPRDetails: () => ({ title: 'Feature', body: 'Manual tester instructions' }),
-    getCommitSubjectsSince: () => ({ baseCommit: 'previous', subjects: ['First', 'Second'] }),
+    getCommitSubjectsSince: () => ({ baseCommit: 'previous', baseBuildNumber: '100', subjects: ['First', 'Second'] }),
     getPullRequestCommitSubjects: () => [],
   };
   const build = { purpose: 'pull_request', appId: 'app-1', workflowId: 'wf-pr', includeCommits: true };
@@ -26,7 +29,7 @@ test('refreshes the localization for every published build of the PR commit', as
   assert.equal(result.updated, 2);
   assert.equal(asc.appId, 'app-1');
   assert.equal(updated.length, 2);
-  assert.match(updated[0].notes, /^Commits since the last published build:/);
+  assert.match(updated[0].notes, /^Commits since build #100:/);
   assert.match(updated[0].notes, /• First\n• Second\n\nManual tester instructions$/);
 });
 
