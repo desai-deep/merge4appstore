@@ -150,7 +150,12 @@ async function prepareRequest(entry, payload) {
   return prepareBuild({ profile: entry.profile, build, payload: normalizedPayload, asc, github });
 }
 
-export function createWebhookServer({ profiles, dispatch = runJob, prepare = prepareRequest }) {
+export function createWebhookServer({
+  profiles,
+  dispatch = runJob,
+  prepare = prepareRequest,
+  deploymentSha = process.env.MERGE4APPSTORE_DEPLOY_SHA || null,
+}) {
   const enqueue = createSerialDispatcher(dispatch);
   const seen = new Map();
   const remember = key => {
@@ -167,7 +172,11 @@ export function createWebhookServer({ profiles, dispatch = runJob, prepare = pre
     try {
       const url = new URL(request.url, 'http://localhost');
       if (request.method === 'GET' && url.pathname === '/health') {
-        return send(response, 200, { ok: true, profiles: Object.keys(profiles) });
+        return send(response, 200, {
+          ok: true,
+          profiles: Object.keys(profiles),
+          deployment_sha: deploymentSha,
+        });
       }
       if (request.method !== 'POST') return send(response, 404, { error: 'Not found' });
 
