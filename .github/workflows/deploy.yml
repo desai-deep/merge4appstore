@@ -190,7 +190,7 @@ jobs:
 
             health=""
             for attempt in {1..10}; do
-              if health="$(curl --fail --silent http://127.0.0.1:8787/health)"; then break; fi
+              if health="$(curl --fail --silent --show-error http://127.0.0.1:8787/health)"; then break; fi
               sleep 1
             done
             HEALTH="$health" EXPECTED_SHA="$DEPLOY_SHA" node -e '
@@ -234,7 +234,7 @@ jobs:
             nginx -t
             systemctl reload nginx
 
-            public_health="$(curl --fail --silent https://api.runningorder.app/merge4appstore/health)"
+            public_health="$(curl --fail --silent --show-error https://api.runningorder.app/merge4appstore/health)"
             HEALTH="$public_health" EXPECTED_SHA="$DEPLOY_SHA" node -e '
               const health = JSON.parse(process.env.HEALTH || "{}");
               if (!health.ok || health.deployment_sha !== process.env.EXPECTED_SHA) {
