@@ -60,16 +60,17 @@ test('creates and deletes a unique verification tag only when explicitly request
     full: true,
     writeTag: true,
     now: () => 123456789,
+    uniqueSuffix: () => 'unique',
   });
   assert.equal(result.write_tag_check, 'created-and-deleted');
   const mutations = auth.calls.filter(call => call.options.method && call.options.method !== 'GET');
   assert.deepEqual(mutations.map(call => [call.options.method, call.path]), [
     ['POST', '/repos/example/ios/git/tags'],
     ['POST', '/repos/example/ios/git/refs'],
-    ['DELETE', '/repos/example/ios/git/refs/tags/merge4appstore-app-verification-123456789'],
+    ['DELETE', '/repos/example/ios/git/refs/tags/merge4appstore-app-verification-123456789-unique'],
   ]);
   assert.deepEqual(mutations[1].options.body, {
-    ref: 'refs/tags/merge4appstore-app-verification-123456789',
+    ref: 'refs/tags/merge4appstore-app-verification-123456789-unique',
     sha: 'tag-object',
   });
 });
