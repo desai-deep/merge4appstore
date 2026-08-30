@@ -432,7 +432,9 @@ the PR body first and falls back to all commits in that PR.
 the default: `true` for `pull_request`, `false` for `beta` and `production`.
 When a PR body is edited, the signed GitHub webhook refreshes the English
 TestFlight localization for every active uploaded build of that PR commit; no
-rebuild is required.
+rebuild is required. Feature PRs refresh builds from the pull-request workflow.
+The configured `develop`-to-`main` release PR refreshes builds from the beta
+workflow for its head commit, using the contents of its `Release Notes` section.
 
 ## Automatic VPS Deploy
 
