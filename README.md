@@ -99,7 +99,7 @@ repository:
   beta_branch: develop
 
 release_pull_request: true # optional; maintained centrally after branch pushes
-auto_rebase_pull_requests: true # optional; defaults to true
+auto_rebase_pull_requests: true # optional; defaults to false
 
 metadata: # optional
   path: AppStore

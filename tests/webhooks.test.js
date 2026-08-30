@@ -135,25 +135,29 @@ test('maps beta and production pushes to their managed build purposes', () => {
   assert.deepEqual(jobsForGitHubEvent(profile, 'push', {
     ref: 'refs/heads/develop', after: 'abc', repository,
   }, 'one'), [
-    { mode: 'rebase-prs', deliveryId: 'one' },
     { mode: 'trigger', purpose: 'beta', commitSha: 'abc', branch: 'develop', deliveryId: 'one' },
   ]);
   assert.equal(jobsForGitHubEvent(profile, 'push', { ref: 'refs/heads/main', after: 'def', repository }, 'two')[0].purpose, 'production');
   assert.deepEqual(jobsForGitHubEvent(profile, 'push', { ref: 'refs/heads/feature', after: 'ghi', repository }, 'three'), []);
 });
 
-test('allows profiles to disable automatic pull request rebasing', () => {
-  const disabledProfile = { ...profile, auto_rebase_pull_requests: false };
+test('allows profiles to enable automatic pull request rebasing', () => {
+  const enabledProfile = { ...profile, auto_rebase_pull_requests: true };
   const repository = { full_name: 'example/ios' };
-  assert.deepEqual(jobsForGitHubEvent(disabledProfile, 'push', {
+  assert.deepEqual(jobsForGitHubEvent(enabledProfile, 'push', {
     ref: 'refs/heads/develop', after: 'abc', repository,
   }, 'one'), [
+    { mode: 'rebase-prs', deliveryId: 'one' },
     { mode: 'trigger', purpose: 'beta', commitSha: 'abc', branch: 'develop', deliveryId: 'one' },
   ]);
 });
 
 test('reconciles a configured release PR on beta and production pushes', () => {
-  const releaseProfile = { ...profile, release_pull_request: true };
+  const releaseProfile = {
+    ...profile,
+    release_pull_request: true,
+    auto_rebase_pull_requests: true,
+  };
   const repository = { full_name: 'example/ios' };
   assert.deepEqual(jobsForGitHubEvent(releaseProfile, 'push', {
     ref: 'refs/heads/develop', after: 'abc', repository,

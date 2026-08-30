@@ -89,16 +89,16 @@ test('resolves centralized release pull request policy', () => {
   });
 });
 
-test('defaults automatic pull request rebasing on and allows profiles to disable it', () => {
+test('defaults automatic pull request rebasing off and allows profiles to enable it', () => {
   const profile = profileFixture();
   assert.deepEqual(resolveAutoRebasePullRequests(profile), {
-    enabled: true,
+    enabled: false,
     baseBranch: 'develop',
   });
 
-  profile.auto_rebase_pull_requests = false;
+  profile.auto_rebase_pull_requests = true;
   assert.deepEqual(resolveAutoRebasePullRequests(validateRepositoryProfile(profile)), {
-    enabled: false,
+    enabled: true,
     baseBranch: 'develop',
   });
 });
