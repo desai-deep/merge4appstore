@@ -3,6 +3,66 @@ import assert from 'node:assert/strict';
 
 import { GitHubAPI } from '../lib/github.js';
 
+test('lists open pull requests with the state needed for safe rebasing', () => {
+  const github = new GitHubAPI('example', 'ios');
+  let args;
+  github.exec = received => {
+    args = received;
+    return JSON.stringify([{
+      number: 42,
+      id: 'PR_node',
+      headRefOid: 'head-sha',
+      mergeable: 'MERGEABLE',
+      mergeStateStatus: 'BEHIND',
+      url: 'https://github.test/pull/42',
+    }]);
+  };
+
+  assert.equal(github.listOpenPullRequests('develop')[0].number, 42);
+  assert.deepEqual(args, [
+    'pr', 'list', '--repo', 'example/ios', '--state', 'open', '--base', 'develop',
+    '--limit', '1000', '--json', 'number,url,id,headRefOid,mergeable,mergeStateStatus',
+  ]);
+});
+
+test('rebases a pull request with an optimistic head check', () => {
+  const github = new GitHubAPI('example', 'ios');
+  let args;
+  github.exec = received => {
+    args = received;
+    return JSON.stringify({ data: { updatePullRequestBranch: { pullRequest: {
+      number: 42,
+      url: 'https://github.test/pull/42',
+      headRefOid: 'rebased-sha',
+    } } } });
+  };
+
+  assert.deepEqual(github.rebasePullRequest('PR_node', 'head-sha'), {
+    number: 42,
+    url: 'https://github.test/pull/42',
+    headRefOid: 'rebased-sha',
+  });
+  assert.ok(args.includes('pullRequestId=PR_node'));
+  assert.ok(args.includes('expectedHeadOid=head-sha'));
+  assert.match(args.find(argument => argument.startsWith('query=')), /updateMethod: REBASE/);
+});
+
+test('surfaces GraphQL details when a pull request cannot be rebased', () => {
+  const github = new GitHubAPI('example', 'ios');
+  github.exec = () => JSON.stringify({
+    data: { updatePullRequestBranch: null },
+    errors: [
+      { message: 'Head branch was modified' },
+      { message: 'Pull request is not updateable' },
+    ],
+  });
+
+  assert.throws(
+    () => github.rebasePullRequest('PR_node', 'stale-head'),
+    /Head branch was modified; Pull request is not updateable/,
+  );
+});
+
 test('loads repository assets through the Git blob API', () => {
   const github = new GitHubAPI('example', 'ios');
   const calls = [];

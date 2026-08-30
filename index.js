@@ -15,6 +15,7 @@
  *   node index.js trigger            # Trigger a configured build purpose
  *   node index.js notes              # Refresh TestFlight notes after a PR body edit
  *   node index.js release-pr         # Create or update the beta-to-production release PR
+ *   node index.js rebase-prs         # Rebase open PRs after the beta branch advances
  *   node index.js --config profiles/my-app.env
  *   node index.js --profile profiles/my-repository.yml
  *   DRY_RUN=true node index.js       # Dry run mode
@@ -51,6 +52,7 @@ import {
   applyBuildPurposeProfile,
   applyRepositoryProfile,
   loadRepositoryProfile,
+  resolveAutoRebasePullRequests,
   resolveReleasePullRequest,
 } from './lib/profile.js';
 
@@ -96,6 +98,7 @@ import { XcodeCloudBuildProvider } from './lib/build-provider.js';
 import { buildIntentFromEnvironment, runManagedBuildTrigger, waitForBuildCompletion } from './lib/trigger.js';
 import { refreshTestFlightNotes } from './lib/refresh-notes.js';
 import { reconcileReleasePullRequest } from './lib/release-pr.js';
+import { rebaseOpenPullRequests } from './lib/rebase-prs.js';
 
 async function main() {
   const DRY_RUN = process.env.DRY_RUN === 'true';
@@ -122,7 +125,7 @@ async function main() {
 
   // Validate required environment variables
   const requiredSharedVars = ['GH_TOKEN', 'GITHUB_REPO_OWNER', 'GITHUB_REPO_NAME'];
-  if (mode !== 'release-pr') requiredSharedVars.push(
+  if (!['release-pr', 'rebase-prs'].includes(mode)) requiredSharedVars.push(
     'APP_STORE_CONNECT_API_KEY_ID',
     'APP_STORE_CONNECT_ISSUER_ID',
     'APP_STORE_CONNECT_API_KEY_CONTENT',
@@ -156,6 +159,14 @@ async function main() {
   };
 
   try {
+    if (mode === 'rebase-prs') {
+      if (!repositoryProfile) throw new Error('rebase-prs mode requires --profile');
+      const policy = resolveAutoRebasePullRequests(repositoryProfile);
+      if (!policy.enabled) throw new Error('automatic pull request rebasing is disabled');
+      const github = new GitHubAPI(CONFIG.repoOwner, CONFIG.repoName, CONFIG.productionBranch);
+      rebaseOpenPullRequests(github, policy.baseBranch, DRY_RUN, log);
+    }
+
     if (mode === 'release-pr') {
       if (!repositoryProfile) throw new Error('release-pr mode requires --profile');
       const policy = resolveReleasePullRequest(repositoryProfile);

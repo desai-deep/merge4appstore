@@ -86,9 +86,24 @@ test('maps pull request lifecycle events to trigger and expiry jobs', () => {
 
 test('maps beta and production pushes to their managed build purposes', () => {
   const repository = { full_name: 'example/ios' };
-  assert.equal(jobsForGitHubEvent(profile, 'push', { ref: 'refs/heads/develop', after: 'abc', repository }, 'one')[0].purpose, 'beta');
+  assert.deepEqual(jobsForGitHubEvent(profile, 'push', {
+    ref: 'refs/heads/develop', after: 'abc', repository,
+  }, 'one'), [
+    { mode: 'rebase-prs', deliveryId: 'one' },
+    { mode: 'trigger', purpose: 'beta', commitSha: 'abc', branch: 'develop', deliveryId: 'one' },
+  ]);
   assert.equal(jobsForGitHubEvent(profile, 'push', { ref: 'refs/heads/main', after: 'def', repository }, 'two')[0].purpose, 'production');
   assert.deepEqual(jobsForGitHubEvent(profile, 'push', { ref: 'refs/heads/feature', after: 'ghi', repository }, 'three'), []);
+});
+
+test('allows profiles to disable automatic pull request rebasing', () => {
+  const disabledProfile = { ...profile, auto_rebase_pull_requests: false };
+  const repository = { full_name: 'example/ios' };
+  assert.deepEqual(jobsForGitHubEvent(disabledProfile, 'push', {
+    ref: 'refs/heads/develop', after: 'abc', repository,
+  }, 'one'), [
+    { mode: 'trigger', purpose: 'beta', commitSha: 'abc', branch: 'develop', deliveryId: 'one' },
+  ]);
 });
 
 test('reconciles a configured release PR on beta and production pushes', () => {
@@ -97,6 +112,7 @@ test('reconciles a configured release PR on beta and production pushes', () => {
   assert.deepEqual(jobsForGitHubEvent(releaseProfile, 'push', {
     ref: 'refs/heads/develop', after: 'abc', repository,
   }, 'beta-push'), [
+    { mode: 'rebase-prs', deliveryId: 'beta-push' },
     { mode: 'release-pr', deliveryId: 'beta-push' },
     { mode: 'trigger', purpose: 'beta', commitSha: 'abc', branch: 'develop', deliveryId: 'beta-push' },
   ]);
