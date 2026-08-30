@@ -424,10 +424,11 @@ ci:
     token_env: MERGE4APPSTORE_BUILD_TOKEN_MY_REPOSITORY
 ```
 
-For pull-request builds, TestFlight notes contain the current PR body followed
-by every commit since the newest uploaded build from the same workflow whose
-commit is an ancestor of the current head. The first build of a PR falls back
-to all commits in that PR. `build.purposes.<purpose>.include_commits` overrides
+For pull-request builds, TestFlight notes contain every commit since the newest
+uploaded build from the same workflow whose commit is an ancestor of the
+current head, followed by the current PR body. The first build of a PR keeps
+the PR body first and falls back to all commits in that PR.
+`build.purposes.<purpose>.include_commits` overrides
 the default: `true` for `pull_request`, `false` for `beta` and `production`.
 When a PR body is edited, the signed GitHub webhook refreshes the English
 TestFlight localization for every active uploaded build of that PR commit; no

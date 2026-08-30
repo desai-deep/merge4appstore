@@ -94,10 +94,32 @@ test('prepares version and notes without exposing provider credentials to the ap
     role: 'uat',
     purpose: 'pull_request',
     marketing_version: '1.4',
-    testflight_notes: 'Please verify playback and lock-screen controls.\n\nCommits since the last published build:\n\n• Add playback state\n• Fix lock screen',
+    testflight_notes: 'Commits since the last published build:\n\n• Add playback state\n• Fix lock screen\n\nPlease verify playback and lock-screen controls.',
     warnings: [],
   });
   assert.equal(asc.appId, '1');
+});
+
+test('keeps the pull request description before commits for its first build', async () => {
+  const profile = { repository: { owner: 'example', name: 'ios', beta_branch: 'develop' } };
+  const build = { purpose: 'pull_request', appRole: 'uat', appId: '1', workflowId: 'wf-pr', includeCommits: true };
+  const payload = { repository: 'example/ios', commit: 'abc', branch: 'feature', target_branch: 'develop', pull_request: 42, current_marketing_version: '1.4' };
+  const asc = {
+    appId: null,
+    getAppStoreVersions: async () => ({ data: [] }),
+    getPublishedWorkflowCommits: async () => [],
+  };
+  const github = {
+    getCommitSubject: () => 'Fallback subject',
+    getPRDetails: () => ({ title: 'Freshen controls', body: 'Please verify playback and lock-screen controls.' }),
+    getCommitSubjectsSince: () => null,
+    getPullRequestCommitSubjects: () => ['Add playback state', 'Fix lock screen'],
+  };
+
+  const result = await prepareBuild({ profile, build, payload, asc, github });
+
+  assert.equal(result.testflight_notes, 'Please verify playback and lock-screen controls.\n\nCommits since the last published build:\n\n• Add playback state\n• Fix lock screen');
+  assert.deepEqual(result.warnings, ['No ancestor published build found; using all pull-request commits']);
 });
 
 test('beta notes default to a summary without listing commits', async () => {
