@@ -47,6 +47,22 @@ test('rebases a pull request with an optimistic head check', () => {
   assert.match(args.find(argument => argument.startsWith('query=')), /updateMethod: REBASE/);
 });
 
+test('surfaces GraphQL details when a pull request cannot be rebased', () => {
+  const github = new GitHubAPI('example', 'ios');
+  github.exec = () => JSON.stringify({
+    data: { updatePullRequestBranch: null },
+    errors: [
+      { message: 'Head branch was modified' },
+      { message: 'Pull request is not updateable' },
+    ],
+  });
+
+  assert.throws(
+    () => github.rebasePullRequest('PR_node', 'stale-head'),
+    /Head branch was modified; Pull request is not updateable/,
+  );
+});
+
 test('loads repository assets through the Git blob API', () => {
   const github = new GitHubAPI('example', 'ios');
   const calls = [];
