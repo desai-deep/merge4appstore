@@ -80,13 +80,13 @@ test('prepares version and notes without exposing provider credentials to the ap
   const asc = {
     appId: null,
     getAppStoreVersions: async () => ({ data: [] }),
-    getPublishedWorkflowCommits: async () => [{ commitSha: 'previous', buildNumber: '101' }],
+    getPublishedWorkflowCommits: async () => [{ commitSha: 'previous', buildNumber: '101', marketingVersion: '1.4' }],
   };
   const github = {
     getCommitSubject: () => 'Fallback subject',
     getPRDetails: () => ({ title: 'Freshen controls', body: 'Please verify playback and lock-screen controls.' }),
     findPullRequestTitleForCommit: () => null,
-    getCommitSubjectsSince: () => ({ baseCommit: 'previous', baseBuildNumber: '101', subjects: ['Add playback state', 'Fix lock screen'] }),
+    getCommitSubjectsSince: () => ({ baseCommit: 'previous', baseBuildNumber: '101', baseMarketingVersion: '1.4', subjects: ['Add playback state', 'Fix lock screen'] }),
     getPullRequestCommitSubjects: () => [],
   };
   assert.deepEqual(await prepareBuild({ profile, build, payload, asc, github }), {
@@ -94,7 +94,7 @@ test('prepares version and notes without exposing provider credentials to the ap
     role: 'uat',
     purpose: 'pull_request',
     marketing_version: '1.4',
-    testflight_notes: 'Commits since build #101:\n\n• Add playback state\n• Fix lock screen\n\nPlease verify playback and lock-screen controls.',
+    testflight_notes: 'Commits since version 1.4 (build #101):\n\n• Add playback state\n• Fix lock screen\n\nPlease verify playback and lock-screen controls.',
     warnings: [],
   });
   assert.equal(asc.appId, '1');

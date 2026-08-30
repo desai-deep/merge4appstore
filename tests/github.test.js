@@ -229,11 +229,12 @@ test('selects the newest published ancestor and returns every comparison commit'
     ] }]);
   };
   assert.deepEqual(github.getCommitSubjectsSince([
-    { commitSha: 'newest', buildNumber: '102' },
-    { commitSha: 'ancestor', buildNumber: '101' },
+    { commitSha: 'newest', buildNumber: '102', marketingVersion: '1.5' },
+    { commitSha: 'ancestor', buildNumber: '101', marketingVersion: '1.4' },
   ], 'head'), {
     baseCommit: 'ancestor',
     baseBuildNumber: '101',
+    baseMarketingVersion: '1.4',
     subjects: ['First change', 'Second change'],
   });
 });
