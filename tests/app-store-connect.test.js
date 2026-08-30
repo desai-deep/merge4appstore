@@ -905,10 +905,17 @@ test('finds uploaded commits for one configured workflow', async () => {
   asc.getAppId = async () => 'app-1';
   asc.request = async endpoint => {
     assert.match(endpoint, /filter\[app\]=app-1/);
-    return { data: [
-      { id: 'build-2', attributes: { version: '2', uploadedDate: '2026-08-27T02:00:00Z' } },
-      { id: 'build-1', attributes: { version: '1', uploadedDate: '2026-08-27T01:00:00Z' } },
-    ] };
+    assert.match(endpoint, /include=preReleaseVersion/);
+    return {
+      data: [
+        { id: 'build-2', attributes: { version: '2', uploadedDate: '2026-08-27T02:00:00Z' }, relationships: { preReleaseVersion: { data: { id: 'pre-2' } } } },
+        { id: 'build-1', attributes: { version: '1', uploadedDate: '2026-08-27T01:00:00Z' }, relationships: { preReleaseVersion: { data: { id: 'pre-1' } } } },
+      ],
+      included: [
+        { id: 'pre-1', type: 'preReleaseVersions', attributes: { version: '1.4' } },
+        { id: 'pre-2', type: 'preReleaseVersions', attributes: { version: '1.5' } },
+      ],
+    };
   };
   let scopedLoads = 0;
   asc.loadCIBuildRunsForWorkflow = async workflowId => {
@@ -923,7 +930,7 @@ test('finds uploaded commits for one configured workflow', async () => {
     }];
   };
   assert.deepEqual(await asc.getPublishedWorkflowCommits('workflow-1'), [{
-    commitSha: 'ancestor', buildId: 'build-1', buildNumber: '1', uploadedDate: '2026-08-27T01:00:00Z',
+    commitSha: 'ancestor', buildId: 'build-1', buildNumber: '1', marketingVersion: '1.4', uploadedDate: '2026-08-27T01:00:00Z',
   }]);
   assert.equal(scopedLoads, 1);
 });
