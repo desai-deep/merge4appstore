@@ -94,7 +94,7 @@ test('prepares version and notes without exposing provider credentials to the ap
     role: 'uat',
     purpose: 'pull_request',
     marketing_version: '1.4',
-    testflight_notes: 'Commits since version 1.4 (build #101):\n\n• Add playback state\n• Fix lock screen\n\nPlease verify playback and lock-screen controls.',
+    testflight_notes: 'Commits since 1.4 (101):\n\n• Add playback state\n• Fix lock screen\n\nPlease verify playback and lock-screen controls.',
     warnings: [],
   });
   assert.equal(asc.appId, '1');
