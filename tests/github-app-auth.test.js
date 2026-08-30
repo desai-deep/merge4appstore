@@ -41,6 +41,38 @@ test('rejects partial GitHub App configuration instead of falling back to a PAT'
     () => githubAuthenticationSettings({ GITHUB_INSTALLATION_ID: '456' }),
     /GITHUB_APP_ID/,
   );
+  assert.throws(
+    () => githubAuthenticationSettings({ GITHUB_APP_ID: '0', GITHUB_APP_PRIVATE_KEY: privateKeyPem }),
+    /positive integer/,
+  );
+  assert.throws(
+    () => githubAuthenticationSettings({ GITHUB_APP_ID: '123', GITHUB_APP_PRIVATE_KEY: 'not-a-key' }),
+    /private key is invalid/,
+  );
+  assert.throws(
+    () => githubAuthenticationSettings({
+      GITHUB_APP_ID: '123',
+      GITHUB_APP_PRIVATE_KEY: privateKeyPem,
+      GITHUB_API_URL: 'http://api.github.test',
+    }),
+    /HTTPS URL/,
+  );
+});
+
+test('validates direct authenticator construction', () => {
+  assert.throws(() => new GitHubAppAuthenticator({
+    appId: '0',
+    privateKey: privateKeyPem,
+  }), /positive integer/);
+  assert.throws(() => new GitHubAppAuthenticator({
+    appId: '123',
+    privateKey: 'not-a-key',
+  }), /private key is invalid/);
+  assert.throws(() => new GitHubAppAuthenticator({
+    appId: '123',
+    privateKey: privateKeyPem,
+    requestTimeoutMs: 0,
+  }), /timeout must be a positive number/);
 });
 
 test('fails permission preflight when an installation cannot perform current mutations', () => {
@@ -104,6 +136,40 @@ test('discovers an installation and requests a repository-scoped token', async (
   assert.equal(calls.length, 2);
   assert.match(calls[0].options.headers.Authorization, /^Bearer /);
   assert.deepEqual(JSON.parse(calls[1].options.body), { repositories: ['ios'] });
+});
+
+test('single-flights installation discovery for concurrent token requests', async () => {
+  let discoveryRequests = 0;
+  const auth = new GitHubAppAuthenticator({
+    appId: '123',
+    privateKey: privateKeyPem,
+    now: () => Date.parse('2026-08-30T00:00:00Z'),
+    fetchImpl: async url => {
+      if (url.endsWith('/installation')) {
+        discoveryRequests += 1;
+        await new Promise(resolve => setImmediate(resolve));
+        return jsonResponse({ id: 456 });
+      }
+      return jsonResponse({ token: 'token', expires_at: '2026-08-30T01:00:00Z' });
+    },
+  });
+  await Promise.all([
+    auth.installationToken('example', 'ios'),
+    auth.installationToken('example', 'ios'),
+  ]);
+  assert.equal(discoveryRequests, 1);
+});
+
+test('times out a stalled GitHub API request', async () => {
+  const auth = new GitHubAppAuthenticator({
+    appId: '123',
+    privateKey: privateKeyPem,
+    requestTimeoutMs: 1,
+    fetchImpl: async (_url, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(new Error('aborted')));
+    }),
+  });
+  await assert.rejects(auth.request('/app'), /timed out after 1ms/);
 });
 
 test('single-flights and caches installation token refreshes', async () => {
