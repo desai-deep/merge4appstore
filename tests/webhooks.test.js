@@ -82,6 +82,11 @@ test('maps pull request lifecycle events to trigger and expiry jobs', () => {
   assert.deepEqual(jobsForGitHubEvent(profile, 'pull_request', {
     action: 'edited', pull_request, repository, changes: { title: { from: 'Old title' } },
   }, 'four'), []);
+  assert.deepEqual(jobsForGitHubEvent(profile, 'pull_request', {
+    action: 'edited', pull_request, repository, changes: { base: { ref: { from: 'main' } } },
+  }, 'five'), [{
+    mode: 'trigger', purpose: 'pull_request', commitSha: 'abc123', branch: 'feature', pullRequest: '42', deliveryId: 'five',
+  }]);
 });
 
 test('refreshes beta build notes when an automated release pull request body changes', () => {
