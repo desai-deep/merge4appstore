@@ -122,17 +122,46 @@ test('keeps the pull request description before commits for its first build', as
   assert.deepEqual(result.warnings, ['No ancestor published build found; using all pull-request commits']);
 });
 
-test('beta notes default to a summary without listing commits', async () => {
-  const profile = { repository: { owner: 'example', name: 'ios', beta_branch: 'develop' } };
+test('beta notes use the exact release pull request without listing commits', async () => {
+  const profile = { repository: { owner: 'example', name: 'ios', beta_branch: 'develop', production_branch: 'main' } };
+  const build = { purpose: 'beta', appRole: 'prod', appId: '1', workflowId: 'wf-beta', includeCommits: false };
+  const payload = { repository: 'example/ios', commit: 'abc', branch: 'develop', current_marketing_version: '1.4' };
+  const asc = { appId: null, getAppStoreVersions: async () => ({ data: [] }) };
+  const lookups = [];
+  const github = {
+    getCommitSubject: () => 'Merge feature',
+    findOpenPullRequestForCommit: (commit, base, head) => {
+      lookups.push({ commit, base, head });
+      return { number: 65 };
+    },
+    getPRDetails: () => ({
+      title: 'Bug fixes and performance improvements',
+      body: '## Release Notes\n- #49 Freshen playback controls UI\n\n## Automation\nManaged release PR.',
+    }),
+    findPullRequestTitleForCommit: () => {
+      throw new Error('beta notes must not search arbitrary associated pull requests');
+    },
+  };
+  const result = await prepareBuild({ profile, build, payload, asc, github });
+  assert.deepEqual(lookups, [{ commit: 'abc', base: 'main', head: 'develop' }]);
+  assert.equal(result.testflight_notes, '- #49 Freshen playback controls UI');
+});
+
+test('beta notes fall back to the develop commit instead of an unrelated feature pull request', async () => {
+  const profile = { repository: { owner: 'example', name: 'ios', beta_branch: 'develop', production_branch: 'main' } };
   const build = { purpose: 'beta', appRole: 'prod', appId: '1', workflowId: 'wf-beta', includeCommits: false };
   const payload = { repository: 'example/ios', commit: 'abc', branch: 'develop', current_marketing_version: '1.4' };
   const asc = { appId: null, getAppStoreVersions: async () => ({ data: [] }) };
   const github = {
-    getCommitSubject: () => 'Merge feature',
-    findPullRequestTitleForCommit: () => 'Improve playback',
+    getCommitSubject: () => 'Merge pull request #49 from example/freshen-controls',
+    findOpenPullRequestForCommit: () => null,
+    findPullRequestTitleForCommit: () => {
+      throw new Error('beta notes must not search feature pull requests containing the commit');
+    },
   };
+
   const result = await prepareBuild({ profile, build, payload, asc, github });
-  assert.equal(result.testflight_notes, 'Improve playback');
+  assert.equal(result.testflight_notes, 'Merge pull request #49 from example/freshen-controls');
 });
 
 test('uses the pull request target branch when finding a title fallback', async () => {
