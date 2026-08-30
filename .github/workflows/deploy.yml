@@ -165,7 +165,10 @@ jobs:
 
             export WEBHOOK_AUTOSTART=true WEBHOOK_HOST=127.0.0.1 WEBHOOK_PORT=8787
             export MERGE4APPSTORE_DEPLOY_SHA="$DEPLOY_SHA"
-            pm2 startOrReload ecosystem.config.cjs --only merge4appstore-webhooks --update-env
+            if pm2 describe merge4appstore-webhooks >/dev/null 2>&1; then
+              pm2 delete merge4appstore-webhooks
+            fi
+            pm2 start ecosystem.config.cjs --only merge4appstore-webhooks --update-env
             pm2 save
 
             export EXPECTED_PM2_CWD="$DEPLOY_DIR"
