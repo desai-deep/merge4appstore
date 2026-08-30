@@ -26,6 +26,6 @@ test('refreshes the localization for every published build of the PR commit', as
   assert.equal(result.updated, 2);
   assert.equal(asc.appId, 'app-1');
   assert.equal(updated.length, 2);
-  assert.match(updated[0].notes, /^Manual tester instructions/);
-  assert.match(updated[0].notes, /• First\n• Second$/);
+  assert.match(updated[0].notes, /^Commits since the last published build:/);
+  assert.match(updated[0].notes, /• First\n• Second\n\nManual tester instructions$/);
 });
