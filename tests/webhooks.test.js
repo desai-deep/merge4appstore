@@ -279,6 +279,25 @@ test('runs deploy only for a successful completed production workflow', () => {
   assert.deepEqual(jobsForXcodeCloudEvent(profile, payload), []);
 });
 
+test('reports the running deployment identity from the health endpoint', async t => {
+  const server = createWebhookServer({
+    profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
+    deploymentSha: 'deployed-commit',
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const { port } = server.address();
+
+  const response = await fetch(`http://127.0.0.1:${port}/health`);
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    profiles: ['example-ios'],
+    deployment_sha: 'deployed-commit',
+  });
+});
+
 test('protects the build preparation endpoint with its repository token', async t => {
   const environmentName = 'MERGE4APPSTORE_BUILD_TOKEN_EXAMPLE_IOS';
   process.env[environmentName] = 'build-secret';

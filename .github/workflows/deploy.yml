@@ -164,18 +164,44 @@ jobs:
             repository_profiles=(profiles/*.yml profiles/*.yaml)
 
             export WEBHOOK_AUTOSTART=true WEBHOOK_HOST=127.0.0.1 WEBHOOK_PORT=8787
+            export MERGE4APPSTORE_DEPLOY_SHA="$DEPLOY_SHA"
             if pm2 describe merge4appstore-webhooks >/dev/null 2>&1; then
-              pm2 restart merge4appstore-webhooks --update-env
-            else
-              pm2 start webhook-server.js --name merge4appstore-webhooks
+              pm2 delete merge4appstore-webhooks
             fi
+            pm2 start ecosystem.config.cjs --only merge4appstore-webhooks --update-env
             pm2 save
 
+            export EXPECTED_PM2_CWD="$DEPLOY_DIR"
+            export EXPECTED_PM2_SCRIPT="$DEPLOY_DIR/webhook-server.js"
+            pm2 jlist | node -e '
+              const fs = require("fs");
+              let source = "";
+              process.stdin.on("data", chunk => { source += chunk; });
+              process.stdin.on("end", () => {
+                const processInfo = JSON.parse(source).find(item => item.name === "merge4appstore-webhooks");
+                if (!processInfo) throw new Error("merge4appstore-webhooks is not registered in PM2");
+                const actualCwd = fs.realpathSync(processInfo.pm2_env.pm_cwd);
+                const actualScript = fs.realpathSync(processInfo.pm2_env.pm_exec_path);
+                const expectedCwd = fs.realpathSync(process.env.EXPECTED_PM2_CWD);
+                const expectedScript = fs.realpathSync(process.env.EXPECTED_PM2_SCRIPT);
+                if (actualCwd !== expectedCwd || actualScript !== expectedScript) {
+                  throw new Error(`PM2 is serving ${actualScript} from ${actualCwd}; expected ${expectedScript} from ${expectedCwd}`);
+                }
+              });
+            '
+            unset EXPECTED_PM2_CWD EXPECTED_PM2_SCRIPT
+
+            health=""
             for attempt in {1..10}; do
-              if curl --fail --silent http://127.0.0.1:8787/health >/dev/null; then break; fi
+              if health="$(curl --fail --silent --show-error http://127.0.0.1:8787/health)"; then break; fi
               sleep 1
             done
-            curl --fail --silent http://127.0.0.1:8787/health >/dev/null
+            HEALTH="$health" EXPECTED_SHA="$DEPLOY_SHA" node -e '
+              const health = JSON.parse(process.env.HEALTH || "{}");
+              if (!health.ok || health.deployment_sha !== process.env.EXPECTED_SHA) {
+                throw new Error(`Webhook health reports deployment ${health.deployment_sha || "unknown"}; expected ${process.env.EXPECTED_SHA}`);
+              }
+            '
             for profile_file in "${repository_profiles[@]}"; do
               instance="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>console.log(loadRepositoryProfile(process.argv[1]).instance))" "$profile_file")"
               repository="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>{const p=loadRepositoryProfile(process.argv[1]);console.log(p.repository.owner+'/'+p.repository.name)})" "$profile_file")"
@@ -210,6 +236,14 @@ jobs:
             fi
             nginx -t
             systemctl reload nginx
+
+            public_health="$(curl --fail --silent --show-error https://api.runningorder.app/merge4appstore/health)"
+            HEALTH="$public_health" EXPECTED_SHA="$DEPLOY_SHA" node -e '
+              const health = JSON.parse(process.env.HEALTH || "{}");
+              if (!health.ok || health.deployment_sha !== process.env.EXPECTED_SHA) {
+                throw new Error(`Public webhook health reports deployment ${health.deployment_sha || "unknown"}; expected ${process.env.EXPECTED_SHA}`);
+              }
+            '
 
             for profile_file in "${repository_profiles[@]}"; do
               instance="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>console.log(loadRepositoryProfile(process.argv[1]).instance))" "$profile_file")"
