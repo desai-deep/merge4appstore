@@ -29,3 +29,31 @@ test('refreshes the localization for every published build of the PR commit', as
   assert.match(updated[0].notes, /^Commits since the last published build:/);
   assert.match(updated[0].notes, /• First\n• Second\n\nManual tester instructions$/);
 });
+
+test('uses a release pull request body for matching beta workflow builds', async () => {
+  const updated = [];
+  const asc = {
+    appId: null,
+    getBuildsForWorkflowCommit: async (workflowId, commit) => {
+      assert.equal(workflowId, 'wf-beta');
+      assert.equal(commit, 'release-head');
+      return [{ buildId: 'build-176', buildNumber: '176' }];
+    },
+    updateBetaBuildNotes: async (buildId, notes) => updated.push({ buildId, notes }),
+  };
+  const github = {
+    getCommitSubject: () => 'Remove app-local release PR automation',
+    getPRDetails: () => ({
+      title: 'Bug fixes and performance improvements',
+      body: '## Release Notes\nCI improvements\nacross two lines\n\n## Automation\nMaintained automatically.',
+    }),
+  };
+  const build = { purpose: 'beta', appId: 'app-1', workflowId: 'wf-beta', includeCommits: false };
+
+  const result = await refreshTestFlightNotes(asc, github, build, {
+    commit: 'release-head', branch: 'develop', pull_request: '65',
+  });
+
+  assert.equal(result.updated, 1);
+  assert.deepEqual(updated, [{ buildId: 'build-176', notes: 'CI improvements\nacross two lines' }]);
+});

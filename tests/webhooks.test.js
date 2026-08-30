@@ -84,6 +84,26 @@ test('maps pull request lifecycle events to trigger and expiry jobs', () => {
   }, 'four'), []);
 });
 
+test('refreshes beta build notes when an automated release pull request body changes', () => {
+  const pull_request = {
+    number: 65,
+    base: { ref: 'main' },
+    head: { ref: 'develop', sha: 'release123' },
+  };
+  const repository = { full_name: 'example/ios' };
+  const releaseProfile = { ...profile, release_pull_request: true };
+
+  assert.deepEqual(jobsForGitHubEvent(releaseProfile, 'pull_request', {
+    action: 'edited', pull_request, repository, changes: { body: { from: 'Old release notes' } },
+  }, 'release-edit'), [{
+    mode: 'notes', purpose: 'beta', commitSha: 'release123', branch: 'develop', pullRequest: '65', deliveryId: 'release-edit',
+  }]);
+
+  assert.deepEqual(jobsForGitHubEvent(profile, 'pull_request', {
+    action: 'edited', pull_request, repository, changes: { body: { from: 'Old release notes' } },
+  }, 'disabled-release-edit'), []);
+});
+
 test('maps beta and production pushes to their managed build purposes', () => {
   const repository = { full_name: 'example/ios' };
   assert.deepEqual(jobsForGitHubEvent(profile, 'push', {
