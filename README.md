@@ -438,8 +438,9 @@ retention. The external alert closes on the next healthy scheduled check.
 When `release_pull_request` is enabled, beta and production pushes also
 reconcile the open pull request from `repository.beta_branch` to
 `repository.production_branch`. The default title is “Bug fixes and performance
-improvements”, and the default body limit is 100 merged pull requests. A mapping
-can override either value:
+improvements”, the PR carries an `automated release` label so it stands out in
+GitHub's pull-request list, and the default body limit is 100 merged pull
+requests. A mapping can override either value:
 
 ```yaml
 release_pull_request:
