@@ -104,6 +104,41 @@ test('gives deployment prewarming a longer Git command budget without changing r
   });
 });
 
+test('prewarms a missing mirror with one lock and no redundant post-clone fetch', async t => {
+  const fixture = await createRepository(t);
+  let lockCalls = 0;
+  let cloneCalls = 0;
+  let fetchCalls = 0;
+  const mirror = new GitMirror('example', 'single-lock-prewarm', {
+    stateDirectory: fixture.stateDirectory,
+    remoteUrl: fixture.remoteUrl,
+    run: async (args, options) => {
+      if (args.includes('clone')) cloneCalls += 1;
+      if (args.includes('fetch')) fetchCalls += 1;
+      return git(args, options);
+    },
+  });
+  const withMutationLock = mirror.withMutationLock.bind(mirror);
+  mirror.withMutationLock = (...args) => {
+    lockCalls += 1;
+    return withMutationLock(...args);
+  };
+
+  await mirror.refresh({ force: true });
+  assert.deepEqual({ lockCalls, cloneCalls, fetchCalls }, {
+    lockCalls: 1,
+    cloneCalls: 1,
+    fetchCalls: 0,
+  });
+
+  await mirror.refresh({ force: true });
+  assert.deepEqual({ lockCalls, cloneCalls, fetchCalls }, {
+    lockCalls: 2,
+    cloneCalls: 1,
+    fetchCalls: 1,
+  });
+});
+
 test('falls back to GitHub before the request deadline when the mirror lock is held', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge4appstore-mirror-lock-budget-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
