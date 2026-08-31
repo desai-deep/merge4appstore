@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import {
   clearGitMirrorRegistry,
   ensureStateDirectory,
+  getGitMirror,
   gitSupportsNoLazyFetch,
   GitMirror,
   requestMirrorLockTimeoutMs,
@@ -137,6 +138,98 @@ test('prewarms a missing mirror with one lock and no redundant post-clone fetch'
     cloneCalls: 1,
     fetchCalls: 1,
   });
+});
+
+test('refreshes repository credentials for clone and fetch without leaking secrets', async t => {
+  const fixture = await createRepository(t);
+  const networkCommands = [];
+  let credentials = 0;
+  const mirror = new GitMirror('example', 'credential-rotation', {
+    stateDirectory: fixture.stateDirectory,
+    remoteUrl: fixture.remoteUrl,
+    environment: {
+      PATH: process.env.PATH,
+      GH_TOKEN: 'fallback-token',
+      APP_STORE_CONNECT_API_KEY_CONTENT: 'provider-secret',
+    },
+    environmentProvider: async () => ({
+      PATH: process.env.PATH,
+      GH_TOKEN: `installation-token-${++credentials}`,
+      GITHUB_APP_PRIVATE_KEY_BASE64: 'private-key-must-not-leak',
+      APP_STORE_CONNECT_API_KEY_CONTENT: 'provider-secret-must-not-leak',
+    }),
+    run: async (args, options) => {
+      if (args[0] === 'clone' || args.includes('fetch')) {
+        networkCommands.push({ args: [...args], environment: { ...options.environment } });
+      }
+      return git(args, options);
+    },
+  });
+
+  await mirror.refresh({ force: true });
+  await mirror.refresh({ force: true });
+  assert.deepEqual(networkCommands.map(call => call.environment.GH_TOKEN), [
+    'installation-token-1', 'installation-token-2',
+  ]);
+  for (const call of networkCommands) {
+    assert.equal(call.environment.GITHUB_APP_PRIVATE_KEY_BASE64, undefined);
+    assert.equal(call.environment.APP_STORE_CONNECT_API_KEY_CONTENT, undefined);
+    assert.doesNotMatch(call.args.join(' '), /installation-token|private-key|provider-secret/);
+  }
+  const origin = await output(['-C', mirror.mirrorPath, 'remote', 'get-url', 'origin']);
+  assert.equal(origin, fixture.remoteUrl);
+  assert.doesNotMatch(
+    await fs.readFile(path.join(mirror.mirrorPath, 'config'), 'utf8'),
+    /installation-token|private-key|provider-secret/,
+  );
+});
+
+test('keeps repository credentials out of local-only mirror commands', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge4appstore-mirror-local-env-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  let providerCalls = 0;
+  let received;
+  const mirror = new GitMirror('example', 'ios', {
+    stateDirectory: path.join(root, 'state'),
+    environment: { PATH: '/bin', GH_TOKEN: 'must-not-reach-local-git' },
+    environmentProvider: async () => {
+      providerCalls += 1;
+      return { PATH: '/bin', GH_TOKEN: 'network-only-token' };
+    },
+    run: async (_args, options) => {
+      received = options;
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  await mirror.git(['rev-parse', '--is-bare-repository']);
+  assert.equal(providerCalls, 0);
+  assert.equal(received.network, false);
+  assert.equal(received.environment.GH_TOKEN, undefined);
+});
+
+test('updates a registry mirror with a refreshable provider instead of freezing credentials', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge4appstore-mirror-provider-'));
+  t.after(async () => {
+    clearGitMirrorRegistry();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  let used;
+  const first = getGitMirror('example', 'ios', {
+    stateDirectory: path.join(root, 'state'),
+    environmentProvider: async () => ({ GH_TOKEN: 'old-token' }),
+    run: async (_args, options) => {
+      used = options.environment.GH_TOKEN;
+      return { stdout: '', stderr: '' };
+    },
+  });
+  const second = getGitMirror('example', 'ios', {
+    stateDirectory: path.join(root, 'state'),
+    environmentProvider: async () => ({ GH_TOKEN: 'new-token' }),
+  });
+  assert.equal(first, second);
+  await first.git(['fetch'], { network: true });
+  assert.equal(used, 'new-token');
 });
 
 test('fetches a requested head that lands after the initial clone snapshot', async t => {
@@ -522,9 +615,9 @@ test('prewarms every repository sequentially and aggregates per-repository failu
   const events = [];
   const messages = [];
   const repositories = new Map([
-    ['example/first', { owner: 'example', name: 'first' }],
-    ['example/second', { owner: 'example', name: 'second' }],
-    ['example/third', { owner: 'example', name: 'third' }],
+    ['example/first', { owner: 'example', name: 'first', github_id: 11 }],
+    ['example/second', { owner: 'example', name: 'second', github_id: 22 }],
+    ['example/third', { owner: 'example', name: 'third', github_id: 33 }],
   ]);
   const failures = new Map([
     ['first', new Error('first clone timed out')],
@@ -533,8 +626,9 @@ test('prewarms every repository sequentially and aggregates per-repository failu
 
   await assert.rejects(
     prewarmGitMirrors(repositories, {
-      mirrorFor: (owner, repository) => ({
+      mirrorFor: (owner, repository, { repositoryId }) => ({
         refresh: async options => {
+          assert.equal(repositoryId, { first: 11, second: 22, third: 33 }[repository]);
           events.push(`${owner}/${repository}:start`);
           assert.equal(options.force, true);
           assert.equal(options.signal instanceof AbortSignal, true);
@@ -1087,6 +1181,35 @@ test('isolates mirror storage when one repository identity uses two remote URLs'
   assert.equal(
     (await fs.readdir(first.mirrorsDirectory)).some(name => name.includes('.invalid-')),
     false,
+  );
+});
+
+test('isolates durable mirrors when a repository name is reused by a different GitHub id', async t => {
+  const fixture = await createRepository(t);
+  const first = new GitMirror('example', 'ios', {
+    stateDirectory: fixture.stateDirectory,
+    remoteUrl: fixture.remoteUrl,
+    repositoryId: 11,
+  });
+  const replacement = new GitMirror('example', 'ios', {
+    stateDirectory: fixture.stateDirectory,
+    remoteUrl: fixture.remoteUrl,
+    repositoryId: 22,
+  });
+
+  assert.notEqual(first.mirrorPath, replacement.mirrorPath);
+  assert.notEqual(first.lockPath, replacement.lockPath);
+  await Promise.all([
+    first.refresh({ force: true }),
+    replacement.refresh({ force: true }),
+  ]);
+  assert.equal(
+    await output(['-C', first.mirrorPath, 'config', '--get', 'merge4appstore.repository']),
+    'id:11',
+  );
+  assert.equal(
+    await output(['-C', replacement.mirrorPath, 'config', '--get', 'merge4appstore.repository']),
+    'id:22',
   );
 });
 

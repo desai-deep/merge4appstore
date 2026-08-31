@@ -8,9 +8,15 @@ import {
   writeWebhookEnvironment,
 } from '../scripts/write-webhook-env.js';
 import {
+  GITHUB_APP_AUTH_OPTIONAL_NAMES,
+  GITHUB_APP_AUTH_SECRET_NAMES,
+  GITHUB_APP_WEBHOOK_SECRET_NAMES,
+  loadWebhookEnvironment,
   loadEnvironmentFile,
   parseEnvironment,
   serializeEncodedEnvironment,
+  validateWebhookEnvironment,
+  WEBHOOK_ENVIRONMENT_NAMES,
   WEBHOOK_SECRET_NAMES,
 } from '../lib/secret-environment.js';
 
@@ -19,6 +25,18 @@ const writerSource = fs.readFileSync(new URL('../scripts/write-webhook-env.js', 
 const values = {
   FIRST: 'dollar$ quote" apostrophe\' slash\\ equals= hash# spaces ',
   SECOND: 'plain-token',
+};
+
+const requiredWebhookEnvironment = Object.fromEntries(
+  WEBHOOK_SECRET_NAMES.map(name => [name, `${name}-value`]),
+);
+const githubAppEnvironment = {
+  GITHUB_APP_ID: '123',
+  GITHUB_APP_PRIVATE_KEY_BASE64: Buffer.from('private-key-fixture').toString('base64'),
+  GITHUB_INSTALLATION_ID: '456',
+  GITHUB_APP_WEBHOOK_SECRET: 'app-webhook-secret',
+  GITHUB_APP_WEBHOOK_MODE: 'shadow',
+  GITHUB_CLASSIC_WEBHOOKS_ENABLED: 'true',
 };
 
 test('round-trips webhook secrets through a dotenv-safe serialization', () => {
@@ -51,6 +69,78 @@ test('writes only to an existing regular file with private permissions', t => {
   const contents = fs.readFileSync(output);
   assert.equal(parseEnvironment(contents).GH_WEBHOOK_SECRET, 'github');
   assert.doesNotMatch(contents.toString('utf8'), /GH_WEBHOOK_SECRET=github/);
+});
+
+test('serializes complete optional GitHub App groups with the mandatory webhook secrets', () => {
+  const complete = { ...requiredWebhookEnvironment, ...githubAppEnvironment };
+  const parsed = parseEnvironment(serializeWebhookEnvironment(complete));
+  assert.deepEqual(parsed, complete);
+  assert.deepEqual(WEBHOOK_ENVIRONMENT_NAMES, [
+    ...WEBHOOK_SECRET_NAMES,
+    ...GITHUB_APP_AUTH_SECRET_NAMES,
+    ...GITHUB_APP_AUTH_OPTIONAL_NAMES,
+    ...GITHUB_APP_WEBHOOK_SECRET_NAMES,
+  ]);
+});
+
+test('validates staged GitHub App authentication and safe webhook cutover combinations', () => {
+  assert.deepEqual(validateWebhookEnvironment({ ...requiredWebhookEnvironment }), requiredWebhookEnvironment);
+  assert.deepEqual(validateWebhookEnvironment({
+    ...requiredWebhookEnvironment,
+    GITHUB_APP_ID: githubAppEnvironment.GITHUB_APP_ID,
+    GITHUB_APP_PRIVATE_KEY_BASE64: githubAppEnvironment.GITHUB_APP_PRIVATE_KEY_BASE64,
+  }).GITHUB_APP_ID, '123');
+
+  assert.throws(() => validateWebhookEnvironment({
+    ...requiredWebhookEnvironment,
+    GITHUB_APP_ID: '123',
+  }), /authentication must be configured all-or-none/);
+  assert.throws(() => validateWebhookEnvironment({
+    ...requiredWebhookEnvironment,
+    GITHUB_INSTALLATION_ID: '456',
+  }), /requires complete GitHub App authentication/);
+  assert.throws(() => validateWebhookEnvironment({
+    ...requiredWebhookEnvironment,
+    ...githubAppEnvironment,
+    GITHUB_APP_WEBHOOK_SECRET: '',
+  }), /webhook cutover must be configured all-or-none/);
+  assert.throws(() => validateWebhookEnvironment({
+    ...requiredWebhookEnvironment,
+    ...githubAppEnvironment,
+    GITHUB_CLASSIC_WEBHOOKS_ENABLED: 'false',
+  }), /shadow mode requires classic webhooks to remain enabled/);
+  assert.throws(() => validateWebhookEnvironment({
+    ...requiredWebhookEnvironment,
+    ...githubAppEnvironment,
+    GITHUB_APP_WEBHOOK_MODE: 'managed',
+  }), /managed mode requires classic webhooks to be disabled/);
+  assert.doesNotThrow(() => validateWebhookEnvironment({
+    ...requiredWebhookEnvironment,
+    ...githubAppEnvironment,
+    GITHUB_APP_WEBHOOK_MODE: 'managed',
+    GITHUB_CLASSIC_WEBHOOKS_ENABLED: 'false',
+  }));
+});
+
+test('loads the validated webhook schema only from an explicit absolute path', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'webhook-env-explicit-'));
+  const output = path.join(directory, 'webhook.env');
+  const complete = { ...requiredWebhookEnvironment, ...githubAppEnvironment };
+  fs.writeFileSync(output, serializeEncodedEnvironment(complete, Object.keys(complete)), { mode: 0o600 });
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  const environment = { GITHUB_APP_ID: 'stale' };
+  assert.deepEqual(loadWebhookEnvironment(output, { environment }), complete);
+  assert.equal(environment.GITHUB_APP_ID, '123');
+  assert.deepEqual(loadWebhookEnvironment(undefined, { environment: {} }), {});
+  assert.throws(
+    () => loadWebhookEnvironment(undefined, { environment: {}, required: true }),
+    /MERGE4APPSTORE_WEBHOOK_ENV is required/,
+  );
+  assert.throws(
+    () => loadWebhookEnvironment('relative.env', { environment: {} }),
+    /must be an absolute path/,
+  );
 });
 
 test('validates the opened output inode before truncating it', () => {

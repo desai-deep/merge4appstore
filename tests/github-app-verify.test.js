@@ -27,13 +27,13 @@ function fakeAuthenticator(permissions) {
   };
 }
 
-test('verifies repository identity and permissions without exposing a token', async () => {
+test('verifies immutable repository identity and permissions without exposing a token', async () => {
   const auth = fakeAuthenticator({
     metadata: 'read',
     contents: 'read',
     pull_requests: 'read',
   });
-  const result = await verifyGitHubAppInstallation(auth, 'example', 'ios');
+  const result = await verifyGitHubAppInstallation(auth, 'example', 'ios', { repositoryId: 11 });
   assert.deepEqual(result, {
     ok: true,
     repository: 'example/ios',
@@ -47,6 +47,22 @@ test('verifies repository identity and permissions without exposing a token', as
     write_tag_check: 'not-requested',
   });
   assert.equal(JSON.stringify(result).includes('installation-token'), false);
+  assert.deepEqual(auth.calls[0].options, {
+    token: 'installation-token',
+    signal: null,
+  });
+});
+
+test('fails closed when GitHub returns a different immutable repository id', async () => {
+  const auth = fakeAuthenticator({
+    metadata: 'read',
+    contents: 'read',
+    pull_requests: 'read',
+  });
+  await assert.rejects(
+    verifyGitHubAppInstallation(auth, 'example', 'ios', { repositoryId: 12 }),
+    /returned repository id 11; expected 12/,
+  );
 });
 
 test('creates and deletes a unique verification tag only when explicitly requested', async () => {
