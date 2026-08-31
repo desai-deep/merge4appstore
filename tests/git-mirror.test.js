@@ -139,6 +139,30 @@ test('prewarms a missing mirror with one lock and no redundant post-clone fetch'
   });
 });
 
+test('fetches a requested head that lands after the initial clone snapshot', async t => {
+  const fixture = await createRepository(t);
+  const requestedHead = await commit(fixture.source, 'Post-clone change', 'post-clone');
+  let pushedRequestedHead = false;
+  let fetchCalls = 0;
+  const mirror = new GitMirror('example', 'post-clone-head', {
+    stateDirectory: fixture.stateDirectory,
+    remoteUrl: fixture.remoteUrl,
+    run: async (args, options) => {
+      const result = await git(args, options);
+      if (args.includes('clone') && !pushedRequestedHead) {
+        await git(['-C', fixture.source, 'push', 'origin', 'main']);
+        pushedRequestedHead = true;
+      }
+      if (args.includes('fetch')) fetchCalls += 1;
+      return result;
+    },
+  });
+
+  await mirror.refresh({ force: true, headCommit: requestedHead });
+  assert.equal(fetchCalls, 1);
+  assert.equal(await mirror.getCommitSubject(requestedHead), 'Post-clone change');
+});
+
 test('coalesces forced initialization failures behind one backoff window', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge4appstore-forced-backoff-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -177,6 +201,97 @@ test('coalesces forced initialization failures behind one backoff window', async
     assert.equal(result.reason.retryAfter, 60);
   }
   assert.equal(cloneCalls, 1);
+
+  await assert.rejects(
+    mirror.refresh({ force: true }),
+    error => error.statusCode === 503 && error.retryAfter === 60,
+  );
+  assert.equal(cloneCalls, 1);
+});
+
+test('coalesces unvalidated mirror verification failures behind initialization backoff', async t => {
+  const fixture = await createRepository(t);
+  const seed = new GitMirror('example', 'verification-backoff', {
+    stateDirectory: fixture.stateDirectory,
+    remoteUrl: fixture.remoteUrl,
+  });
+  await seed.refresh({ force: true });
+
+  const now = 10_000;
+  let verificationCalls = 0;
+  let releaseVerification;
+  let announceVerification;
+  const verificationStarted = new Promise(resolve => {
+    announceVerification = resolve;
+  });
+  const mirror = new GitMirror('example', 'verification-backoff', {
+    stateDirectory: fixture.stateDirectory,
+    remoteUrl: fixture.remoteUrl,
+    retryBackoffMs: 60_000,
+    now: () => now,
+    run: async (args, options) => {
+      if (args.includes('fsck')) {
+        verificationCalls += 1;
+        announceVerification();
+        await new Promise(resolve => {
+          releaseVerification = resolve;
+        });
+        const error = new Error('connectivity verification timed out');
+        error.code = null;
+        throw error;
+      }
+      return git(args, options);
+    },
+  });
+
+  const first = mirror.refresh({ force: true });
+  await verificationStarted;
+  const second = mirror.refresh({ force: true });
+  releaseVerification();
+  const results = await Promise.allSettled([first, second]);
+  assert.equal(results.every(result => (
+    result.status === 'rejected'
+      && result.reason.statusCode === 503
+      && result.reason.retryAfter === 60
+  )), true);
+  assert.equal(verificationCalls, 1);
+
+  await assert.rejects(
+    mirror.refresh({ headCommit: fixture.headCommit }),
+    error => error.statusCode === 503 && error.retryAfter === 60,
+  );
+  assert.equal(verificationCalls, 1);
+});
+
+test('does not clone twice when temporary-clone connectivity is corrupt', async t => {
+  const fixture = await createRepository(t);
+  const now = 10_000;
+  let cloneCalls = 0;
+  let temporaryConnectivityCalls = 0;
+  const mirror = new GitMirror('example', 'temporary-clone-corruption', {
+    stateDirectory: fixture.stateDirectory,
+    remoteUrl: fixture.remoteUrl,
+    retryBackoffMs: 60_000,
+    now: () => now,
+    run: async (args, options) => {
+      if (args.includes('clone')) cloneCalls += 1;
+      if (args.includes('fsck') && args[1]?.includes('.tmp-')) {
+        temporaryConnectivityCalls += 1;
+        const error = new Error('temporary clone connectivity is corrupt');
+        error.code = 1;
+        error.stderr = `missing tree ${'a'.repeat(40)}`;
+        throw error;
+      }
+      return git(args, options);
+    },
+  });
+
+  await assert.rejects(
+    mirror.refresh({ force: true }),
+    error => error.statusCode === 503 && error.retryAfter === 60,
+  );
+  assert.equal(cloneCalls, 1);
+  assert.equal(temporaryConnectivityCalls, 1);
 
   await assert.rejects(
     mirror.refresh({ force: true }),
