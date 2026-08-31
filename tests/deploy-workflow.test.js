@@ -1514,7 +1514,15 @@ test('hands PM2 releases over only after the new immutable generation validates'
   const start = events.find(event => event.startsWith('pm2:<start>'));
   assert.ok(start, result.stdout);
   assert.match(deployScript, /PM2_START_TIMEOUT_SECONDS=75/);
-  assert.match(deployScript, /timeout --kill-after=10s/);
+  const pm2StartCommand = deployScript.slice(
+    deployScript.indexOf('run_timed_command start_elapsed_seconds'),
+    deployScript.indexOf('if ! PM2_START_ELAPSED_SECONDS'),
+  );
+  const outerTimeout = pm2StartCommand.indexOf(
+    'timeout --kill-after=10s "${PM2_START_TIMEOUT_SECONDS}s"',
+  );
+  const pm2Start = pm2StartCommand.indexOf('pm2 start webhook-server.js');
+  assert.ok(outerTimeout >= 0 && outerTimeout < pm2Start, pm2StartCommand);
   for (const expectedArgument of [
     'webhook-server.js',
     '--name',
