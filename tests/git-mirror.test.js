@@ -359,18 +359,35 @@ test('shares forced pre-validation metadata failures with later initialization c
     now: () => now,
   });
   let metadataCalls = 0;
+  let announceMetadata;
+  const metadataStarted = new Promise(resolve => {
+    announceMetadata = resolve;
+  });
+  let releaseMetadata;
+  const metadataBlocked = new Promise(resolve => {
+    releaseMetadata = resolve;
+  });
   mirror.getLastRefreshAt = async () => {
     metadataCalls += 1;
+    announceMetadata();
+    await metadataBlocked;
     const error = new Error('mirror refresh stamp is temporarily unreadable');
     error.code = 'EIO';
     throw error;
   };
 
-  let firstFailure;
-  await assert.rejects(mirror.refresh({ force: true }), error => {
-    firstFailure = error;
-    return error.statusCode === 503 && error.retryAfter === 60;
-  });
+  const first = mirror.refresh({ force: true });
+  await metadataStarted;
+  const second = mirror.refresh({ force: true });
+  releaseMetadata();
+  const results = await Promise.allSettled([first, second]);
+  assert.equal(results.every(result => (
+    result.status === 'rejected'
+      && result.reason.statusCode === 503
+      && result.reason.retryAfter === 60
+  )), true);
+  const firstFailure = results[0].reason;
+  assert.equal(results[1].reason, firstFailure);
   assert.equal(mirror.retryAt, now + 60_000);
   assert.equal(mirror.lastFailure, firstFailure);
   assert.equal(metadataCalls, 1);
