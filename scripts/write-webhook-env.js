@@ -4,14 +4,22 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  selectWebhookEnvironment,
   serializeEncodedEnvironment,
+} from '../lib/secret-environment.js';
+
+export {
+  GITHUB_APP_AUTH_OPTIONAL_NAMES,
+  GITHUB_APP_AUTH_SECRET_NAMES,
+  GITHUB_APP_WEBHOOK_SECRET_NAMES,
+  WEBHOOK_ENVIRONMENT_NAMES,
   WEBHOOK_SECRET_NAMES,
 } from '../lib/secret-environment.js';
 
-export { WEBHOOK_SECRET_NAMES } from '../lib/secret-environment.js';
-
-export function serializeWebhookEnvironment(environment, names = WEBHOOK_SECRET_NAMES) {
-  return serializeEncodedEnvironment(environment, names);
+export function serializeWebhookEnvironment(environment, names = null) {
+  if (names) return serializeEncodedEnvironment(environment, names);
+  const selected = selectWebhookEnvironment(environment);
+  return serializeEncodedEnvironment(selected, Object.keys(selected));
 }
 
 export function writeWebhookEnvironment(outputPath, environment = process.env) {

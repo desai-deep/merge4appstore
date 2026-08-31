@@ -5,6 +5,7 @@ import test from 'node:test';
 import {
   GitHubAppAuthenticator,
   assertGitHubAppPermissions,
+  createGitHubEnvironmentProvider,
   githubAuthenticationSettings,
   githubEnvironmentForRepository,
 } from '../lib/github-app-auth.js';
@@ -30,6 +31,20 @@ test('accepts either a raw or base64-encoded GitHub App private key', () => {
   });
   assert.equal(raw.privateKey, privateKeyPem);
   assert.equal(encoded.privateKey, privateKeyPem);
+  assert.throws(() => githubAuthenticationSettings({
+    GITHUB_APP_ID: '123',
+    GITHUB_APP_PRIVATE_KEY: privateKeyPem,
+    GITHUB_APP_PRIVATE_KEY_BASE64: Buffer.from(privateKeyPem).toString('base64'),
+  }), /only one/);
+});
+
+test('rejects malformed and non-canonical private-key base64', () => {
+  for (const value of ['%%%', 'YQ', 'YR==', `${Buffer.from(privateKeyPem).toString('base64')}\n`]) {
+    assert.throws(() => githubAuthenticationSettings({
+      GITHUB_APP_ID: '123',
+      GITHUB_APP_PRIVATE_KEY_BASE64: value,
+    }), /canonical base64/);
+  }
 });
 
 test('rejects partial GitHub App configuration instead of falling back to a PAT', () => {
@@ -172,6 +187,43 @@ test('times out a stalled GitHub API request', async () => {
   await assert.rejects(auth.request('/app'), /timed out after 1ms/);
 });
 
+test('keeps the timeout active while reading the GitHub response body', async () => {
+  const auth = new GitHubAppAuthenticator({
+    appId: '123',
+    privateKey: privateKeyPem,
+    requestTimeoutMs: 1,
+    fetchImpl: async (_url, options) => ({
+      ok: true,
+      text: async () => new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(new Error('aborted')));
+      }),
+    }),
+  });
+  await assert.rejects(auth.request('/app'), /timed out after 1ms/);
+});
+
+test('lets a caller cancel token acquisition without cancelling shared bounded work', async () => {
+  let release;
+  const response = new Promise(resolve => { release = resolve; });
+  const auth = new GitHubAppAuthenticator({
+    appId: '123',
+    privateKey: privateKeyPem,
+    installationId: '456',
+    fetchImpl: async () => response,
+  });
+  const controller = new AbortController();
+  const reason = new Error('repository deadline reached');
+  const pending = auth.installationToken('example', 'ios', { signal: controller.signal });
+  controller.abort(reason);
+  await assert.rejects(pending, error => error === reason);
+  release(jsonResponse({
+    token: 'eventual-token',
+    expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+  }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal((await auth.installationToken('example', 'ios')).token, 'eventual-token');
+});
+
 test('single-flights and caches installation token refreshes', async () => {
   let requests = 0;
   let now = Date.parse('2026-08-30T00:00:00Z');
@@ -203,6 +255,204 @@ test('single-flights and caches installation token refreshes', async () => {
   assert.equal(requests, 2);
 });
 
+test('uses immutable repository IDs for discovery and token isolation', async () => {
+  const requests = [];
+  const auth = new GitHubAppAuthenticator({
+    appId: '123',
+    privateKey: privateKeyPem,
+    now: () => Date.parse('2026-08-30T00:00:00Z'),
+    fetchImpl: async (url, options) => {
+      requests.push({ url, body: options.body && JSON.parse(options.body) });
+      if (url.endsWith('/repositories/11/installation')) return jsonResponse({ id: 456 });
+      if (url.endsWith('/repositories/22/installation')) return jsonResponse({ id: 456 });
+      const repositoryId = JSON.parse(options.body).repository_ids[0];
+      return jsonResponse({
+        token: `token-for-${repositoryId}`,
+        expires_at: '2026-08-30T01:00:00Z',
+      });
+    },
+  });
+
+  const [first, second] = await Promise.all([
+    auth.installationToken('example', 'renamed-one', { repositoryId: 11 }),
+    auth.installationToken('example', 'renamed-two', { repositoryId: 22 }),
+  ]);
+  assert.equal(first.token, 'token-for-11');
+  assert.equal(second.token, 'token-for-22');
+  assert.deepEqual(
+    requests.filter(request => request.body).map(request => request.body)
+      .sort((left, right) => left.repository_ids[0] - right.repository_ids[0]),
+    [{ repository_ids: [11] }, { repository_ids: [22] }],
+  );
+  assert.ok(requests.some(request => request.url.endsWith('/repositories/11/installation')));
+  assert.ok(requests.some(request => request.url.endsWith('/repositories/22/installation')));
+  await assert.rejects(
+    auth.installationToken('example', 'unsafe', { repositoryId: '9007199254740992' }),
+    /safe positive integer/,
+  );
+  await assert.rejects(
+    auth.installationToken('example', 'unsafe', { repositoryId: 0 }),
+    /positive integer/,
+  );
+});
+
+test('refreshable providers rotate App tokens without changing repository scope', async () => {
+  let now = Date.parse('2026-08-30T00:00:00Z');
+  let requests = 0;
+  const authenticator = new GitHubAppAuthenticator({
+    appId: '123',
+    privateKey: privateKeyPem,
+    installationId: '456',
+    now: () => now,
+    fetchImpl: async (_url, options) => {
+      requests += 1;
+      assert.deepEqual(JSON.parse(options.body), { repository_ids: [11] });
+      return jsonResponse({
+        token: `rotating-${requests}`,
+        expires_at: new Date(now + 60 * 60 * 1000).toISOString(),
+      });
+    },
+  });
+  const provider = createGitHubEnvironmentProvider('example', 'ios', {
+    environment: { PATH: '/bin', GH_TOKEN: 'fallback' },
+    authenticator,
+    repositoryId: 11,
+  });
+
+  assert.equal((await provider()).GH_TOKEN, 'rotating-1');
+  now += 56 * 60 * 1000;
+  assert.equal((await provider()).GH_TOKEN, 'rotating-2');
+  assert.equal(requests, 2);
+});
+
+test('repository installation verification invalidates a stale mismatch once', async () => {
+  let discoveries = 0;
+  const auth = new GitHubAppAuthenticator({
+    appId: '123',
+    privateKey: privateKeyPem,
+    installationId: '222',
+    fetchImpl: async url => {
+      assert.match(url, /\/repositories\/11\/installation$/);
+      discoveries += 1;
+      return jsonResponse({ id: discoveries === 1 ? 111 : 222 });
+    },
+  });
+
+  assert.equal(await auth.verifyRepositoryInstallation('example', 'ios', {
+    repositoryId: 11,
+    expectedInstallationId: 222,
+  }), '222');
+  assert.equal(discoveries, 2);
+});
+
+test('classifies a confirmed repository installation mismatch as forbidden', async () => {
+  const auth = new GitHubAppAuthenticator({
+    appId: '123',
+    privateKey: privateKeyPem,
+    fetchImpl: async () => jsonResponse({ id: 111 }),
+  });
+
+  await assert.rejects(
+    auth.verifyRepositoryInstallation('example', 'ios', {
+      repositoryId: 11,
+      expectedInstallationId: 222,
+    }),
+    error => error.code === 'EINSTALLATIONMISMATCH' && error.statusCode === 403,
+  );
+});
+
+test('repository installation discovery expires so reinstallations can converge', async () => {
+  let now = 1_000;
+  let discoveries = 0;
+  const auth = new GitHubAppAuthenticator({
+    appId: '123',
+    privateKey: privateKeyPem,
+    now: () => now,
+    installationCacheTtlMs: 100,
+    fetchImpl: async () => jsonResponse({ id: ++discoveries }),
+  });
+  assert.equal(await auth.resolveInstallation('example', 'ios', { repositoryId: 11 }), '1');
+  assert.equal(await auth.resolveInstallation('example', 'ios', { repositoryId: 11 }), '1');
+  now += 101;
+  assert.equal(await auth.resolveInstallation('example', 'ios', { repositoryId: 11 }), '2');
+  assert.equal(discoveries, 2);
+});
+
+test('does not reuse a still-valid token after repository installation ownership changes', async () => {
+  let now = Date.parse('2026-08-30T00:00:00Z');
+  let discoveries = 0;
+  const minted = [];
+  const auth = new GitHubAppAuthenticator({
+    appId: '123',
+    privateKey: privateKeyPem,
+    now: () => now,
+    installationCacheTtlMs: 100,
+    fetchImpl: async (url, options) => {
+      const pathname = new URL(url).pathname;
+      if (pathname === '/repositories/11/installation') {
+        discoveries += 1;
+        return jsonResponse({ id: discoveries === 1 ? 111 : 222 });
+      }
+      const installationId = pathname.split('/')[3];
+      minted.push(installationId);
+      assert.deepEqual(JSON.parse(options.body), { repository_ids: [11] });
+      return jsonResponse({
+        token: `token-${installationId}`,
+        expires_at: new Date(now + 60 * 60 * 1000).toISOString(),
+      });
+    },
+  });
+
+  assert.equal(
+    (await auth.installationToken('example', 'ios', { repositoryId: 11 })).token,
+    'token-111',
+  );
+  now += 101;
+  assert.equal(
+    (await auth.installationToken('example', 'ios', { repositoryId: 11 })).token,
+    'token-222',
+  );
+  assert.deepEqual(minted, ['111', '222']);
+});
+
+test('rediscovers once when a cached installation can no longer mint a repository token', async () => {
+  const paths = [];
+  let discoveries = 0;
+  const auth = new GitHubAppAuthenticator({
+    appId: '123',
+    privateKey: privateKeyPem,
+    now: () => Date.parse('2026-08-30T00:00:00Z'),
+    fetchImpl: async url => {
+      const pathname = new URL(url).pathname;
+      paths.push(pathname);
+      if (pathname === '/repositories/11/installation') {
+        discoveries += 1;
+        return jsonResponse({ id: discoveries === 1 ? 111 : 222 });
+      }
+      if (pathname === '/app/installations/111/access_tokens') {
+        return jsonResponse({ message: 'Not Found' }, 404);
+      }
+      assert.equal(pathname, '/app/installations/222/access_tokens');
+      return jsonResponse({
+        token: 'replacement-installation-token',
+        expires_at: '2026-08-30T01:00:00Z',
+      });
+    },
+  });
+
+  const credential = await auth.installationToken('example', 'ios', { repositoryId: 11 });
+  assert.equal(credential.installationId, '222');
+  assert.equal(credential.token, 'replacement-installation-token');
+  assert.deepEqual(paths, [
+    '/repositories/11/installation',
+    '/app/installations/111/access_tokens',
+    '/repositories/11/installation',
+    '/app/installations/222/access_tokens',
+  ]);
+  assert.equal((await auth.installationToken('example', 'ios', { repositoryId: 11 })).token,
+    'replacement-installation-token');
+});
+
 test('injects the installation token only into the repository client environment', async () => {
   const authenticator = {
     environmentForRepository: async (owner, repository, environment) => ({
@@ -227,4 +477,19 @@ test('preserves the existing PAT environment when App credentials are absent', a
     await githubEnvironmentForRepository('example', 'ios', environment),
     environment,
   );
+});
+
+test('strict environment providers preserve PAT fallback and reject missing credentials', async () => {
+  const provider = createGitHubEnvironmentProvider('example', 'ios', {
+    environment: { GH_TOKEN: 'pat', PATH: '/bin' },
+  });
+  assert.deepEqual(await provider(), { GH_TOKEN: 'pat', PATH: '/bin' });
+  assert.throws(
+    () => createGitHubEnvironmentProvider('example', 'ios', { environment: { PATH: '/bin' } }),
+    /GH_TOKEN is required/,
+  );
+  assert.throws(() => createGitHubEnvironmentProvider('example', 'ios', {
+    environment: { GH_TOKEN: 'pat' },
+    repositoryId: 0,
+  }), /positive integer/);
 });

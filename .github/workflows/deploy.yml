@@ -271,6 +271,8 @@ jobs:
               [ "${#mirrors[@]}" -gt 0 ] || { echo "No Git mirrors are initialized"; exit 1; }
               jams_mirrors=0
               runningorder_mirrors=0
+              legacy_jams_mirrors=0
+              legacy_runningorder_mirrors=0
               for mirror in "${mirrors[@]}"; do
                 [ -d "$mirror" ] && [ ! -L "$mirror" ] && [ -O "$mirror" ] \
                   && [ "$(stat -c '%a' "$mirror")" = 700 ] \
@@ -280,11 +282,17 @@ jobs:
                 identity="$(git -C "$mirror" config --get merge4appstore.repository)"
                 origin="$(git -C "$mirror" remote get-url origin)"
                 case "$identity|$origin" in
-                  desai-deep/jamsontoast\|https://github.com/desai-deep/JamsOnToast.git)
+                  id:390842121\|https://github.com/desai-deep/JamsOnToast.git)
                     jams_mirrors="$((jams_mirrors + 1))"
                     ;;
-                  desai-deep/runningorder-ios\|https://github.com/desai-deep/runningorder-ios.git)
+                  id:789442740\|https://github.com/desai-deep/runningorder-ios.git)
                     runningorder_mirrors="$((runningorder_mirrors + 1))"
+                    ;;
+                  desai-deep/jamsontoast\|https://github.com/desai-deep/JamsOnToast.git)
+                    legacy_jams_mirrors="$((legacy_jams_mirrors + 1))"
+                    ;;
+                  desai-deep/runningorder-ios\|https://github.com/desai-deep/runningorder-ios.git)
+                    legacy_runningorder_mirrors="$((legacy_runningorder_mirrors + 1))"
                     ;;
                   *) echo "Git mirror identity or credential-free origin is unexpected"; exit 1 ;;
                 esac
@@ -299,13 +307,78 @@ jobs:
                   timeout --kill-after=5s 30s git -C "$mirror" fsck --connectivity-only --no-dangling
                 echo "git_mirror=$identity:ready"
               done
-              [ "$jams_mirrors" -eq 1 ] && [ "$runningorder_mirrors" -eq 1 ] \
-                || { echo "Expected exactly one ready mirror for each configured repository"; exit 1; }
+              [ "$jams_mirrors" -le 1 ] && [ "$runningorder_mirrors" -le 1 ] \
+                && [ "$legacy_jams_mirrors" -le 1 ] && [ "$legacy_runningorder_mirrors" -le 1 ] \
+                || { echo "Duplicate Git mirrors are present"; exit 1; }
+              if [ "$jams_mirrors" -eq 1 ] && [ "$runningorder_mirrors" -eq 1 ]; then
+                : # ID-keyed mirrors are ready; one legacy mirror per repository may remain during migration.
+              elif [ "$jams_mirrors" -eq 0 ] && [ "$runningorder_mirrors" -eq 0 ] \
+                && [ "$legacy_jams_mirrors" -eq 1 ] && [ "$legacy_runningorder_mirrors" -eq 1 ]; then
+                echo "git_mirrors=legacy-identities-ready"
+              else
+                echo "Expected exactly one ready mirror for each configured repository"
+                exit 1
+              fi
             }
             # Keep this as a simple command under errexit. Wrapping the call in
             # `!` or `||` would disable errexit inside the function and could
             # let a bare Git validation failure continue.
             inspect_git_mirrors
+            inspect_webhook_environment() {
+              current_pointer="$state_dir/current"
+              if [ ! -e "$current_pointer" ] && [ ! -L "$current_pointer" ]; then
+                echo "webhook_environment=not-yet-installed"
+                return
+              fi
+              [ -L "$current_pointer" ] || { echo "Current release pointer is not a symlink"; return 1; }
+              current_release="$(readlink -f -- "$current_pointer")" \
+                || { echo "Current release pointer is dangling"; return 1; }
+              case "$current_release" in "$state_dir/releases/"*) ;; *) echo "Current release escapes the private releases directory"; return 1 ;; esac
+              active_webhook_pointer="$state_dir/current-webhook.env"
+              [ -L "$active_webhook_pointer" ] \
+                || { echo "Active webhook environment pointer is not a symlink"; return 1; }
+              active_webhook_environment="$(readlink -f -- "$active_webhook_pointer")" \
+                || { echo "Active webhook environment pointer is dangling"; return 1; }
+              case "$active_webhook_environment" in "$state_dir/secrets/"*) ;; *) echo "Active webhook environment escapes the private secrets directory"; return 1 ;; esac
+              [ -f "$active_webhook_environment" ] && [ ! -L "$active_webhook_environment" ] \
+                && [ -O "$active_webhook_environment" ] \
+                && [ "$(stat -c '%a' "$active_webhook_environment")" = "600" ] \
+                || { echo "Active webhook environment is unsafe"; return 1; }
+              control_webhook_environment="$DEPLOY_DIR/.webhook.env"
+              if [ -L "$control_webhook_environment" ]; then
+                webhook_environment="$(readlink -f -- "$control_webhook_environment")" \
+                  || { echo "Webhook environment pointer is dangling"; return 1; }
+                case "$webhook_environment" in "$state_dir/secrets/"*) ;; *) echo "Webhook environment escapes the private secrets directory"; return 1 ;; esac
+                [ "$webhook_environment" = "$active_webhook_environment" ] \
+                  || { echo "Control webhook environment does not select the active runtime secret"; return 1; }
+              else
+                [ -f "$control_webhook_environment" ] && [ -O "$control_webhook_environment" ] \
+                  || { echo "Webhook environment control file is unsafe"; return 1; }
+                [ "$(stat -c '%a' "$control_webhook_environment")" = "600" ] \
+                  || { echo "Webhook environment control file is not private"; return 1; }
+                webhook_environment="$control_webhook_environment"
+              fi
+              validate_inspected_webhook_environment() {
+                ENVIRONMENT_FILE="$1" RELEASE_DIRECTORY="$current_release" \
+                  node --input-type=module -e '
+                  import path from "node:path";
+                  import { pathToFileURL } from "node:url";
+                  const module = await import(pathToFileURL(path.join(process.env.RELEASE_DIRECTORY, "lib/secret-environment.js")));
+                  const parsed = module.readEnvironmentFile(process.env.ENVIRONMENT_FILE);
+                  if (typeof module.validateWebhookEnvironment === "function") {
+                    module.validateWebhookEnvironment(parsed);
+                  } else {
+                    module.validateEnvironmentNames(parsed, module.WEBHOOK_SECRET_NAMES, { requireAll: true });
+                  }
+                '
+              }
+              validate_inspected_webhook_environment "$active_webhook_environment"
+              if [ "$webhook_environment" != "$active_webhook_environment" ]; then
+                validate_inspected_webhook_environment "$webhook_environment"
+              fi
+              echo "webhook_environment=validated"
+            }
+            inspect_webhook_environment
             node_binary="$(readlink -f -- "$(command -v node)")"
             pm2_home="${PM2_HOME:-$HOME/.pm2}"
             pm2_unit="${MERGE4APPSTORE_PM2_STARTUP_UNIT:-pm2-$(id -un).service}"

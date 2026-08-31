@@ -14,11 +14,13 @@ function pull(number, overrides = {}) {
   };
 }
 
-test('rebases every updatable pull request and skips conflicts and API failures', () => {
+test('rebases every updatable pull request and skips conflicts and API failures', async () => {
   const rebased = [];
   const comments = [];
   const logs = [];
+  let refreshes = 0;
   const github = {
+    refreshEnvironment: async () => { refreshes += 1; },
     listOpenPullRequests: () => [
       pull(1),
       pull(2, { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' }),
@@ -36,7 +38,7 @@ test('rebases every updatable pull request and skips conflicts and API failures'
     },
   };
 
-  assert.deepEqual(rebaseOpenPullRequests(github, 'develop', false, message => logs.push(message)), [
+  assert.deepEqual(await rebaseOpenPullRequests(github, 'develop', false, message => logs.push(message)), [
     { number: 1, action: 'rebased', url: 'https://github.test/pull/1' },
     { number: 2, action: 'skipped', reason: 'conflicted' },
     { number: 3, action: 'skipped', reason: 'not_updatable' },
@@ -56,9 +58,10 @@ test('rebases every updatable pull request and skips conflicts and API failures'
   assert.match(comments[1][2], /onto `develop`/);
   assert.match(logs.join('\n'), /Skipping conflicted pull request #2/);
   assert.match(logs.join('\n'), /Skipping pull request #3: Branch update is not allowed/);
+  assert.equal(refreshes, 5);
 });
 
-test('dry run reports rebases without updating branches', () => {
+test('dry run reports rebases without updating branches', async () => {
   let updated = false;
   let commented = false;
   const github = {
@@ -70,7 +73,7 @@ test('dry run reports rebases without updating branches', () => {
     upsertPRComment: () => { commented = true; },
   };
 
-  assert.deepEqual(rebaseOpenPullRequests(github, 'develop', true), [
+  assert.deepEqual(await rebaseOpenPullRequests(github, 'develop', true), [
     { number: 8, action: 'would_rebase' },
     { number: 9, action: 'skipped', reason: 'conflicted' },
   ]);
@@ -78,7 +81,7 @@ test('dry run reports rebases without updating branches', () => {
   assert.equal(commented, false);
 });
 
-test('a comment failure does not prevent remaining pull requests from rebasing', () => {
+test('a comment failure does not prevent remaining pull requests from rebasing', async () => {
   const rebased = [];
   const logs = [];
   const github = {
@@ -93,7 +96,33 @@ test('a comment failure does not prevent remaining pull requests from rebasing',
     },
   };
 
-  rebaseOpenPullRequests(github, 'develop', false, message => logs.push(message));
+  await rebaseOpenPullRequests(github, 'develop', false, message => logs.push(message));
   assert.deepEqual(rebased, ['PR_11']);
   assert.match(logs.join('\n'), /could not comment on pull request #10/);
+});
+
+test('a credential refresh failure aborts the rebase phase for retry', async () => {
+  const rebased = [];
+  const comments = [];
+  let refreshes = 0;
+  const github = {
+    refreshEnvironment: async () => {
+      refreshes += 1;
+      if (refreshes === 3) throw new Error('GitHub App token refresh failed');
+    },
+    listOpenPullRequests: () => [pull(12), pull(13)],
+    rebasePullRequest: id => {
+      rebased.push(id);
+      return { url: `https://github.test/pull/${id.slice(3)}` };
+    },
+    upsertPRComment: (...args) => comments.push(args),
+  };
+
+  await assert.rejects(
+    rebaseOpenPullRequests(github, 'develop'),
+    /GitHub App token refresh failed/,
+  );
+  assert.equal(refreshes, 3);
+  assert.deepEqual(rebased, ['PR_12']);
+  assert.deepEqual(comments, []);
 });
