@@ -642,18 +642,21 @@ room for the journal, mirrors, delivery receipts, dependencies, and bounded
 logs instead of discovering a full disk during cutover.
 
 The workflow retries idempotent GitHub, authenticated version, and public
-health probes with bounded exponential backoff. Before cutover, it prewarms
-every configured Git mirror sequentially with longer Git-command, fetch, and
-clone budgets. Each repository has a nine-minute deadline and one retry after
-a mirror reports a transient `503`; request-time mirror initialization is never
-retried.
-Runtime mirror lock contention falls back after five seconds, while prewarming
-can wait up to 60 seconds for an active mutation to finish. An
-exhausted or permanent mirror failure rejects the candidate while the previous
-production release remains selected, so the deployment-alert issue makes the
-degraded optimization visible; rerun the failed workflow after the reported
-cause clears. Runtime requests retain the shorter mirror-command budget and
-safe provider fallback.
+health probes with bounded exponential backoff. Deployment deliberately does
+not prewarm Git mirrors or execute release-operation dry runs: transient Git or
+App Store availability must not prevent a candidate from serving durable work
+and its already-cached marketing versions. The exact candidate still has to
+pass the complete CI suite, packaged-profile validation, process health, and
+authenticated version smokes before cutover.
+
+`npm run prepare:mirrors` remains available as an explicit maintenance command.
+It prepares every configured mirror sequentially with longer Git-command,
+fetch, and clone budgets; each repository has a nine-minute deadline and one
+retry after a transient `503`. Runtime mirror lock contention falls back after
+five seconds, while maintenance prewarming can wait up to 60 seconds for an
+active mutation to finish. Runtime requests retain the shorter mirror-command
+budget and safe provider fallback, and failed release work remains in the
+durable delivery queue for retry.
 A persistent test/deploy failure opens a marked GitHub issue containing the
 Actions run and rerun instructions, without masking the failed job; a later
 successful deployment closes it. A separate five-minute workflow checks public
