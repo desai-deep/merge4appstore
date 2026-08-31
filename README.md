@@ -642,7 +642,7 @@ logs instead of discovering a full disk during cutover.
 The workflow retries idempotent GitHub, authenticated preparation, and public
 health probes with bounded exponential backoff. Before cutover, it prewarms
 every configured Git mirror sequentially with longer Git-command and clone
-budgets. Each repository has a six-minute deadline and one retry after a mirror
+budgets. Each repository has a seven-minute deadline and one retry after a mirror
 reports a transient `503`; request-time mirror initialization is never retried.
 Runtime lock contention falls back after five seconds rather than consuming the
 45-second request deadline, while prewarming can wait up to 60 seconds for an

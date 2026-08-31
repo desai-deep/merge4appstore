@@ -1534,7 +1534,7 @@ test('retries transient deployment probes with bounded diagnostics', () => {
   assert.match(deployScript, /attempt \$attempt\/\$max_attempts/);
 });
 
-test('aggregate mirror prewarm budget exceeds sequential clone and recovery budgets', () => {
+test('aggregate mirror prewarm budget exceeds sequential repository and retry budgets', () => {
   const outer = /timeout --kill-after=30s (\d+)m npm run prepare:mirrors/.exec(deployScript);
   const clone = /MERGE4APPSTORE_MIRROR_CLONE_TIMEOUT_MS,\s*defaultPrewarmNetworkTimeoutMs/.exec(prepareMirrorsScript);
   const command = /defaultPrewarmCommandTimeoutMs = ([\d_]+)/.exec(prepareMirrorsScript);
@@ -1570,10 +1570,10 @@ test('aggregate mirror prewarm budget exceeds sequential clone and recovery budg
   assert.ok(repositoryTimeoutMs > commandTimeoutMs);
   assert.ok(
     repositoryTimeoutMs
-      > prewarmLockTimeoutMs
-        + maximumAttempts
-        * Math.max(commandTimeoutMs, cloneTimeoutMs, fetchTimeoutMs)
-        + retryDelayMs,
+      > maximumAttempts
+        * (prewarmLockTimeoutMs
+          + Math.max(commandTimeoutMs, cloneTimeoutMs, fetchTimeoutMs))
+        + (maximumAttempts - 1) * retryDelayMs,
   );
 });
 

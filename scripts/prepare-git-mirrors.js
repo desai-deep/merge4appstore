@@ -19,7 +19,7 @@ function positiveInteger(value, fallback) {
 }
 
 const defaultPrewarmAttempts = 2;
-const defaultRepositoryTimeoutMs = 6 * 60_000;
+const defaultRepositoryTimeoutMs = 7 * 60_000;
 const defaultPrewarmCommandTimeoutMs = 60_000;
 const defaultPrewarmNetworkTimeoutMs = 120_000;
 const defaultPrewarmLockTimeoutMs = 60_000;

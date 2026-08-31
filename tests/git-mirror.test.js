@@ -62,6 +62,9 @@ test('keeps request-time mirror initialization within the steady-state command b
     MERGE4APPSTORE_MIRROR_LOCK_TIMEOUT_MS: '60000',
   }), 5_000);
   assert.equal(requestMirrorLockTimeoutMs({
+    MERGE4APPSTORE_MIRROR_LOCK_TIMEOUT_MS: '2500',
+  }), 2_500);
+  assert.equal(requestMirrorLockTimeoutMs({
     MERGE4APPSTORE_MIRROR_REQUEST_LOCK_TIMEOUT_MS: '60000',
     MERGE4APPSTORE_MIRROR_LOCK_TIMEOUT_MS: '1000',
   }), 5_000);
