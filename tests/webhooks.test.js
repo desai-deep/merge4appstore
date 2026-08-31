@@ -656,6 +656,25 @@ test('serves a profile-scoped version without repository or App Store lookups', 
   assert.equal((await accepted.text()).trim(), '1.1');
 });
 
+test('distinguishes a missing server token from invalid client authentication', async t => {
+  const environmentName = 'MERGE4APPSTORE_BUILD_TOKEN_EXAMPLE_IOS';
+  delete process.env[environmentName];
+  const server = createTestWebhookServer({
+    profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.address().port}/v1/builds/version/example-ios?workflow_id=wf-beta`,
+    { headers: { authorization: 'Bearer client-token' } },
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get('retry-after'), '30');
+  assert.deepEqual(await response.json(), { error: 'Version token is not configured' });
+});
+
 test('serves purpose-specific versions immediately after a durable transition', async t => {
   const environmentName = 'MERGE4APPSTORE_BUILD_TOKEN_EXAMPLE_IOS';
   process.env[environmentName] = 'version-secret';

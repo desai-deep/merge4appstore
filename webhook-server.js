@@ -641,7 +641,15 @@ export function createWebhookServer({
         if (!entry) return send(response, 404, { error: 'Unknown instance' });
         const settings = webhookSettings(entry.profile);
         const bearer = singleHeader(request.headers.authorization).replace(/^Bearer\s+/i, '');
-        if (!settings.versionToken || !safeEqual(bearer, settings.versionToken)) {
+        if (!settings.versionToken) {
+          return send(
+            response,
+            503,
+            { error: 'Version token is not configured' },
+            { 'retry-after': '30' },
+          );
+        }
+        if (!safeEqual(bearer, settings.versionToken)) {
           return send(response, 401, { error: 'Invalid version token' });
         }
         const resolved = await version(entry, url.searchParams.get('workflow_id') || '');
