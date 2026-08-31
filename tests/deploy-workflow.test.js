@@ -575,8 +575,8 @@ test('journals every mutating boundary and commits before legacy teardown', () =
   const cronPausing = main.indexOf('write_transaction_phase legacy-cron-pausing');
   const cronMutation = main.indexOf('pause_managed_cron "$transaction_dir/crontab.before"');
   const mirrorPreflight = main.indexOf('npm run prepare:mirrors');
-  const deployPreflight = main.indexOf('timeout --kill-after=30s 15m node index.js deploy --profile');
-  const expirePreflight = main.indexOf('timeout --kill-after=30s 15m node index.js expire --profile');
+  const deployPreflight = main.indexOf('timeout --kill-after=30s 25m node index.js deploy --profile');
+  const expirePreflight = main.indexOf('timeout --kill-after=30s 25m node index.js expire --profile');
   const candidateStarting = main.indexOf('write_transaction_phase candidate-starting');
   const candidateStart = main.indexOf('start_release "$CANDIDATE_RELEASE"');
   const nginxSwitching = main.indexOf('write_transaction_phase nginx-switching');
@@ -1870,6 +1870,23 @@ test('keeps proxy and PM2 drain deadlines aligned', () => {
   assert.match(deployScript, /proxy_read_timeout 50s/);
   assert.match(ecosystem, /10 \* 60 \* 1000/);
   assert.match(ecosystem, /kill_timeout: drainTimeout \+ 10000/);
+});
+
+test('lets gated deployment preflight outlive one in-flight webhook job', () => {
+  const jobTimeout = /jobTimeoutMs = (\d+) \* 60_000/.exec(webhookServer);
+  const lockWait = /PREFLIGHT_LOCK_WAIT_MS=(\d+)/.exec(deployScript);
+  const deployOuter = /timeout --kill-after=30s (\d+)m node index\.js deploy --profile/.exec(deployScript);
+  const expireOuter = /timeout --kill-after=30s (\d+)m node index\.js expire --profile/.exec(deployScript);
+  assert.ok(jobTimeout && lockWait && deployOuter && expireOuter);
+  const jobTimeoutMs = Number(jobTimeout[1]) * 60_000;
+  const lockWaitMs = Number(lockWait[1]);
+  assert.ok(lockWaitMs >= jobTimeoutMs + 60_000);
+  assert.ok(Number(deployOuter[1]) * 60_000 > lockWaitMs);
+  assert.ok(Number(expireOuter[1]) * 60_000 > lockWaitMs);
+  assert.equal(
+    [...deployScript.matchAll(/MERGE4APPSTORE_LOCK_WAIT_MS="\$PREFLIGHT_LOCK_WAIT_MS" DRY_RUN=true/g)].length,
+    2,
+  );
 });
 
 test('pauses, restores, and installs managed cron idempotently before unpausing delivery', t => {
