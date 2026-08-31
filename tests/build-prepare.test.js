@@ -1,72 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  compareVersions,
   formatTestFlightNotes,
   generateTestFlightNotes,
-  inferBuildPurpose,
-  nextMinorVersion,
-  prepareBuild,
-  selectMarketingVersion,
 } from '../lib/build-prepare.js';
 
 const COMMIT = 'a'.repeat(40);
 const MISSING_COMMIT = 'b'.repeat(40);
-
-test('compares two- and three-part marketing versions', () => {
-  assert.equal(compareVersions('1.4', '1.4.0'), 0);
-  assert.equal(compareVersions('1.5', '1.4.9'), 1);
-  assert.equal(nextMinorVersion('1.4'), '1.5');
-  assert.equal(nextMinorVersion('1.4.2'), '1.5.0');
-});
-
-test('production compares with live versions while beta includes active versions', () => {
-  const versions = { data: [
-    { attributes: { versionString: '1.3', appStoreState: 'READY_FOR_SALE' } },
-    { attributes: { versionString: '1.4', appStoreState: 'PREPARE_FOR_SUBMISSION' } },
-  ] };
-  assert.equal(selectMarketingVersion('1.4', versions, 'production'), '1.4');
-  assert.equal(selectMarketingVersion('1.4', versions, 'beta'), '1.5');
-});
-
-test('infers build purpose from repository profile branches and pull-request context', () => {
-  const profile = { repository: { beta_branch: 'develop', production_branch: 'main' } };
-  assert.equal(inferBuildPurpose(profile, { pull_request: 42, branch: 'feature' }), 'pull_request');
-  assert.equal(inferBuildPurpose(profile, { branch: 'develop' }), 'beta');
-  assert.equal(inferBuildPurpose(profile, { branch: 'main' }), 'production');
-  assert.equal(inferBuildPurpose(profile, { purpose: 'beta', branch: 'custom' }), 'beta');
-  assert.throws(() => inferBuildPurpose(profile, { branch: 'feature' }), /Cannot infer build purpose/);
-});
-
-test('rejects an unsupported client-supplied build purpose as a bad request', () => {
-  const profile = { repository: { beta_branch: 'develop', production_branch: 'main' } };
-  assert.throws(
-    () => inferBuildPurpose(profile, { purpose: 'nightly' }),
-    error => error.statusCode === 400 && /Unsupported build purpose/.test(error.message),
-  );
-});
-
-test('classifies prepare payload validation failures as bad requests', async () => {
-  const profile = { repository: { owner: 'example', name: 'ios', beta_branch: 'develop', production_branch: 'main' } };
-  const validPayload = { repository: 'example/ios', commit: COMMIT, branch: 'feature', target_branch: 'develop', pull_request: 42, current_marketing_version: '1.4' };
-  const pullRequestBuild = { purpose: 'pull_request', appRole: 'prod', appId: '1', workflowId: 'wf-pr', includeCommits: true };
-  const cases = [
-    [{ ...pullRequestBuild }, { ...validPayload, repository: 'wrong/ios' }, /Repository does not match profile/],
-    [{ ...pullRequestBuild }, { ...validPayload, workflow_id: 'wrong' }, /Workflow does not match build purpose/],
-    [{ ...pullRequestBuild }, { ...validPayload, commit: '' }, /Commit is required/],
-    [{ ...pullRequestBuild }, { ...validPayload, current_marketing_version: 'version one' }, /Invalid marketing version/],
-    [{ ...pullRequestBuild }, { ...validPayload, target_branch: 'main' }, /Pull-request builds must target develop/],
-    [{ ...pullRequestBuild, purpose: 'beta' }, { ...validPayload, pull_request: null, branch: 'feature' }, /Beta builds must use develop/],
-    [{ ...pullRequestBuild, purpose: 'production' }, { ...validPayload, pull_request: null, branch: 'develop' }, /Production builds must use main/],
-  ];
-
-  for (const [build, payload, message] of cases) {
-    await assert.rejects(
-      prepareBuild({ profile, build, payload, asc: {}, github: {} }),
-      error => error.statusCode === 400 && message.test(error.message),
-    );
-  }
-});
 
 test('sizes truncated TestFlight notes using the commits remaining after each candidate', () => {
   const subjects = Array.from({ length: 11 }, (_, index) => `Commit ${index + 1}`);
@@ -75,24 +15,6 @@ test('sizes truncated TestFlight notes using the commits remaining after each ca
 
   assert.equal(result.text, twoLinesAndSuffix);
   assert.equal(result.omitted, 9);
-});
-
-test('prepares only the version and build role for the app repository', async () => {
-  const profile = { repository: { owner: 'example', name: 'ios', beta_branch: 'develop' } };
-  const build = { purpose: 'pull_request', appRole: 'uat', appId: '1', workflowId: 'wf-pr', includeCommits: true };
-  const payload = { repository: 'example/ios', workflow_id: 'wf-pr', commit: COMMIT, branch: 'feature', target_branch: 'develop', pull_request: 42, current_marketing_version: '1.4' };
-  const asc = {
-    appId: null,
-    getAppStoreVersions: async () => ({ data: [] }),
-  };
-  assert.deepEqual(await prepareBuild({ profile, build, payload, asc }), {
-    schema_version: 2,
-    role: 'uat',
-    purpose: 'pull_request',
-    marketing_version: '1.4',
-    warnings: [],
-  });
-  assert.equal(asc.appId, '1');
 });
 
 test('falls back conservatively when the Git history mirror is unavailable', async () => {
@@ -281,42 +203,4 @@ test('classifies an inaccessible commit as a bad request', async () => {
     generateTestFlightNotes({ profile, build, payload, asc, github }),
     error => error.statusCode === 400 && /Commit is not accessible/.test(error.message),
   );
-});
-
-test('rejects mutable refs before asking GitHub to resolve them', async () => {
-  const profile = { repository: { owner: 'example', name: 'ios', beta_branch: 'develop' } };
-  const build = { purpose: 'beta', appRole: 'prod', appId: '1', workflowId: 'wf-beta', includeCommits: false };
-  let githubCalled = false;
-  await assert.rejects(
-    prepareBuild({
-      profile,
-      build,
-      payload: { repository: 'example/ios', commit: 'main', branch: 'develop', current_marketing_version: '1.4' },
-      asc: {},
-      github: { getCommitSubject: () => { githubCalled = true; return 'Mutable branch'; } },
-    }),
-    error => error.statusCode === 400 && /full Git object ID/.test(error.message),
-  );
-  assert.equal(githubCalled, false);
-});
-
-test('version preparation does not load GitHub or published build history', async () => {
-  const profile = { repository: { owner: 'example', name: 'ios', beta_branch: 'develop' } };
-  const build = { purpose: 'beta', appRole: 'prod', appId: '1', workflowId: 'wf-beta', includeCommits: false };
-  let historyLoaded = false;
-  const result = await prepareBuild({
-    profile,
-    build,
-    payload: { repository: 'example/ios', commit: COMMIT, branch: 'develop', current_marketing_version: '1.4' },
-    asc: {
-      appId: null,
-      getAppStoreVersions: async () => ({ data: [] }),
-      getPublishedWorkflowCommits: async () => { historyLoaded = true; return []; },
-    },
-    github: {
-      getCommitSubject: () => { throw new Error('version preparation must not load GitHub'); },
-    },
-  });
-  assert.equal(historyLoaded, false);
-  assert.equal(result.schema_version, 2);
 });

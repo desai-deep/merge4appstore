@@ -1203,7 +1203,8 @@ test('loads secrets from private files without persisting their values in PM2', 
   assert.match(webhookServer, /MERGE4APPSTORE_ENV/);
   assert.match(webhookServer, /MERGE4APPSTORE_WEBHOOK_ENV/);
   assert.match(webhookServer, /override: true/);
-  assert.match(deployScript, /v1\/builds\/prepare\/\$instance/);
+  assert.match(deployScript, /v1\/builds\/version\/\$instance/);
+  assert.match(deployScript, /\.versionTokenEnv/);
   assert.match(deployScript, /install -m 600 -- "\$CONTROL_WEBHOOK_ENV" "\$candidate_secret_new"/);
   assert.match(deployScript, /cmp -s -- "\$CONTROL_WEBHOOK_ENV" "\$candidate_secret"/);
   assert.match(workflow, /"\$state_dir\/secrets\/"\*/);
@@ -1288,7 +1289,6 @@ test('overwrites stale PM2 release and job context for every generation', () => 
     MERGE4APPSTORE_DRAIN_TIMEOUT_MS: '600000',
     MERGE4APPSTORE_ENV: '/control/.env',
     MERGE4APPSTORE_PM2_NAME: 'merge4appstore-webhooks-v2',
-    MERGE4APPSTORE_PREPARE_TIMEOUT_MS: '45000',
     MERGE4APPSTORE_STATE_DIR: '/state',
     MERGE4APPSTORE_WEBHOOK_ENV: '/state/secrets/new.env',
     WEBHOOK_HOST: '127.0.0.1',
@@ -1580,7 +1580,6 @@ test('validates a staged PM2 generation without accepting a mixed final topology
     MERGE4APPSTORE_DRAIN_TIMEOUT_MS: '600000',
     MERGE4APPSTORE_ENV: path.join(directory, 'control.env'),
     MERGE4APPSTORE_PM2_NAME: 'v2',
-    MERGE4APPSTORE_PREPARE_TIMEOUT_MS: '45000',
     MERGE4APPSTORE_STATE_DIR: state,
     MERGE4APPSTORE_WEBHOOK_ENV: path.join(state, 'candidate.env'),
     DRY_RUN: 'false',
@@ -1635,7 +1634,6 @@ test('validates a staged PM2 generation without accepting a mixed final topology
     'NODE_BINARY="$TEST_NODE_BINARY"',
     'export MERGE4APPSTORE_PM2_NAME=v2',
     'export MERGE4APPSTORE_DRAIN_TIMEOUT_MS=600000',
-    'export MERGE4APPSTORE_PREPARE_TIMEOUT_MS=45000',
     'export MERGE4APPSTORE_STATE_DIR="$TEST_STATE"',
     'export MERGE4APPSTORE_ENV="$TEST_CONTROL_ENV"',
     'export MERGE4APPSTORE_DELIVERY_PAUSE_FILE="$TEST_PAUSE_FILE"',
@@ -1799,8 +1797,7 @@ test('replaces PM2 legacy-secret backups and rejects forbidden dump keys', t => 
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
-test('keeps application, proxy, and PM2 drain deadlines aligned', () => {
-  assert.match(deployScript, /PREPARE_TIMEOUT_MS=.*45000/);
+test('keeps proxy and PM2 drain deadlines aligned', () => {
   assert.match(deployScript, /DRAIN_TIMEOUT_MS=.*600000/);
   assert.match(deployScript, /proxy_connect_timeout 5s/);
   assert.match(deployScript, /proxy_send_timeout 50s/);
@@ -1916,8 +1913,7 @@ test('pauses, restores, and installs managed cron idempotently before unpausing 
 
 test('retries transient deployment probes with bounded diagnostics', () => {
   assert.match(deployScript, /retry_capture\(\)/);
-  assert.match(deployScript, /GitHub branch-head lookup[\s\S]* 4/);
-  assert.match(deployScript, /authenticated preparation smoke[\s\S]* 4/);
+  assert.match(deployScript, /authenticated version smoke[\s\S]* 4/);
   assert.match(deployScript, /public deployment health check[\s\S]* 4/);
   assert.match(deployScript, /GitHub hook listing[\s\S]* 4[\s\S]*timeout 30s[\s\S]*gh api --paginate --slurp/);
   assert.match(deployScript, /GitHub hook update[\s\S]* 4[\s\S]*timeout 30s/);

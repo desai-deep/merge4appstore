@@ -8,6 +8,9 @@ repository:
   beta_branch: develop
   ios_repo_path: ""
 
+versioning:
+  initial_version: "1.1"
+
 release_pull_request: true
 auto_rebase_pull_requests: true
 
@@ -21,7 +24,7 @@ webhooks:
     token_env: XCODE_CLOUD_WEBHOOK_TOKEN
 
 ci:
-  prepare:
+  version:
     token_env: MERGE4APPSTORE_BUILD_TOKEN_JAMSONTOAST
 
 apps:

@@ -61,28 +61,70 @@ test('publishes notes to the exact successful run build and excludes it from his
   }]);
 });
 
-test('retries post-build note publication until the upload is visible and valid', async () => {
+test('polls post-build note publication until the upload is visible and valid', async () => {
   const profile = { repository: { beta_branch: 'develop', production_branch: 'main' } };
-  const build = { purpose: 'pull_request', appId: 'app-1', workflowId: 'wf-pr', includeCommits: true };
-  const github = {};
-
-  for (const builds of [
+  const build = { purpose: 'production', appId: 'app-1', workflowId: 'wf-prod', includeCommits: false };
+  const buildsByAttempt = [
     [],
     [{ buildId: 'build-current', buildNumber: '102', processingState: 'PROCESSING' }],
-  ]) {
-    const asc = {
-      getBuildRunNotesContext: async () => ({
-        workflowId: 'wf-pr',
+    [{ buildId: 'build-current', buildNumber: '102', processingState: 'VALID' }],
+  ];
+  const updated = [];
+  const asc = {
+    getBuildRunNotesContext: async () => ({
+        workflowId: 'wf-prod',
         completionStatus: 'SUCCEEDED',
         commitSha: 'head',
-        builds,
+        branch: 'main',
+        builds: buildsByAttempt.shift(),
       }),
-    };
-    await assert.rejects(
-      publishTestFlightNotesForRun(asc, github, profile, build, 'run-102'),
-      error => error.statusCode === 503 && error.retryAfter === 15,
-    );
-  }
+    getPublishedWorkflowCommits: async () => [],
+    updateBetaBuildNotes: async (buildId, notes) => updated.push({ buildId, notes }),
+  };
+  const sleeps = [];
+  const result = await publishTestFlightNotesForRun(
+    asc,
+    { getCommitSubject: () => 'Production release' },
+    profile,
+    build,
+    'run-102',
+    false,
+    { intervalMs: 15, timeoutMs: 100, sleep: async ms => sleeps.push(ms) },
+  );
+
+  assert.equal(result.updated, 1);
+  assert.deepEqual(sleeps, [15, 15]);
+  assert.deepEqual(updated, [{ buildId: 'build-current', notes: 'Production release' }]);
+});
+
+test('bounds the wait for an uploaded build to become valid', async () => {
+  let time = 0;
+  const asc = {
+    getBuildRunNotesContext: async () => ({
+      workflowId: 'wf-pr',
+      completionStatus: 'SUCCEEDED',
+      commitSha: 'head',
+      builds: [],
+    }),
+  };
+
+  await assert.rejects(
+    publishTestFlightNotesForRun(
+      asc,
+      {},
+      {},
+      { purpose: 'pull_request', appId: 'app-1', workflowId: 'wf-pr' },
+      'run-102',
+      false,
+      {
+        intervalMs: 15,
+        timeoutMs: 30,
+        now: () => time,
+        sleep: async ms => { time += ms; },
+      },
+    ),
+    /Timed out waiting for Xcode Cloud build run run-102 to become valid/,
+  );
 });
 
 test('refreshes the localization for every published build of the PR commit', async () => {

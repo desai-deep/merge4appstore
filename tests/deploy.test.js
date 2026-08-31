@@ -292,6 +292,86 @@ test('retries issue cleanup from observed review state without repeating submiss
   });
 });
 
+test('reconstructs version state from observed App Review and live release state', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    const events = [];
+    const asc = createASC({
+      checkBuildInReview: async () => ({
+        inReview: true,
+        version: '1.2',
+        versionId: 'version-1.2',
+        buildId: 'build-161',
+        buildNumber: '161',
+        state: 'IN_REVIEW',
+      }),
+      getLiveProductionBuild: async () => ({
+        live: true,
+        version: '1.1',
+        buildId: 'build-160',
+        buildNumber: '160',
+      }),
+    });
+
+    await runDeployCheck(asc, createGitHub(), false, {
+      onVersionSubmitted: details => events.push(['submitted', details]),
+      onVersionReleased: details => events.push(['released', details]),
+    });
+
+    assert.deepEqual(events, [
+      ['submitted', {
+        version: '1.2',
+        versionId: 'version-1.2',
+        buildId: 'build-161',
+        state: 'IN_REVIEW',
+      }],
+      ['released', { version: '1.1', buildId: 'build-160' }],
+    ]);
+  });
+});
+
+test('records a successful submission after App Store Connect accepts it', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    const events = [];
+    const asc = createASC({
+      getTestFlightReadyBuilds: async () => ([
+        { buildNumber: '161', version: '1.2', buildId: 'build-161' },
+      ]),
+    });
+
+    await runDeployCheck(asc, createGitHub(), false, {
+      onVersionSubmitted: details => events.push(details),
+    });
+
+    assert.deepEqual(events, [{
+      version: '1.2',
+      versionId: 'version-1.2',
+      buildId: 'build-161',
+      state: 'SUBMITTED',
+    }]);
+  });
+});
+
+test('retries reconciliation if durable version state cannot be recorded', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    const stateFailure = new Error('version state unavailable');
+    let submissions = 0;
+    const asc = createASC({
+      getTestFlightReadyBuilds: async () => ([
+        { buildNumber: '161', version: '1.2', buildId: 'build-161' },
+      ]),
+      submitForReview: async () => { submissions += 1; },
+    });
+
+    await assert.rejects(
+      runDeployCheck(asc, createGitHub(), false, {
+        onVersionSubmitted: async () => { throw stateFailure; },
+      }),
+      error => error === stateFailure,
+    );
+    assert.equal(submissions, 1);
+  });
+});
+
 test('metadata reconciliation retries the blocked build without recovering an Xcode build', async () => {
   await withTriggerRecovery(async () => {
     let submitted = false;

@@ -12,7 +12,6 @@ SERVICE_NAME="${MERGE4APPSTORE_PM2_NAME:-merge4appstore-webhooks-v2}"
 LEGACY_SERVICE_NAME="merge4appstore-webhooks"
 SERVICE_HOST="127.0.0.1"
 SERVICE_PORT="8788"
-PREPARE_TIMEOUT_MS="${MERGE4APPSTORE_PREPARE_TIMEOUT_MS:-45000}"
 DRAIN_TIMEOUT_MS="${MERGE4APPSTORE_DRAIN_TIMEOUT_MS:-600000}"
 LEGACY_DRAIN_QUIET_SECONDS="${MERGE4APPSTORE_LEGACY_DRAIN_QUIET_SECONDS:-30}"
 PUBLIC_BASE_URL="${MERGE4APPSTORE_PUBLIC_BASE_URL:-https://api.runningorder.app/merge4appstore}"
@@ -50,14 +49,10 @@ case "$RECONCILE_PROFILE" in none|jamsontoast|runningorder) ;; *) fail "Unsuppor
 case "$NGINX_SERVER_NAME" in
   ''|.*|*.|*[!A-Za-z0-9.-]*) fail "MERGE4APPSTORE_NGINX_SERVER_NAME must be one DNS hostname" ;;
 esac
-case "$PREPARE_TIMEOUT_MS" in ''|*[!0-9]*) fail "MERGE4APPSTORE_PREPARE_TIMEOUT_MS must be an integer" ;; esac
 case "$DRAIN_TIMEOUT_MS" in ''|*[!0-9]*) fail "MERGE4APPSTORE_DRAIN_TIMEOUT_MS must be an integer" ;; esac
 case "$LEGACY_DRAIN_QUIET_SECONDS" in ''|*[!0-9]*) fail "MERGE4APPSTORE_LEGACY_DRAIN_QUIET_SECONDS must be an integer" ;; esac
 case "$MIN_FREE_BYTES" in ''|*[!0-9]*) fail "MERGE4APPSTORE_MIN_FREE_BYTES must be an integer" ;; esac
 case "$MIN_FREE_PERCENT" in ''|*[!0-9]*) fail "MERGE4APPSTORE_MIN_FREE_PERCENT must be an integer" ;; esac
-if [ "$PREPARE_TIMEOUT_MS" -le 0 ] || [ "$PREPARE_TIMEOUT_MS" -gt 45000 ]; then
-  fail "MERGE4APPSTORE_PREPARE_TIMEOUT_MS must be between 1 and 45000"
-fi
 if [ "$DRAIN_TIMEOUT_MS" -lt 1000 ] || [ "$DRAIN_TIMEOUT_MS" -gt 3600000 ]; then
   fail "MERGE4APPSTORE_DRAIN_TIMEOUT_MS must be between 1000 and 3600000"
 fi
@@ -640,7 +635,6 @@ configure_process_environment() {
   export MERGE4APPSTORE_WEBHOOK_ENV="$secret_file"
   export MERGE4APPSTORE_STATE_DIR="$STATE_DIR"
   export MERGE4APPSTORE_DEPLOY_SHA="$deployment_sha"
-  export MERGE4APPSTORE_PREPARE_TIMEOUT_MS="$PREPARE_TIMEOUT_MS"
   export MERGE4APPSTORE_DRAIN_TIMEOUT_MS="$DRAIN_TIMEOUT_MS"
   export MERGE4APPSTORE_DELIVERY_PAUSE_FILE="$DELIVERY_PAUSE_FILE"
   export WEBHOOK_AUTOSTART=true WEBHOOK_HOST="$SERVICE_HOST" WEBHOOK_PORT="$SERVICE_PORT"
@@ -996,7 +990,6 @@ validate_pm2_release() {
           || value("MERGE4APPSTORE_DRAIN_TIMEOUT_MS") !== process.env.MERGE4APPSTORE_DRAIN_TIMEOUT_MS
           || value("MERGE4APPSTORE_DELIVERY_PAUSE_FILE") !== process.env.MERGE4APPSTORE_DELIVERY_PAUSE_FILE
           || value("MERGE4APPSTORE_PM2_NAME") !== process.env.MERGE4APPSTORE_PM2_NAME
-          || value("MERGE4APPSTORE_PREPARE_TIMEOUT_MS") !== process.env.MERGE4APPSTORE_PREPARE_TIMEOUT_MS
           || value("DRY_RUN") !== "false"
           || value("NODE_ENV") !== "production"
           || value("RECONCILE_METADATA") !== "false"
@@ -2260,7 +2253,7 @@ echo "Installing and verifying immutable release $DEPLOY_SHA..."
 # the archive has no .git directory, the deployer intentionally uses umask 077,
 # and the live transaction state must never become a unit-test fixture. Keep
 # host verification bounded to installing the lockfile and validating the
-# packaged profiles; the dry runs, candidate health, and authenticated prepare
+# packaged profiles; the dry runs, candidate health, and authenticated version
 # smokes below exercise the installed release before cutover.
 (cd "$CANDIDATE_RELEASE" \
   && timeout --kill-after=30s 10m npm ci --omit=dev \
@@ -2392,29 +2385,21 @@ for attempt in {1..60}; do
 done
 [ -n "$health" ] || fail "Candidate PM2 service did not report the expected deployment SHA"
 
-control_gh_token="$(read_env_value "$CONTROL_ENV" GH_TOKEN)"
 for profile_file in "${repository_profiles[@]}"; do
   instance="$(cd "$CANDIDATE_RELEASE" && node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>console.log(loadRepositoryProfile(process.argv[1]).instance))" "$profile_file")"
-  repository="$(cd "$CANDIDATE_RELEASE" && node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>{const p=loadRepositoryProfile(process.argv[1]);console.log(p.repository.owner+'/'+p.repository.name)})" "$profile_file")"
-  beta_branch="$(cd "$CANDIDATE_RELEASE" && node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>{const p=loadRepositoryProfile(process.argv[1]);console.log(p.repository.beta_branch||'develop')})" "$profile_file")"
-  token_env="$(cd "$CANDIDATE_RELEASE" && node -e "Promise.all([import('./lib/profile.js'),import('./lib/webhooks.js')]).then(([{loadRepositoryProfile},{webhookSettings}])=>console.log(webhookSettings(loadRepositoryProfile(process.argv[1])).buildTokenEnv))" "$profile_file")"
+  token_env="$(cd "$CANDIDATE_RELEASE" && node -e "Promise.all([import('./lib/profile.js'),import('./lib/webhooks.js')]).then(([{loadRepositoryProfile},{webhookSettings}])=>console.log(webhookSettings(loadRepositoryProfile(process.argv[1])).versionTokenEnv))" "$profile_file")"
+  workflow_id="$(cd "$CANDIDATE_RELEASE" && node -e "import('./lib/profile.js').then(({loadRepositoryProfile,resolveBuildPurpose})=>console.log(resolveBuildPurpose(loadRepositoryProfile(process.argv[1]),'production').workflowId))" "$profile_file")"
   build_token="$(read_env_value "$candidate_secret" "$token_env")"
   [ -n "$build_token" ] || fail "Candidate secret is missing $token_env"
   header_file="$transaction_dir/build-token-$instance.header"
   printf 'Authorization: Bearer %s\n' "$build_token" > "$header_file"
-  encoded_beta_branch="$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$beta_branch")"
-  commit=""
-  GH_TOKEN="$control_gh_token" retry_capture commit "GitHub branch-head lookup for $repository:$beta_branch" 4 \
-    timeout 30s gh api "repos/$repository/commits/$encoded_beta_branch" --jq .sha \
-    || fail "Could not resolve $repository:$beta_branch after bounded retries"
-  payload="$(REPOSITORY="$repository" COMMIT="$commit" BRANCH="$beta_branch" node -e 'console.log(JSON.stringify({repository:process.env.REPOSITORY,commit:process.env.COMMIT,branch:process.env.BRANCH,target_branch:"",pull_request:null,current_marketing_version:"0.1"}))')"
-  prepared=""
-  retry_capture prepared "authenticated preparation smoke for $instance" 4 \
-    curl --fail-with-body --silent --show-error --connect-timeout 3 --max-time 50 \
-      --header "@$header_file" --header 'Content-Type: application/json' --data "$payload" \
-      "http://$SERVICE_HOST:$SERVICE_PORT/v1/builds/prepare/$instance" \
-    || fail "Preparation smoke for $instance failed after bounded retries"
-  PREPARED="$prepared" node -e 'const value=JSON.parse(process.env.PREPARED);if(value.schema_version!==2||!value.marketing_version)throw new Error("Preparation smoke response has an invalid schema or version");console.log(`Prepared endpoint: ${value.role}/${value.purpose} version ${value.marketing_version}`)'
+  resolved_version=""
+  retry_capture resolved_version "authenticated version smoke for $instance" 4 \
+    curl --fail --silent --show-error --connect-timeout 3 --max-time 10 \
+      --header "@$header_file" --get --data-urlencode "workflow_id=$workflow_id" \
+      "http://$SERVICE_HOST:$SERVICE_PORT/v1/builds/version/$instance" \
+    || fail "Version smoke for $instance failed after bounded retries"
+  RESOLVED_VERSION="$resolved_version" node -e 'const value=(process.env.RESOLVED_VERSION||"").trim();if(!/^\d+(?:\.\d+){1,2}$/.test(value))throw new Error("Version endpoint returned an invalid marketing version");console.log(`Version endpoint: ${value}`)'
 done
 write_transaction_phase candidate-ready
 

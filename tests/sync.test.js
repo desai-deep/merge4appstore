@@ -70,3 +70,26 @@ test('does not tag a number-only attribution from another workflow', async t => 
 
   assert.equal(created, false);
 });
+
+test('records a live version before returning for an existing release tag', async () => {
+  const releases = [];
+  const asc = {
+    getLiveProductionBuild: async () => ({
+      live: true,
+      version: '1.2.3',
+      buildNumber: '101',
+      buildId: 'build-target',
+    }),
+  };
+
+  await runReleaseSync(
+    asc,
+    { tagExists: () => true },
+    {},
+    false,
+    false,
+    { onVersionReleased: details => releases.push(details) },
+  );
+
+  assert.deepEqual(releases, [{ version: '1.2.3', buildId: 'build-target' }]);
+});

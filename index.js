@@ -108,6 +108,7 @@ import {
 import { reconcileReleasePullRequest } from './lib/release-pr.js';
 import { rebaseOpenPullRequests } from './lib/rebase-prs.js';
 import { FileBuildStatusStore, reportXcodeBuildStatus } from './lib/build-status.js';
+import { FileVersionStateStore } from './lib/version-state.js';
 
 async function main() {
   const DRY_RUN = process.env.DRY_RUN === 'true';
@@ -167,6 +168,22 @@ async function main() {
     github: new GitHubAPI(CONFIG.repoOwner, CONFIG.repoName, CONFIG.productionBranch),
     tags: new GitHubTags(CONFIG.repoOwner, CONFIG.repoName),
   });
+
+  const versionStateStore = repositoryProfile ? new FileVersionStateStore() : null;
+  const versionLifecycle = repositoryProfile ? {
+    onVersionSubmitted: ({ version, versionId, buildId }) => versionStateStore.recordSubmitted(
+      repositoryProfile.instance,
+      repositoryProfile.versioning.initial_version,
+      version,
+      { sourceId: versionId || buildId },
+    ),
+    onVersionReleased: ({ version, buildId }) => versionStateStore.recordReleased(
+      repositoryProfile.instance,
+      repositoryProfile.versioning.initial_version,
+      version,
+      { sourceId: buildId },
+    ),
+  } : {};
 
   const selectAutomation = name => {
     if (!repositoryProfile) return { enabled: true, appRole: 'legacy' };
@@ -262,6 +279,7 @@ async function main() {
         await runDeployCheck(asc, github, DRY_RUN, {
           metadataPath: automation.metadataPath,
           reconcileMetadata: process.env.RECONCILE_METADATA === 'true',
+          ...versionLifecycle,
         });
       }
     }
@@ -271,7 +289,7 @@ async function main() {
       const automation = selectAutomation('sync');
       if (automation.enabled) {
         const { asc, tags, github } = createClients();
-        await runReleaseSync(asc, tags, github, DRY_RUN);
+        await runReleaseSync(asc, tags, github, DRY_RUN, true, versionLifecycle);
       }
     }
 

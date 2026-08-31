@@ -8,8 +8,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import { MemoryDeliveryStore } from '../lib/delivery-store.js';
-import { GitHubAPI } from '../lib/github.js';
-import { MemoryPrepareCache } from '../lib/prepare-cache.js';
+import { MemoryVersionStateStore } from '../lib/version-state.js';
 import {
   jobsForGitHubEvent,
   jobsForXcodeCloudEvent,
@@ -17,13 +16,12 @@ import {
   webhookSettings,
 } from '../lib/webhooks.js';
 import {
-  createPrepareRequest,
   createJobRunner,
   createSerialDispatcher,
+  createVersionRequest,
   createWebhookServer,
   inspectDeploymentTransactions,
   loadProfiles,
-  normalizePreparePayload,
   runJob,
   singleHeader,
   webhookDeliveryKey,
@@ -32,6 +30,7 @@ import {
 const profile = {
   instance: 'example-ios',
   repository: { owner: 'example', name: 'ios', beta_branch: 'develop', production_branch: 'main' },
+  versioning: { initial_version: '1.1' },
   apps: { prod: { app_id: '1', bundle_id: 'com.example', name: 'Example', workflows: { pr: 'wf-pr', beta: 'wf-beta', production: 'wf-prod' } } },
   build: {
     trigger_mode: 'managed',
@@ -43,7 +42,7 @@ const COMMIT_SHA = 'a'.repeat(40);
 function createTestWebhookServer(options) {
   const server = createWebhookServer({
     deliveryStore: new MemoryDeliveryStore(),
-    prepareCache: new MemoryPrepareCache(),
+    version: createVersionRequest({ store: new MemoryVersionStateStore() }),
     ...options,
   });
   const close = server.close.bind(server);
@@ -79,7 +78,7 @@ test('namespaces webhook delivery deduplication by profile instance', () => {
   );
 });
 
-test('defaults to deployed shared webhook secrets and a repository-scoped build token', () => {
+test('defaults to deployed shared webhook secrets and a profile-scoped version token', () => {
   const profileWithoutOverrides = { ...profile, webhooks: undefined, ci: undefined };
   const settings = webhookSettings(profileWithoutOverrides, {
     GH_WEBHOOK_SECRET: 'github',
@@ -89,7 +88,7 @@ test('defaults to deployed shared webhook secrets and a repository-scoped build 
 
   assert.equal(settings.githubSecret, 'github');
   assert.equal(settings.xcodeToken, 'xcode');
-  assert.equal(settings.buildToken, 'build');
+  assert.equal(settings.versionToken, 'build');
 });
 
 test('maps pull request lifecycle events to trigger and expiry jobs', () => {
@@ -260,18 +259,6 @@ test('deploys metadata-only production pushes without starting a new build', () 
     ...basePayload,
     commits: [{ added: [], modified: ['metadata.json'], removed: [] }],
   }, 'file-path')[0].purpose, 'production');
-});
-
-test('normalizes full Git refs in build preparation payloads', () => {
-  assert.deepEqual(normalizePreparePayload({
-    branch: 'refs/heads/feature/player',
-    target_branch: 'refs/heads/develop',
-    commit: 'abc123',
-  }), {
-    branch: 'feature/player',
-    target_branch: 'develop',
-    commit: 'abc123',
-  });
 });
 
 test('settles a webhook job when its child process cannot start', async () => {
@@ -644,287 +631,107 @@ test('reports the running deployment identity from the health endpoint', async t
   });
 });
 
-test('protects the build preparation endpoint with its repository token', async t => {
+test('serves a profile-scoped version without repository or App Store lookups', async t => {
   const environmentName = 'MERGE4APPSTORE_BUILD_TOKEN_EXAMPLE_IOS';
-  process.env[environmentName] = 'build-secret';
+  process.env[environmentName] = 'version-secret';
   t.after(() => delete process.env[environmentName]);
   const server = createTestWebhookServer({
     profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
-    prepare: async (_entry, payload) => ({ schema_version: 2, purpose: payload.purpose, marketing_version: '1.5' }),
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => server.close());
-  const { port } = server.address();
-  const url = `http://127.0.0.1:${port}/v1/builds/prepare/example-ios`;
-  const denied = await fetch(url, { method: 'POST', body: '{}' });
+  const url = `http://127.0.0.1:${server.address().port}/v1/builds/version/example-ios?workflow_id=wf-beta`;
+
+  const denied = await fetch(url);
   assert.equal(denied.status, 401);
   const accepted = await fetch(url, {
-    method: 'POST',
-    headers: { authorization: 'Bearer build-secret', 'content-type': 'application/json' },
-    body: JSON.stringify({ purpose: 'beta' }),
+    headers: { authorization: 'Bearer version-secret' },
   });
+
   assert.equal(accepted.status, 200);
-  assert.equal((await accepted.json()).marketing_version, '1.5');
-  const malformed = await fetch(url, {
-    method: 'POST',
-    headers: { authorization: 'Bearer build-secret', 'content-type': 'application/json' },
-    body: 'null',
-  });
-  assert.equal(malformed.status, 400);
-  assert.match((await malformed.json()).error, /must be an object/);
+  assert.equal(accepted.headers.get('content-type'), 'text/plain; charset=utf-8');
+  assert.equal(accepted.headers.get('cache-control'), 'no-store');
+  assert.equal(accepted.headers.get('x-merge4appstore-purpose'), 'beta');
+  assert.equal(accepted.headers.get('x-merge4appstore-generation'), '1');
+  assert.equal((await accepted.text()).trim(), '1.1');
 });
 
-test('keeps an authoritative pull-request lookup outage retryable', async () => {
-  const github = new GitHubAPI('example', 'ios', 'main', { mirror: null });
-  github.execAsync = async () => { throw new Error('GitHub unavailable'); };
-  const prepare = createPrepareRequest({
-    githubFactory: () => github,
-    ascFactory: () => { throw new Error('App Store Connect should not be reached'); },
-  });
-  await assert.rejects(
-    () => prepare({ profile, profilePath: '/tmp/example.yml' }, {
-      repository: 'example/ios',
-      commit: COMMIT_SHA,
-      branch: 'feature/player',
-      current_marketing_version: '1.0',
-    }),
-    error => error.statusCode === 503 && error.retryAfter === 5,
-  );
-});
-
-test('does not replace an explicit build purpose during pull-request recovery', async () => {
-  let pullRequestLookups = 0;
-  let appStoreCalls = 0;
-  const prepare = createPrepareRequest({
-    githubFactory: () => ({
-      findOpenPullRequestForCommitAsync: async () => {
-        pullRequestLookups += 1;
-        return { number: '42', baseBranch: 'develop' };
-      },
-    }),
-    ascFactory: () => ({
-      getAppStoreVersions: async () => {
-        appStoreCalls += 1;
-        return { data: [] };
-      },
-      getPublishedWorkflowCommits: async () => {
-        appStoreCalls += 1;
-        return [];
-      },
-    }),
-  });
-
-  await assert.rejects(
-    () => prepare({ profile, profilePath: '/tmp/example.yml' }, {
-      repository: 'example/ios',
-      purpose: 'beta',
-      commit: COMMIT_SHA,
-      branch: 'feature/player',
-      current_marketing_version: '1.0',
-    }),
-    error => error.statusCode === 400 && /Beta builds must use develop/.test(error.message),
-  );
-  assert.equal(pullRequestLookups, 0);
-  assert.equal(appStoreCalls, 0);
-});
-
-test('coalesces identical build preparation requests while they are in flight', async t => {
+test('serves purpose-specific versions immediately after a durable transition', async t => {
   const environmentName = 'MERGE4APPSTORE_BUILD_TOKEN_EXAMPLE_IOS';
-  process.env[environmentName] = 'build-secret';
+  process.env[environmentName] = 'version-secret';
   t.after(() => delete process.env[environmentName]);
-  let calls = 0;
-  let release;
-  const blocked = new Promise(resolve => { release = resolve; });
+  const store = new MemoryVersionStateStore();
+  await store.recordSubmitted('example-ios', '1.1', '1.1', { sourceId: 'version-11' });
   const server = createTestWebhookServer({
     profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
-    prepare: async () => {
-      calls += 1;
-      await blocked;
-      return { schema_version: 2, purpose: 'beta', marketing_version: '1.5' };
-    },
-  });
-  let receivedRequests = 0;
-  server.on('request', () => { receivedRequests += 1; });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  t.after(() => server.close());
-  const { port } = server.address();
-  const request = () => fetch(`http://127.0.0.1:${port}/v1/builds/prepare/example-ios`, {
-    method: 'POST',
-    headers: { authorization: 'Bearer build-secret', 'content-type': 'application/json' },
-    body: JSON.stringify({ purpose: 'beta', commit: 'same' }),
-  });
-
-  const first = request();
-  const second = request();
-  while (receivedRequests < 2 || calls === 0) {
-    await new Promise(resolve => setImmediate(resolve));
-  }
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(calls, 1);
-  release();
-
-  const responses = await Promise.all([first, second]);
-  assert.deepEqual(responses.map(response => response.status), [200, 200]);
-  assert.equal(calls, 1);
-});
-
-test('does not reuse a preparation result across immutable releases', async t => {
-  const environmentName = 'MERGE4APPSTORE_BUILD_TOKEN_EXAMPLE_IOS';
-  process.env[environmentName] = 'build-secret';
-  t.after(() => delete process.env[environmentName]);
-  const prepareCache = new MemoryPrepareCache();
-  let calls = 0;
-  const prepare = async () => {
-    calls += 1;
-    return { schema_version: 2, purpose: 'beta', marketing_version: String(calls) };
-  };
-  const servers = ['release-one', 'release-two'].map(deploymentSha => createTestWebhookServer({
-    profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
-    deploymentSha,
-    prepareCache,
-    prepare,
-  }));
-  for (const server of servers) {
-    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-    t.after(() => server.close());
-  }
-  const request = server => fetch(
-    `http://127.0.0.1:${server.address().port}/v1/builds/prepare/example-ios`,
-    {
-      method: 'POST',
-      headers: { authorization: 'Bearer build-secret', 'content-type': 'application/json' },
-      body: JSON.stringify({ purpose: 'beta', commit: 'same' }),
-    },
-  );
-
-  const first = await request(servers[0]);
-  const second = await request(servers[1]);
-
-  assert.equal((await first.json()).marketing_version, '1');
-  assert.equal((await second.json()).marketing_version, '2');
-  assert.equal(calls, 2);
-});
-
-test('cancels timed-out preparation and lets a retry start fresh work', async t => {
-  const environmentName = 'MERGE4APPSTORE_BUILD_TOKEN_EXAMPLE_IOS';
-  process.env[environmentName] = 'build-secret';
-  t.after(() => delete process.env[environmentName]);
-  let calls = 0;
-  let aborts = 0;
-  const server = createTestWebhookServer({
-    profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
-    prepare: (_entry, _payload, { signal }) => new Promise((resolve, reject) => {
-      calls += 1;
-      signal.addEventListener('abort', () => {
-        aborts += 1;
-        reject(signal.reason);
-      }, { once: true });
-    }),
-    prepareTimeoutMs: 20,
+    version: createVersionRequest({ store }),
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => server.close());
-  const { port } = server.address();
+  const request = workflowId => fetch(
+    `http://127.0.0.1:${server.address().port}/v1/builds/version/example-ios?workflow_id=${workflowId}`,
+    { headers: { authorization: 'Bearer version-secret' } },
+  );
 
-  const response = await fetch(`http://127.0.0.1:${port}/v1/builds/prepare/example-ios`, {
-    method: 'POST',
-    headers: { authorization: 'Bearer build-secret', 'content-type': 'application/json' },
-    body: JSON.stringify({ purpose: 'beta' }),
+  assert.equal((await (await request('wf-prod')).text()).trim(), '1.1');
+  assert.equal((await (await request('wf-pr')).text()).trim(), '1.2');
+  assert.equal((await (await request('wf-beta')).text()).trim(), '1.2');
+});
+
+test('rejects missing and unconfigured workflow identifiers without external work', async t => {
+  const environmentName = 'MERGE4APPSTORE_BUILD_TOKEN_EXAMPLE_IOS';
+  process.env[environmentName] = 'version-secret';
+  t.after(() => delete process.env[environmentName]);
+  const server = createTestWebhookServer({
+    profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
   });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}/v1/builds/version/example-ios`;
+  const headers = { authorization: 'Bearer version-secret' };
+
+  for (const url of [base, `${base}?workflow_id=unknown`]) {
+    const response = await fetch(url, { headers });
+    assert.equal(response.status, 400);
+  }
+});
+
+test('fails retryably instead of guessing when durable version state is unavailable', async t => {
+  const environmentName = 'MERGE4APPSTORE_BUILD_TOKEN_EXAMPLE_IOS';
+  process.env[environmentName] = 'version-secret';
+  t.after(() => delete process.env[environmentName]);
+  const storeFailure = new Error('private storage detail');
+  storeFailure.retryAfter = 9;
+  const server = createTestWebhookServer({
+    profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
+    version: createVersionRequest({
+      store: { getOrInitialize: async () => { throw storeFailure; } },
+    }),
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.address().port}/v1/builds/version/example-ios?workflow_id=wf-beta`,
+    { headers: { authorization: 'Bearer version-secret' } },
+  );
 
   assert.equal(response.status, 503);
-  assert.equal(response.headers.get('retry-after'), '5');
-  assert.match((await response.json()).error, /retry/i);
-  const retry = await fetch(`http://127.0.0.1:${port}/v1/builds/prepare/example-ios`, {
-    method: 'POST',
-    headers: { authorization: 'Bearer build-secret', 'content-type': 'application/json' },
-    body: JSON.stringify({ purpose: 'beta' }),
-  });
-  assert.equal(retry.status, 503);
-  assert.equal(calls, 2);
-  assert.equal(aborts, 2);
+  assert.equal(response.headers.get('retry-after'), '9');
+  assert.deepEqual(await response.json(), { error: 'Version state is unavailable' });
 });
 
-test('bounds unique in-flight preparation requests and asks excess clients to retry', async t => {
-  const environmentName = 'MERGE4APPSTORE_BUILD_TOKEN_EXAMPLE_IOS';
-  process.env[environmentName] = 'build-secret';
-  t.after(() => delete process.env[environmentName]);
-  const releases = [];
-  let calls = 0;
+test('does not expose the removed preparation endpoint', async t => {
   const server = createTestWebhookServer({
     profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
-    maxPrepareFlights: 2,
-    prepare: () => new Promise(resolve => {
-      calls += 1;
-      releases.push(() => resolve({ purpose: 'beta', marketing_version: String(calls) }));
-    }),
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => server.close());
-  const request = commit => fetch(
+  const response = await fetch(
     `http://127.0.0.1:${server.address().port}/v1/builds/prepare/example-ios`,
-    {
-      method: 'POST',
-      headers: { authorization: 'Bearer build-secret', 'content-type': 'application/json' },
-      body: JSON.stringify({ purpose: 'beta', commit }),
-    },
+    { method: 'POST', body: '{}' },
   );
-
-  const first = request('first');
-  const second = request('second');
-  while (calls < 2) await new Promise(resolve => setImmediate(resolve));
-  const excess = await request('third');
-  assert.equal(excess.status, 503);
-  assert.equal(excess.headers.get('retry-after'), '1');
-  assert.match((await excess.json()).error, /capacity/i);
-  assert.equal(calls, 2);
-
-  releases.forEach(release => release());
-  assert.deepEqual(
-    (await Promise.all([first, second])).map(response => response.status),
-    [200, 200],
-  );
-});
-
-test('keeps timed-out abort-ignoring preparation work charged against capacity', async t => {
-  const environmentName = 'MERGE4APPSTORE_BUILD_TOKEN_EXAMPLE_IOS';
-  process.env[environmentName] = 'build-secret';
-  t.after(() => delete process.env[environmentName]);
-  let calls = 0;
-  let releaseStalled;
-  const stalled = new Promise(resolve => { releaseStalled = resolve; });
-  const server = createTestWebhookServer({
-    profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
-    maxPrepareFlights: 1,
-    prepareTimeoutMs: 10,
-    prepare: async () => {
-      calls += 1;
-      if (calls === 1) return stalled;
-      return { purpose: 'beta', marketing_version: '2.0' };
-    },
-  });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  t.after(() => server.close());
-  const request = commit => fetch(
-    `http://127.0.0.1:${server.address().port}/v1/builds/prepare/example-ios`,
-    {
-      method: 'POST',
-      headers: { authorization: 'Bearer build-secret', 'content-type': 'application/json' },
-      body: JSON.stringify({ purpose: 'beta', commit }),
-    },
-  );
-
-  assert.equal((await request('stalled')).status, 503);
-  const atCapacity = await request('new-work');
-  assert.equal(atCapacity.status, 503);
-  assert.equal(atCapacity.headers.get('retry-after'), '1');
-  assert.equal(calls, 1);
-
-  releaseStalled({ purpose: 'beta', marketing_version: '1.0' });
-  await server.waitForBackground();
-  const recovered = await request('new-work');
-  assert.equal(recovered.status, 200);
-  assert.equal(calls, 2);
+  assert.equal(response.status, 404);
 });
 
 test('persists responsibility before acknowledging a webhook', async t => {
@@ -1286,7 +1093,7 @@ test('reports an incomplete durable deployment transaction as degraded', async t
   const server = createWebhookServer({
     profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
     deliveryStore: new MemoryDeliveryStore(),
-    prepareCache: new MemoryPrepareCache(),
+    version: createVersionRequest({ store: new MemoryVersionStateStore() }),
     deploymentProbe: () => inspectDeploymentTransactions(stateDirectory, { staleAfterMs: 0 }),
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -1479,6 +1286,7 @@ test('rejects duplicate profile instances instead of silently replacing one', t 
 version: 1
 instance: duplicate
 repository: { owner: example, name: ios }
+versioning: { initial_version: "1.1" }
 apps:
   prod: { app_id: "1", bundle_id: com.example, name: Example, workflows: { pr: workflow-1 } }
 build:
@@ -1497,6 +1305,7 @@ test('loads reserved profile instance names without Object prototype collisions'
 version: 1
 instance: __proto__
 repository: { owner: example, name: ios }
+versioning: { initial_version: "1.1" }
 apps:
   prod: { app_id: "1", bundle_id: com.example, name: Example, workflows: { pr: workflow-1 } }
 build:

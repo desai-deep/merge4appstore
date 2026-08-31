@@ -10,12 +10,9 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { createDeliveryStore } from './lib/delivery-store.js';
-import { createPrepareCache } from './lib/prepare-cache.js';
 import { loadRepositoryProfile } from './lib/profile.js';
 import { resolveBuildPurpose } from './lib/profile.js';
-import { AppStoreConnectAPI } from './lib/app-store-connect.js';
-import { GitHubAPI } from './lib/github.js';
-import { inferBuildPurpose, prepareBuild } from './lib/build-prepare.js';
+import { createVersionStateStore, versionForPurpose } from './lib/version-state.js';
 import { loadEnvironmentFile, WEBHOOK_SECRET_NAMES } from './lib/secret-environment.js';
 import {
   jobsForGitHubEvent,
@@ -319,6 +316,15 @@ function send(response, statusCode, body, headers = {}) {
   response.end(JSON.stringify(body));
 }
 
+function sendText(response, statusCode, body, headers = {}) {
+  response.writeHead(statusCode, {
+    'content-type': 'text/plain; charset=utf-8',
+    'cache-control': 'no-store',
+    ...headers,
+  });
+  response.end(`${body}\n`);
+}
+
 export function singleHeader(value) {
   return typeof value === 'string' ? value : '';
 }
@@ -327,75 +333,41 @@ export function webhookDeliveryKey(provider, instance, delivery) {
   return `${provider}:${instance}:${delivery}`;
 }
 
-export function normalizePreparePayload(payload) {
-  return {
-    ...payload,
-    branch: payload.branch?.replace(/^refs\/heads\//, '') || payload.branch,
-    target_branch: payload.target_branch?.replace(/^refs\/heads\//, '') || payload.target_branch,
-  };
-}
-
-export function createPrepareRequest({
-  githubFactory = profile => new GitHubAPI(
-    profile.repository.owner,
-    profile.repository.name,
-    profile.repository.production_branch || 'main',
-  ),
-  ascFactory = () => new AppStoreConnectAPI(
-    process.env.APP_STORE_CONNECT_API_KEY_ID,
-    process.env.APP_STORE_CONNECT_ISSUER_ID,
-    process.env.APP_STORE_CONNECT_API_KEY_CONTENT,
-  ),
+export function createVersionRequest({
+  store = createVersionStateStore(),
 } = {}) {
-  return async (entry, payload, { signal = null } = {}) => {
-    let normalizedPayload = normalizePreparePayload(payload);
-    let purpose = normalizedPayload.purpose !== undefined && normalizedPayload.purpose !== null
-      ? inferBuildPurpose(entry.profile, normalizedPayload)
-      : null;
-    const github = githubFactory(entry.profile, { signal });
-    github.signal = signal;
-    const betaBranch = entry.profile.repository.beta_branch || 'develop';
-    const productionBranch = entry.profile.repository.production_branch || 'main';
-    if (
-      !purpose
-      && !normalizedPayload.pull_request
-      && normalizedPayload.commit
-      && normalizedPayload.branch
-      && ![betaBranch, productionBranch].includes(normalizedPayload.branch)
-    ) {
-      const pullRequest = await (
-        github.findOpenPullRequestForCommitAsync?.(
-          normalizedPayload.commit,
-          betaBranch,
-          normalizedPayload.branch,
-        )
-        ?? github.findOpenPullRequestForCommit?.(
-          normalizedPayload.commit,
-          betaBranch,
-          normalizedPayload.branch,
-        )
-      );
-      if (pullRequest) {
-        normalizedPayload = {
-          ...normalizedPayload,
-          purpose: 'pull_request',
-          pull_request: pullRequest.number,
-          target_branch: pullRequest.baseBranch,
-        };
-      }
+  return async (entry, workflowId) => {
+    if (!workflowId) {
+      const error = new Error('workflow_id is required');
+      error.statusCode = 400;
+      throw error;
     }
-    purpose ||= inferBuildPurpose(entry.profile, normalizedPayload);
-    const build = resolveBuildPurpose(entry.profile, purpose);
-    const asc = ascFactory(entry.profile, { signal });
-    asc.signal = signal;
-    return prepareBuild({
-      profile: entry.profile,
-      build,
-      payload: normalizedPayload,
-      asc,
-      github,
-      signal,
-    });
+    const build = ['pull_request', 'beta', 'production']
+      .filter(purpose => entry.profile.build?.purposes?.[purpose])
+      .map(purpose => resolveBuildPurpose(entry.profile, purpose))
+      .find(candidate => candidate.workflowId === workflowId);
+    if (!build) {
+      const error = new Error('Workflow is not configured for this profile');
+      error.statusCode = 400;
+      throw error;
+    }
+    let state;
+    try {
+      state = await store.getOrInitialize(
+        entry.profile.instance,
+        entry.profile.versioning.initial_version,
+      );
+    } catch (cause) {
+      const error = new Error('Version state is unavailable', { cause });
+      error.statusCode = 503;
+      error.retryAfter = cause.retryAfter || 5;
+      throw error;
+    }
+    return {
+      generation: state.generation,
+      purpose: build.purpose,
+      version: versionForPurpose(state, build.purpose),
+    };
   };
 }
 
@@ -443,33 +415,14 @@ export async function inspectDeploymentTransactions(stateDirectory, {
   return { active, incomplete };
 }
 
-function withDeadline(promise, timeoutMs, onTimeout = () => {}) {
-  let timer;
-  const timeout = new Promise((resolve, reject) => {
-    timer = setTimeout(() => {
-      const error = new Error('Build preparation timed out; retry the request');
-      error.name = 'AbortError';
-      error.statusCode = 503;
-      error.retryAfter = 5;
-      onTimeout(error);
-      reject(error);
-    }, timeoutMs);
-    timer.unref?.();
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
-
 export function createWebhookServer({
   profiles,
   dispatch = null,
-  prepare = createPrepareRequest(),
-  prepareCache = createPrepareCache(),
+  version = createVersionRequest(),
   deliveryStore = createDeliveryStore(),
   deploymentSha = process.env.MERGE4APPSTORE_DEPLOY_SHA || null,
   workerId = /^(0|[1-9]\d*)$/.test(process.env.pm_id || '')
     && Number.isSafeInteger(Number(process.env.pm_id)) ? Number(process.env.pm_id) : null,
-  prepareTimeoutMs = positiveNumber(process.env.MERGE4APPSTORE_PREPARE_TIMEOUT_MS, 45_000),
-  maxPrepareFlights = 100,
   recoveryIntervalMs = positiveNumber(process.env.MERGE4APPSTORE_RECOVERY_INTERVAL_MS, 5_000),
   retryDelayMs = positiveNumber(process.env.MERGE4APPSTORE_JOB_RETRY_MS, 5_000),
   maxDeliveryAttempts = positiveNumber(process.env.MERGE4APPSTORE_JOB_MAX_ATTEMPTS, 8),
@@ -479,16 +432,11 @@ export function createWebhookServer({
   deploymentProbe = () => inspectDeploymentTransactions(process.env.MERGE4APPSTORE_STATE_DIR),
   onFatalDeliveryError = () => {},
 }) {
-  if (!Number.isSafeInteger(maxPrepareFlights) || maxPrepareFlights <= 0) {
-    throw new RangeError('maxPrepareFlights must be a positive integer');
-  }
   if (workerId !== null && (!Number.isSafeInteger(workerId) || workerId < 0)) {
     throw new RangeError('workerId must be a non-negative integer or null');
   }
   const jobRunner = dispatch || createJobRunner();
   const enqueue = createSerialDispatcher(jobRunner);
-  const prepareFlights = new Map();
-  const activePrepareTasks = new Set();
   const activeWork = new Set();
   let deliveryInitializationError = null;
   let deliveryRuntimeError = null;
@@ -683,13 +631,31 @@ export function createWebhookServer({
           ...(probeError ? { error: 'Webhook runtime state is unavailable' } : {}),
         }, ok ? {} : { 'retry-after': '30' });
       }
+
+      const versionMatch = url.pathname.match(/^\/v1\/builds\/version\/([^/]+)$/);
+      if (request.method === 'GET' && versionMatch) {
+        let instance;
+        try { instance = decodeURIComponent(versionMatch[1]); }
+        catch { return send(response, 400, { error: 'Invalid instance' }); }
+        const entry = profiles[instance];
+        if (!entry) return send(response, 404, { error: 'Unknown instance' });
+        const settings = webhookSettings(entry.profile);
+        const bearer = singleHeader(request.headers.authorization).replace(/^Bearer\s+/i, '');
+        if (!settings.versionToken || !safeEqual(bearer, settings.versionToken)) {
+          return send(response, 401, { error: 'Invalid version token' });
+        }
+        const resolved = await version(entry, url.searchParams.get('workflow_id') || '');
+        return sendText(response, 200, resolved.version, {
+          'x-merge4appstore-generation': String(resolved.generation),
+          'x-merge4appstore-purpose': resolved.purpose,
+        });
+      }
       if (request.method !== 'POST') return send(response, 404, { error: 'Not found' });
 
-      const prepareMatch = url.pathname.match(/^\/v1\/builds\/prepare\/([^/]+)$/);
       const githubMatch = url.pathname.match(/^\/webhooks\/github\/([^/]+)$/);
       const xcodeMatch = url.pathname.match(/^\/webhooks\/xcode-cloud\/([^/]+)\/([^/]+)$/);
       let instance;
-      try { instance = decodeURIComponent(prepareMatch?.[1] || githubMatch?.[1] || xcodeMatch?.[1] || ''); }
+      try { instance = decodeURIComponent(githubMatch?.[1] || xcodeMatch?.[1] || ''); }
       catch { return send(response, 400, { error: 'Invalid instance' }); }
       const entry = profiles[instance];
       if (!entry) return send(response, 404, { error: 'Unknown instance' });
@@ -705,48 +671,7 @@ export function createWebhookServer({
       const settings = webhookSettings(entry.profile);
       let jobs;
       let deliveryKey;
-      if (prepareMatch) {
-        const bearer = singleHeader(request.headers.authorization).replace(/^Bearer\s+/i, '');
-        if (!settings.buildToken || !safeEqual(bearer, settings.buildToken)) {
-          return send(response, 401, { error: 'Invalid build token' });
-        }
-        const fingerprint = crypto.createHash('sha256').update(rawBody).digest('hex');
-        // A result computed by an older immutable release must not satisfy the
-        // candidate release's authenticated smoke test or survive a profile
-        // change across rollout. Cluster workers for one release still share
-        // the same deployment-scoped key.
-        const prepareKey = `${deploymentSha || 'unversioned'}:${instance}:${fingerprint}`;
-        let flight = prepareFlights.get(prepareKey);
-        if (!flight) {
-          if (activePrepareTasks.size >= maxPrepareFlights) {
-            const error = new Error('Build preparation is at capacity; retry the request');
-            error.statusCode = 503;
-            error.retryAfter = 1;
-            throw error;
-          }
-          const controller = new AbortController();
-          flight = {
-            controller,
-            task: track(prepareCache.get(
-              prepareKey,
-              () => prepare(entry, payload, { signal: controller.signal }),
-              { signal: controller.signal },
-            )),
-          };
-          activePrepareTasks.add(flight.task);
-          prepareFlights.set(prepareKey, flight);
-          const removeFlight = () => {
-            activePrepareTasks.delete(flight.task);
-            if (prepareFlights.get(prepareKey) === flight) prepareFlights.delete(prepareKey);
-          };
-          flight.task.then(removeFlight, removeFlight);
-        }
-        const prepared = await withDeadline(flight.task, prepareTimeoutMs, error => {
-          if (prepareFlights.get(prepareKey) === flight) prepareFlights.delete(prepareKey);
-          flight.controller.abort(error);
-        });
-        return send(response, 200, prepared);
-      } else if (githubMatch) {
+      if (githubMatch) {
         if (!settings.githubSecret) return send(response, 503, { error: 'GitHub webhook secret is not configured' });
         const signature = singleHeader(request.headers['x-hub-signature-256']);
         if (!verifyGitHubSignature(rawBody, signature, settings.githubSecret)) {
