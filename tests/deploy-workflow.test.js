@@ -575,8 +575,8 @@ test('journals every mutating boundary and commits before legacy teardown', () =
   const cronPausing = main.indexOf('write_transaction_phase legacy-cron-pausing');
   const cronMutation = main.indexOf('pause_managed_cron "$transaction_dir/crontab.before"');
   const mirrorPreflight = main.indexOf('npm run prepare:mirrors');
-  const deployPreflight = main.indexOf('timeout --kill-after=30s 5m node index.js deploy --profile');
-  const expirePreflight = main.indexOf('timeout --kill-after=30s 5m node index.js expire --profile');
+  const deployPreflight = main.indexOf('timeout --kill-after=30s 15m node index.js deploy --profile');
+  const expirePreflight = main.indexOf('timeout --kill-after=30s 15m node index.js expire --profile');
   const candidateStarting = main.indexOf('write_transaction_phase candidate-starting');
   const candidateStart = main.indexOf('start_release "$CANDIDATE_RELEASE"');
   const nginxSwitching = main.indexOf('write_transaction_phase nginx-switching');

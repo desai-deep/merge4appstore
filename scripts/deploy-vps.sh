@@ -2362,13 +2362,16 @@ if ! (cd "$CANDIDATE_RELEASE" && timeout --kill-after=30s 15m npm run prepare:mi
   fail "Git mirror prewarming failed before cutover"
 fi
 for profile_file in "${repository_profiles[@]}"; do
+  # The CLI may spend up to 600 seconds waiting for the repository lock. Keep
+  # the outer deployment bound above that contract so the durable pause has
+  # time to quiesce workers before preflight itself is terminated.
   (cd "$CANDIDATE_RELEASE" && env \
     MERGE4APPSTORE_ENV="$CONTROL_ENV" MERGE4APPSTORE_STATE_DIR="$STATE_DIR" DRY_RUN=true \
-    timeout --kill-after=30s 5m node index.js deploy --profile "$profile_file") \
+    timeout --kill-after=30s 15m node index.js deploy --profile "$profile_file") \
     || fail "Deploy dry-run failed for profile: $profile_file"
   (cd "$CANDIDATE_RELEASE" && env \
     MERGE4APPSTORE_ENV="$CONTROL_ENV" MERGE4APPSTORE_STATE_DIR="$STATE_DIR" DRY_RUN=true \
-    timeout --kill-after=30s 5m node index.js expire --profile "$profile_file") \
+    timeout --kill-after=30s 15m node index.js expire --profile "$profile_file") \
     || fail "Expire dry-run failed for profile: $profile_file"
 done
 
