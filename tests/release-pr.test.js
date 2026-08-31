@@ -169,9 +169,21 @@ test('updates the exact open release PR', () => {
 });
 
 test('keeps release PR reconciliation successful when labeling fails', () => {
+  const failure = new Error('Command failed');
+  failure.stderr = 'gh: Issues permission denied\n';
+  const messages = [];
+  const originalLog = console.log;
   const github = githubFixture({
-    labelPullRequest: () => { throw new Error('Issues permission denied'); },
+    labelPullRequest: () => { throw failure; },
   });
 
-  assert.equal(reconcileReleasePullRequest(github, policy).action, 'created');
+  console.log = message => messages.push(message);
+  try {
+    assert.equal(reconcileReleasePullRequest(github, policy).action, 'created');
+  } finally {
+    console.log = originalLog;
+  }
+  assert.ok(messages.some(message => (
+    message.includes('Could not label release PR #70: gh: Issues permission denied')
+  )));
 });
