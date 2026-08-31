@@ -397,6 +397,56 @@ test('shares forced pre-validation metadata failures with later initialization c
   assert.equal(metadataCalls, 1);
 });
 
+test('shares forced abandoned-clone cleanup failures before releasing the lock', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge4appstore-forced-cleanup-backoff-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const now = 10_000;
+  const mirror = new GitMirror('example', 'forced-cleanup-backoff', {
+    stateDirectory: path.join(root, 'state'),
+    retryBackoffMs: 60_000,
+    now: () => now,
+  });
+  let cleanupCalls = 0;
+  let announceCleanup;
+  const cleanupStarted = new Promise(resolve => {
+    announceCleanup = resolve;
+  });
+  let releaseCleanup;
+  const cleanupBlocked = new Promise(resolve => {
+    releaseCleanup = resolve;
+  });
+  mirror.cleanupAbandonedCloneDirectories = async () => {
+    const call = ++cleanupCalls;
+    announceCleanup();
+    await cleanupBlocked;
+    const error = new Error(`cleanup EIO call ${call}`);
+    error.code = 'EIO';
+    throw error;
+  };
+
+  const first = mirror.refresh({ force: true });
+  await cleanupStarted;
+  const second = mirror.refresh({ force: true });
+  releaseCleanup();
+  const results = await Promise.allSettled([first, second]);
+  assert.equal(results.every(result => (
+    result.status === 'rejected'
+      && result.reason.statusCode === 503
+      && result.reason.retryAfter === 60
+  )), true);
+  const firstFailure = results[0].reason;
+  assert.equal(results[1].reason, firstFailure);
+  assert.equal(mirror.retryAt, now + 60_000);
+  assert.equal(mirror.lastFailure, firstFailure);
+  assert.equal(mirror.refreshRetryAt, now + 60_000);
+  assert.equal(mirror.lastRefreshFailure, firstFailure);
+  assert.equal(cleanupCalls, 1);
+
+  await assert.rejects(mirror.refresh({ force: true }), error => error === firstFailure);
+  await assert.rejects(mirror.refresh(), error => error === firstFailure);
+  assert.equal(cleanupCalls, 1);
+});
+
 test('does not clone twice when temporary-clone connectivity is corrupt', async t => {
   const fixture = await createRepository(t);
   const now = 10_000;
