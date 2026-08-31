@@ -11,6 +11,10 @@ const workflow = fs.readFileSync(new URL('../.github/workflows/deploy.yml', impo
 const dependabot = fs.readFileSync(new URL('../.github/dependabot.yml', import.meta.url), 'utf8');
 const deployScript = fs.readFileSync(new URL('../scripts/deploy-vps.sh', import.meta.url), 'utf8');
 const prepareMirrorsScript = fs.readFileSync(new URL('../scripts/prepare-git-mirrors.js', import.meta.url), 'utf8');
+const workerHealthCapability = fs.readFileSync(
+  new URL('../.merge4appstore-worker-health-v1', import.meta.url),
+  'utf8',
+);
 const ecosystemUrl = new URL('../ecosystem.config.cjs', import.meta.url);
 const ecosystem = fs.readFileSync(ecosystemUrl, 'utf8');
 const webhookServer = fs.readFileSync(new URL('../webhook-server.js', import.meta.url), 'utf8');
@@ -542,6 +546,7 @@ test('executes the atomic persistent-state bootstrap and publishes complete priv
 });
 
 test('builds immutable marked releases without mutating the control checkout', () => {
+  assert.equal(workerHealthCapability, 'merge4appstore-worker-health-v1\n');
   const noReplacements = deployRun.indexOf('export GIT_NO_REPLACE_OBJECTS=1');
   const firstIdentityCheck = deployRun.indexOf('git -C "$DEPLOY_DIR" rev-parse --is-inside-work-tree');
   const archive = deployRun.indexOf('git -C "$DEPLOY_DIR" archive --format=tar "$DEPLOY_SHA"');
@@ -1276,7 +1281,7 @@ test('precreates an empty private logrotate state before its first real pass', t
   assert.ok(initialization >= 0 && initialization < candidateDebug && candidateDebug < realPass);
 });
 
-test('overwrites stale PM2 release and job context on every reload', () => {
+test('overwrites stale PM2 release and job context for every generation', () => {
   const contract = {
     MERGE4APPSTORE_DELIVERY_PAUSE_FILE: '/state/delivery.pause',
     MERGE4APPSTORE_DEPLOY_SHA: 'b'.repeat(40),
@@ -1330,6 +1335,362 @@ test('overwrites stale PM2 release and job context on every reload', () => {
   assert.equal(simulatedReload.MERGE4APPSTORE_WEBHOOK_ENV, contract.MERGE4APPSTORE_WEBHOOK_ENV);
   assert.equal(simulatedReload.BUILD_COMMIT_SHA, '');
   assert.equal(simulatedReload.BUILD_PURPOSE, '');
+});
+
+test('discovers exactly the two PM2 workers created after a generation snapshot', () => {
+  const idFunctions = shellSection('pm2_app_ids() {', 'delete_pm2_ids() {');
+  const before = JSON.stringify([
+    { name: 'v2', pm_id: 8 },
+    { name: 'unrelated', pm_id: 2 },
+    { name: 'v2', pm_id: 7 },
+  ]);
+  const after = JSON.stringify([
+    { name: 'v2', pm_id: 10 },
+    { name: 'v2', pm_id: 8 },
+    { name: 'unrelated', pm_id: 2 },
+    { name: 'v2', pm_id: 9 },
+    { name: 'v2', pm_id: 7 },
+  ]);
+  const oneNew = JSON.stringify(JSON.parse(after).filter(item => item.pm_id !== 10));
+  const threeNew = JSON.stringify([...JSON.parse(after), { name: 'v2', pm_id: 11 }]);
+  const result = runBash([
+    'set -u',
+    'NODE_BINARY="$TEST_NODE_BINARY"',
+    'pm2() { [ "$1" = jlist ] && printf "%s" "$PM2_FIXTURE"; }',
+    idFunctions,
+    'PM2_FIXTURE="$TEST_BEFORE"',
+    'existing_ids="$(pm2_app_ids v2)" || exit 10',
+    '[ "$existing_ids" = "7,8" ] || exit 11',
+    'PM2_FIXTURE="$TEST_AFTER"',
+    'created_ids="$(pm2_new_app_ids v2 "$existing_ids")" || exit 12',
+    '[ "$created_ids" = "9,10" ] || exit 13',
+    'if pm2_new_app_ids v2 "7,unsafe" >/dev/null 2>&1; then exit 14; fi',
+    'PM2_FIXTURE="$TEST_ONE_NEW"',
+    'if pm2_new_app_ids v2 "$existing_ids" >/dev/null 2>&1; then exit 15; fi',
+    'PM2_FIXTURE="$TEST_THREE_NEW"',
+    'if pm2_new_app_ids v2 "$existing_ids" >/dev/null 2>&1; then exit 16; fi',
+  ].join('\n'), {
+    TEST_AFTER: after,
+    TEST_BEFORE: before,
+    TEST_NODE_BINARY: process.execPath,
+    TEST_ONE_NEW: oneNew,
+    TEST_THREE_NEW: threeNew,
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});
+
+test('hands PM2 releases over only after the new immutable generation validates', t => {
+  const directory = temporaryDirectory(t, 'merge4appstore-pm2-handoff-');
+  const release = path.join(directory, 'candidate release');
+  const legacyRelease = path.join(directory, 'legacy release');
+  const logs = path.join(directory, 'private logs');
+  const eventLog = path.join(directory, 'events');
+  fs.mkdirSync(release);
+  fs.mkdirSync(legacyRelease);
+  fs.mkdirSync(logs);
+  fs.writeFileSync(
+    path.join(release, '.merge4appstore-worker-health-v1'),
+    'merge4appstore-worker-health-v1\n',
+  );
+  const startRelease = shellSection('start_release() {', 'validate_pm2_release() {');
+  const source = [
+    'set -eu',
+    'SERVICE_NAME=v2',
+    'SERVICE_HOST=127.0.0.1',
+    'SERVICE_PORT=8788',
+    'CANDIDATE_RELEASE="$TEST_CANDIDATE_RELEASE"',
+    'DRAIN_TIMEOUT_MS=600000',
+    'LOGS_DIR="$TEST_LOGS"',
+    'configure_process_environment() { printf "configure:%s:%s:%s\\n" "$1" "$2" "$3" >> "$TEST_EVENTS"; }',
+    'pm2_unhealthy_target_ids() { printf "5"; }',
+    'pm2_app_ids() { printf "snapshot\\n" >> "$TEST_EVENTS"; printf "7,8"; }',
+    'pm2_new_app_ids() { printf "new-ids:%s:%s\\n" "$1" "$2" >> "$TEST_EVENTS"; printf "9,10"; }',
+    'delete_pm2_ids() { printf "delete:%s:%s\\n" "$1" "$2" >> "$TEST_EVENTS"; }',
+    'verify_pm2_worker_health() {',
+    '  printf "health:%s:%s:%s\\n" "$1" "$2" "$3" >> "$TEST_EVENTS"',
+    '  [ "${FAIL_HEALTH:-0}" -eq 0 ]',
+    '}',
+    'validate_pm2_release() {',
+    '  printf "validate:%s\\n" "${EXPECTED_PM2_IDS:-all}" >> "$TEST_EVENTS"',
+    '  [ "${FAIL_STAGED:-0}" -eq 0 ] || [ -z "${EXPECTED_PM2_IDS:-}" ]',
+    '}',
+    'pm2() {',
+    '  printf "pm2" >> "$TEST_EVENTS"; printf ":<%s>" "$@" >> "$TEST_EVENTS"; printf "\\n" >> "$TEST_EVENTS"',
+    '  if [ "${FAIL_READY:-0}" -eq 1 ]; then SECONDS=$((SECONDS + 60)); fi',
+    '}',
+    startRelease,
+    'start_release "$TEST_RELEASE" "$TEST_SECRET" "$TEST_SHA"',
+    'cat "$TEST_EVENTS"',
+  ].join('\n');
+  const environment = {
+    TEST_EVENTS: eventLog,
+    TEST_CANDIDATE_RELEASE: release,
+    TEST_LOGS: logs,
+    TEST_RELEASE: release,
+    TEST_SECRET: path.join(directory, 'candidate secret.env'),
+    TEST_SHA: 'b'.repeat(40),
+  };
+  const result = runBash(source, environment);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const events = result.stdout.trim().split('\n');
+  const start = events.find(event => event.startsWith('pm2:<start>'));
+  assert.ok(start, result.stdout);
+  for (const expectedArgument of [
+    'webhook-server.js',
+    '--name',
+    'v2',
+    '--instances',
+    '2',
+    '--wait-ready',
+    '--listen-timeout',
+    '60000',
+    '--kill-timeout',
+    '610000',
+    '--merge-logs',
+    '--cwd',
+    release,
+    '--output',
+    path.join(logs, 'webhook-out.log'),
+    '--error',
+    path.join(logs, 'webhook-error.log'),
+    '--force',
+  ]) {
+    assert.ok(start.includes(`<${expectedArgument}>`), `missing ${expectedArgument}: ${start}`);
+  }
+  assert.ok(!start.includes(`<${release}/webhook-server.js>`), start);
+  for (const filter of [
+    'APP_STORE_CONNECT_API_',
+    'BUILD_',
+    'GH_TOKEN',
+    'GH_WEBHOOK_SECRET',
+    'XCODE_CLOUD_WEBHOOK_TOKEN',
+    'MERGE4APPSTORE_BUILD_TOKEN_',
+  ]) {
+    assert.ok(start.includes(`<--filter-env>:<${filter}>`), `missing filter ${filter}: ${start}`);
+  }
+  assert.ok(!start.includes('<--filter-env>:<DRY_RUN>'), start);
+  const stagedValidation = events.indexOf('validate:9,10');
+  const unhealthyDeletion = events.indexOf('delete:v2:5');
+  const snapshot = events.indexOf('snapshot');
+  const health = events.indexOf(`health:9,10:${environment.TEST_SHA}:true`);
+  const deletion = events.indexOf('delete:v2:7,8');
+  const finalValidation = events.indexOf('validate:all');
+  assert.ok(unhealthyDeletion >= 0 && unhealthyDeletion < snapshot, result.stdout);
+  assert.ok(stagedValidation >= 0 && stagedValidation < health
+    && health < deletion && deletion < finalValidation, result.stdout);
+
+  fs.rmSync(eventLog);
+  const failed = runBash([
+    'FAIL_STAGED=1',
+    source,
+  ].join('\n'), environment);
+  assert.notEqual(failed.status, 0, 'a failed staged generation was accepted');
+  const failedEvents = fs.readFileSync(eventLog, 'utf8');
+  assert.match(failedEvents, /validate:9,10/);
+  assert.doesNotMatch(failedEvents, /delete:v2:7,8/);
+
+  fs.rmSync(eventLog);
+  const unhealthy = runBash([
+    'FAIL_HEALTH=1',
+    source,
+  ].join('\n'), environment);
+  assert.notEqual(unhealthy.status, 0, 'an unresponsive staged generation was accepted');
+  const unhealthyEvents = fs.readFileSync(eventLog, 'utf8');
+  assert.match(unhealthyEvents, /health:9,10:/);
+  assert.doesNotMatch(unhealthyEvents, /delete:v2:7,8/);
+
+  fs.rmSync(eventLog);
+  const timedOut = runBash([
+    'FAIL_READY=1',
+    source,
+  ].join('\n'), environment);
+  assert.notEqual(timedOut.status, 0, 'a PM2 wait-ready timeout was accepted');
+  const timedOutEvents = fs.readFileSync(eventLog, 'utf8');
+  assert.doesNotMatch(timedOutEvents, /validate:9,10|delete:v2:7,8/);
+
+  fs.rmSync(eventLog);
+  fs.rmSync(path.join(release, '.merge4appstore-worker-health-v1'));
+  const missingCapability = runBash(source, environment);
+  assert.notEqual(missingCapability.status, 0, 'a markerless candidate generation was accepted');
+  const missingCapabilityEvents = fs.readFileSync(eventLog, 'utf8');
+  assert.match(missingCapability.stderr, /Candidate release lacks PM2 worker health capability/);
+  assert.doesNotMatch(missingCapabilityEvents, /delete:|snapshot|pm2:<start>/);
+
+  fs.rmSync(eventLog);
+  const legacy = runBash(source, {
+    ...environment,
+    TEST_RELEASE: legacyRelease,
+  });
+  assert.equal(legacy.status, 0, legacy.stderr || legacy.stdout);
+  assert.ok(legacy.stdout.includes(`health:9,10:${environment.TEST_SHA}:false`), legacy.stdout);
+});
+
+test('validates a staged PM2 generation without accepting a mixed final topology', t => {
+  const directory = temporaryDirectory(t, 'merge4appstore-pm2-validation-');
+  const oldRelease = path.join(directory, 'old');
+  const candidateRelease = path.join(directory, 'candidate');
+  const logs = path.join(directory, 'logs');
+  const state = path.join(directory, 'state');
+  fs.mkdirSync(oldRelease);
+  fs.mkdirSync(candidateRelease);
+  fs.mkdirSync(logs);
+  fs.mkdirSync(state);
+  const oldScript = path.join(oldRelease, 'webhook-server.js');
+  const candidateScript = path.join(candidateRelease, 'webhook-server.js');
+  const outLog = path.join(logs, 'out.log');
+  const errorLog = path.join(logs, 'error.log');
+  for (const file of [oldScript, candidateScript, outLog, errorLog]) fs.writeFileSync(file, '');
+
+  const contract = {
+    MERGE4APPSTORE_DELIVERY_PAUSE_FILE: path.join(state, 'delivery.pause'),
+    MERGE4APPSTORE_DEPLOY_SHA: 'c'.repeat(40),
+    MERGE4APPSTORE_DRAIN_TIMEOUT_MS: '600000',
+    MERGE4APPSTORE_ENV: path.join(directory, 'control.env'),
+    MERGE4APPSTORE_PM2_NAME: 'v2',
+    MERGE4APPSTORE_PREPARE_TIMEOUT_MS: '45000',
+    MERGE4APPSTORE_STATE_DIR: state,
+    MERGE4APPSTORE_WEBHOOK_ENV: path.join(state, 'candidate.env'),
+    DRY_RUN: 'false',
+    NODE_ENV: 'production',
+    RECONCILE_METADATA: 'false',
+    WEBHOOK_AUTOSTART: 'true',
+    WEBHOOK_HOST: '127.0.0.1',
+    WEBHOOK_PORT: '8788',
+  };
+  const worker = (id, cwd, script) => ({
+    name: 'v2',
+    pm_id: id,
+    pm2_env: {
+      status: 'online',
+      exec_mode: 'cluster_mode',
+      node_version: '20.19.2',
+      pm_cwd: cwd,
+      pm_exec_path: script,
+      pm_out_log_path: outLog,
+      pm_err_log_path: errorLog,
+      merge_logs: true,
+      instances: 2,
+      wait_ready: true,
+      listen_timeout: 60000,
+      kill_timeout: 610000,
+      autorestart: true,
+      filter_env: [
+        'APP_STORE_CONNECT_API_',
+        'BUILD_',
+        'GH_TOKEN',
+        'GH_WEBHOOK_SECRET',
+        'XCODE_CLOUD_WEBHOOK_TOKEN',
+        'MERGE4APPSTORE_BUILD_TOKEN_',
+      ],
+      env: {},
+      ...contract,
+    },
+  });
+  const mixed = JSON.stringify([
+    worker(7, oldRelease, oldScript),
+    worker(8, oldRelease, oldScript),
+    worker(9, candidateRelease, candidateScript),
+    worker(10, candidateRelease, candidateScript),
+  ]);
+  const candidateOnly = JSON.stringify([
+    worker(9, candidateRelease, candidateScript),
+    worker(10, candidateRelease, candidateScript),
+  ]);
+  const validator = shellSection('validate_pm2_release() {', 'pm2_app_count() {');
+  const result = runBash([
+    'set -u',
+    'NODE_BINARY="$TEST_NODE_BINARY"',
+    'export MERGE4APPSTORE_PM2_NAME=v2',
+    'export MERGE4APPSTORE_DRAIN_TIMEOUT_MS=600000',
+    'export MERGE4APPSTORE_PREPARE_TIMEOUT_MS=45000',
+    'export MERGE4APPSTORE_STATE_DIR="$TEST_STATE"',
+    'export MERGE4APPSTORE_ENV="$TEST_CONTROL_ENV"',
+    'export MERGE4APPSTORE_DELIVERY_PAUSE_FILE="$TEST_PAUSE_FILE"',
+    'export EXPECTED_PM2_CWD="$TEST_CANDIDATE_RELEASE"',
+    'export EXPECTED_PM2_SCRIPT="$TEST_CANDIDATE_SCRIPT"',
+    'export EXPECTED_PM2_SECRET_FILE="$TEST_SECRET_FILE"',
+    'export EXPECTED_PM2_SHA="$TEST_SHA"',
+    'export EXPECTED_PM2_OUT_LOG="$TEST_OUT_LOG"',
+    'export EXPECTED_PM2_ERROR_LOG="$TEST_ERROR_LOG"',
+    'pm2() { [ "$1" = jlist ] && printf "%s" "$PM2_FIXTURE"; }',
+    validator,
+    'PM2_FIXTURE="$TEST_MIXED"',
+    'EXPECTED_PM2_IDS=9,10 validate_pm2_release || exit 10',
+    'if validate_pm2_release >/dev/null 2>&1; then exit 11; fi',
+    'if EXPECTED_PM2_IDS=9 validate_pm2_release >/dev/null 2>&1; then exit 12; fi',
+    'PM2_FIXTURE="$TEST_CANDIDATE_ONLY"',
+    'validate_pm2_release || exit 13',
+  ].join('\n'), {
+    TEST_CANDIDATE_ONLY: candidateOnly,
+    TEST_CANDIDATE_RELEASE: candidateRelease,
+    TEST_CANDIDATE_SCRIPT: candidateScript,
+    TEST_CONTROL_ENV: contract.MERGE4APPSTORE_ENV,
+    TEST_ERROR_LOG: errorLog,
+    TEST_MIXED: mixed,
+    TEST_NODE_BINARY: process.execPath,
+    TEST_OUT_LOG: outLog,
+    TEST_PAUSE_FILE: contract.MERGE4APPSTORE_DELIVERY_PAUSE_FILE,
+    TEST_SECRET_FILE: contract.MERGE4APPSTORE_WEBHOOK_ENV,
+    TEST_SHA: contract.MERGE4APPSTORE_DEPLOY_SHA,
+    TEST_STATE: state,
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});
+
+test('requires both staged PM2 worker IDs to answer health before retiring the old generation', t => {
+  const directory = temporaryDirectory(t, 'merge4appstore-pm2-health-');
+  const counter = path.join(directory, 'counter');
+  fs.writeFileSync(counter, '0\n');
+  const sha = 'd'.repeat(40);
+  const responses = JSON.stringify([
+    { ok: true, deployment_sha: 'a'.repeat(40), worker_id: 7 },
+    { ok: true, deployment_sha: sha, worker_id: 9 },
+    { ok: true, deployment_sha: sha, worker_id: 9 },
+    { ok: true, deployment_sha: sha, worker_id: 10 },
+  ]);
+  const oneWorker = JSON.stringify([
+    { ok: true, deployment_sha: sha, worker_id: 9 },
+  ]);
+  const legacyWorker = JSON.stringify([
+    { ok: true, deployment_sha: sha },
+  ]);
+  const healthFunction = shellSection('verify_pm2_worker_health() {', 'start_release() {');
+  const result = runBash([
+    'set -u',
+    'NODE_BINARY="$TEST_NODE_BINARY"',
+    'SERVICE_HOST=127.0.0.1',
+    'SERVICE_PORT=8788',
+    'sleep() { :; }',
+    'curl() {',
+    '  local index',
+    '  index="$(cat "$TEST_COUNTER")"',
+    '  printf "%s\\n" "$((index + 1))" > "$TEST_COUNTER"',
+    "  TEST_RESPONSE_INDEX=\"$index\" \"$TEST_NODE_BINARY\" -e 'const responses = JSON.parse(process.env.TEST_RESPONSES); const index = Number(process.env.TEST_RESPONSE_INDEX); process.stdout.write(JSON.stringify(responses[index % responses.length]));'",
+    '}',
+    healthFunction,
+    'TEST_RESPONSES="$TEST_ALL_RESPONSES"',
+    'export TEST_RESPONSES',
+    'verify_pm2_worker_health 9,10 "$TEST_SHA" true || exit 10',
+    '[ "$(cat "$TEST_COUNTER")" -eq 4 ] || exit 11',
+    'printf "0\\n" > "$TEST_COUNTER"',
+    'TEST_RESPONSES="$TEST_ONE_RESPONSE"',
+    'export TEST_RESPONSES',
+    'if verify_pm2_worker_health 9,10 "$TEST_SHA" true >/dev/null 2>&1; then exit 12; fi',
+    '[ "$(cat "$TEST_COUNTER")" -eq 12 ] || exit 13',
+    'printf "0\\n" > "$TEST_COUNTER"',
+    'TEST_RESPONSES="$TEST_LEGACY_RESPONSE"',
+    'export TEST_RESPONSES',
+    'verify_pm2_worker_health 9,10 "$TEST_SHA" false || exit 14',
+    '[ "$(cat "$TEST_COUNTER")" -eq 1 ] || exit 15',
+  ].join('\n'), {
+    TEST_ALL_RESPONSES: responses,
+    TEST_COUNTER: counter,
+    TEST_LEGACY_RESPONSE: legacyWorker,
+    TEST_NODE_BINARY: process.execPath,
+    TEST_ONE_RESPONSE: oneWorker,
+    TEST_SHA: sha,
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
 test('rejects dry-run and transient job flags in the production control environment', t => {

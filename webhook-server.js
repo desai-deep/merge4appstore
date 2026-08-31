@@ -476,6 +476,8 @@ export function createWebhookServer({
   prepareCache = createPrepareCache(),
   deliveryStore = createDeliveryStore(),
   deploymentSha = process.env.MERGE4APPSTORE_DEPLOY_SHA || null,
+  workerId = /^(0|[1-9]\d*)$/.test(process.env.pm_id || '')
+    && Number.isSafeInteger(Number(process.env.pm_id)) ? Number(process.env.pm_id) : null,
   prepareTimeoutMs = positiveNumber(process.env.MERGE4APPSTORE_PREPARE_TIMEOUT_MS, 45_000),
   maxPrepareFlights = 100,
   recoveryIntervalMs = positiveNumber(process.env.MERGE4APPSTORE_RECOVERY_INTERVAL_MS, 5_000),
@@ -489,6 +491,9 @@ export function createWebhookServer({
 }) {
   if (!Number.isSafeInteger(maxPrepareFlights) || maxPrepareFlights <= 0) {
     throw new RangeError('maxPrepareFlights must be a positive integer');
+  }
+  if (workerId !== null && (!Number.isSafeInteger(workerId) || workerId < 0)) {
+    throw new RangeError('workerId must be a non-negative integer or null');
   }
   const jobRunner = dispatch || createJobRunner();
   const enqueue = createSerialDispatcher(jobRunner);
@@ -678,6 +683,7 @@ export function createWebhookServer({
           degraded,
           profiles: Object.keys(profiles),
           deployment_sha: deploymentSha,
+          worker_id: workerId,
           delivery_queue: deliveryQueue,
           deployment_state: deploymentState,
           delivery_paused_until: Number.isFinite(deliveryPausedUntil) && Date.now() < deliveryPausedUntil
