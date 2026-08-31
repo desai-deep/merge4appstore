@@ -67,25 +67,40 @@ export async function prewarmGitMirrors(
     const timeoutError = new Error(`Timed out preparing Git mirror ${name}`);
     timeoutError.code = 'EMIRRORPREWARMTIMEOUT';
     const timer = setTimeout(() => controller.abort(timeoutError), timeoutMs);
+    const assertRepositoryBudget = () => {
+      if (controller.signal.aborted) throw abortReason(controller.signal);
+      if (Date.now() >= repositoryDeadline) {
+        controller.abort(timeoutError);
+        throw abortReason(controller.signal);
+      }
+    };
     try {
       const mirror = mirrorFor(repository.owner, repository.name);
       for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
-        if (controller.signal.aborted) throw abortReason(controller.signal);
+        assertRepositoryBudget();
         try {
           await mirror.refresh({ force: true, signal: controller.signal });
+          assertRepositoryBudget();
           break;
         } catch (error) {
           if (controller.signal.aborted) throw abortReason(controller.signal);
           if (error?.statusCode !== 503 || attempt === maximumAttempts) throw error;
-          const waitMs = retryDelayMs(
-            error,
-            Math.max(1, repositoryDeadline - Date.now()),
-          );
+          const remainingMs = repositoryDeadline - Date.now();
+          const waitMs = retryDelayMs(error, Number.MAX_SAFE_INTEGER);
+          // A retry that cannot finish its required backoff before the
+          // repository deadline has no usable execution budget. Fail with the
+          // deadline classification now instead of racing two same-deadline
+          // timers and occasionally starting an already-expired attempt.
+          if (remainingMs <= 0 || waitMs >= remainingMs) {
+            controller.abort(timeoutError);
+            throw abortReason(controller.signal);
+          }
           const message = error instanceof Error ? error.message : String(error);
           const warning = `Git mirror transient failure: ${name}: ${message}; retrying in ${waitMs}ms (attempt ${attempt + 1}/${maximumAttempts})`;
           if (typeof logger.warn === 'function') logger.warn(warning);
           else logger.log(warning);
           await sleep(waitMs, controller.signal);
+          assertRepositoryBudget();
         }
       }
       logger.log(`Git mirror ready: ${name}`);

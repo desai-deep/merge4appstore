@@ -206,7 +206,7 @@ test('aggregates an exhausted transient prewarm failure and still tries later re
         },
       }),
       logger: { log() {}, warn() {}, error() {} },
-      repositoryTimeoutMs: 1_000,
+      repositoryTimeoutMs: 10_000,
       sleep: async milliseconds => { events.push(`sleep:${milliseconds}`); },
     }),
     error => {
@@ -222,7 +222,7 @@ test('aggregates an exhausted transient prewarm failure and still tries later re
   assert.deepEqual(events.slice(2), ['failing', 'healthy']);
 });
 
-test('repository deadline cancels a transient retry wait before another attempt', async () => {
+test('repository deadline rejects a retry whose backoff cannot fit', async () => {
   let attempts = 0;
   const transient = new Error('long provider backoff');
   transient.statusCode = 503;
@@ -246,6 +246,65 @@ test('repository deadline cancels a transient retry wait before another attempt'
       && error.errors[0].code === 'EMIRRORPREWARMTIMEOUT',
   );
   assert.equal(attempts, 1);
+});
+
+test('wall-clock deadline prevents a retry after the event loop stalls', async () => {
+  let attempts = 0;
+  const transient = new Error('short provider backoff');
+  transient.statusCode = 503;
+  transient.retryAfter = 0.001;
+
+  await assert.rejects(
+    prewarmGitMirrors(new Map([
+      ['example/stalled-loop', { owner: 'example', name: 'stalled-loop' }],
+    ]), {
+      mirrorFor: () => ({
+        refresh: async () => {
+          attempts += 1;
+          throw transient;
+        },
+      }),
+      logger: { log() {}, warn() {}, error() {} },
+      repositoryTimeoutMs: 50,
+      sleep: async () => {
+        const releaseAt = Date.now() + 75;
+        while (Date.now() < releaseAt) {}
+      },
+    }),
+    error => error instanceof AggregateError
+      && error.errors.length === 1
+      && error.errors[0].code === 'EMIRRORPREWARMTIMEOUT',
+  );
+  assert.equal(attempts, 1);
+});
+
+test('does not report a mirror ready after refresh exceeds the wall-clock deadline', async () => {
+  const messages = [];
+
+  await assert.rejects(
+    prewarmGitMirrors(new Map([
+      ['example/late-success', { owner: 'example', name: 'late-success' }],
+    ]), {
+      mirrorFor: () => ({
+        refresh: async () => {
+          const releaseAt = Date.now() + 75;
+          while (Date.now() < releaseAt) {}
+        },
+      }),
+      logger: {
+        log: message => messages.push(message),
+        warn: message => messages.push(message),
+        error: message => messages.push(message),
+      },
+      repositoryTimeoutMs: 50,
+    }),
+    error => error instanceof AggregateError
+      && error.errors.length === 1
+      && error.errors[0].code === 'EMIRRORPREWARMTIMEOUT',
+  );
+  assert.deepEqual(messages, [
+    'Git mirror failed: example/late-success: Timed out preparing Git mirror example/late-success',
+  ]);
 });
 
 test('aborts a repository that exceeds its deployment prewarm deadline', async () => {
