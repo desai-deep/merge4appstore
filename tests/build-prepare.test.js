@@ -129,6 +129,41 @@ test('keeps the pull request description before commits for its first build', as
   assert.deepEqual(result.warnings, ['No ancestor published build found; using all pull-request commits']);
 });
 
+test('recovers pull request notes for an exact branch-fallback build', async () => {
+  const profile = { repository: { owner: 'example', name: 'ios', beta_branch: 'develop' } };
+  const build = { purpose: 'pull_request', appRole: 'uat', appId: '1', workflowId: 'wf-pr', includeCommits: true };
+  const payload = { repository: 'example/ios', commit: COMMIT, branch: 'feature', target_branch: 'preview', pull_request: null };
+  const lookups = [];
+  const github = {
+    getCommitSubject: () => 'Fallback subject',
+    findOpenPullRequestForCommit: (commit, base, head) => {
+      lookups.push({ commit, base, head });
+      return { number: 42 };
+    },
+    getPRDetails: number => {
+      assert.equal(number, '42');
+      return { title: 'Freshen controls', body: 'Verify the pinned controls.', headRefOid: COMMIT };
+    },
+    getCommitSubjectsSince: () => null,
+    getPullRequestCommitSubjects: number => {
+      assert.equal(number, '42');
+      return ['Pin playback controls', 'Polish player spacing'];
+    },
+  };
+
+  const result = await generateTestFlightNotes({
+    profile,
+    build,
+    payload,
+    asc: { getPublishedWorkflowCommits: async () => [] },
+    github,
+  });
+
+  assert.deepEqual(lookups, [{ commit: COMMIT, base: 'preview', head: 'feature' }]);
+  assert.equal(result.text, 'Verify the pinned controls.\n\nCommits in this pull request:\n\n• Pin playback controls\n• Polish player spacing');
+  assert.deepEqual(result.warnings, ['No ancestor published build found; using all pull-request commits']);
+});
+
 test('beta notes use the exact release pull request without listing commits', async () => {
   const profile = { repository: { owner: 'example', name: 'ios', beta_branch: 'develop', production_branch: 'main' } };
   const build = { purpose: 'beta', appRole: 'prod', appId: '1', workflowId: 'wf-beta', includeCommits: false };
