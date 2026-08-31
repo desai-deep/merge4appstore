@@ -1379,6 +1379,24 @@ test('discovers exactly the two PM2 workers created after a generation snapshot'
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
+test('measures PM2 commands precisely while preserving their exit status and output', () => {
+  const timedCommand = shellSection('run_timed_command() {', 'start_release() {');
+  const result = runBash([
+    'set -eu',
+    timedCommand,
+    'probe() { printf "probe-output\\n"; printf "probe-error\\n" >&2; }',
+    'run_timed_command elapsed probe || exit 10',
+    'case "$elapsed" in ""|*[!0-9.]*|.*|*.|*.*.*) exit 11 ;; esac',
+    'if run_timed_command failed bash -c "exit 7"; then exit 12; else status=$?; fi',
+    '[ "$status" -eq 7 ] || exit 13',
+    'case "$failed" in ""|*[!0-9.]*|.*|*.|*.*.*) exit 14 ;; esac',
+    'printf "elapsed=%s failed=%s\\n" "$elapsed" "$failed"',
+  ].join('\n'));
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /probe-output\nelapsed=\d+\.\d+ failed=\d+\.\d+/);
+  assert.match(result.stderr, /probe-error/);
+});
+
 test('hands PM2 releases over only after the new immutable generation validates', t => {
   const directory = temporaryDirectory(t, 'merge4appstore-pm2-handoff-');
   const release = path.join(directory, 'candidate release');
@@ -1395,6 +1413,7 @@ test('hands PM2 releases over only after the new immutable generation validates'
   const startRelease = shellSection('start_release() {', 'validate_pm2_release() {');
   const source = [
     'set -eu',
+    'NODE_BINARY="$TEST_NODE_BINARY"',
     'SERVICE_NAME=v2',
     'SERVICE_HOST=127.0.0.1',
     'SERVICE_PORT=8788',
@@ -1406,6 +1425,12 @@ test('hands PM2 releases over only after the new immutable generation validates'
     'pm2_app_ids() { printf "snapshot\\n" >> "$TEST_EVENTS"; printf "7,8"; }',
     'pm2_new_app_ids() { printf "new-ids:%s:%s\\n" "$1" "$2" >> "$TEST_EVENTS"; printf "9,10"; }',
     'delete_pm2_ids() { printf "delete:%s:%s\\n" "$1" "$2" >> "$TEST_EVENTS"; }',
+    'run_timed_command() {',
+    '  local result_name="$1"',
+    '  shift',
+    '  printf -v "$result_name" "%s" "${START_ELAPSED_SECONDS:-0.001}"',
+    '  "$@"',
+    '}',
     'verify_pm2_worker_health() {',
     '  printf "health:%s:%s:%s\\n" "$1" "$2" "$3" >> "$TEST_EVENTS"',
     '  [ "${FAIL_HEALTH:-0}" -eq 0 ]',
@@ -1416,7 +1441,6 @@ test('hands PM2 releases over only after the new immutable generation validates'
     '}',
     'pm2() {',
     '  printf "pm2" >> "$TEST_EVENTS"; printf ":<%s>" "$@" >> "$TEST_EVENTS"; printf "\\n" >> "$TEST_EVENTS"',
-    '  if [ "${FAIL_READY:-0}" -eq 1 ]; then SECONDS=$((SECONDS + 60)); fi',
     '}',
     startRelease,
     'start_release "$TEST_RELEASE" "$TEST_SECRET" "$TEST_SHA"',
@@ -1426,6 +1450,7 @@ test('hands PM2 releases over only after the new immutable generation validates'
     TEST_EVENTS: eventLog,
     TEST_CANDIDATE_RELEASE: release,
     TEST_LOGS: logs,
+    TEST_NODE_BINARY: process.execPath,
     TEST_RELEASE: release,
     TEST_SECRET: path.join(directory, 'candidate secret.env'),
     TEST_SHA: 'b'.repeat(40),
@@ -1501,12 +1526,20 @@ test('hands PM2 releases over only after the new immutable generation validates'
 
   fs.rmSync(eventLog);
   const timedOut = runBash([
-    'FAIL_READY=1',
+    'START_ELAPSED_SECONDS=60',
     source,
   ].join('\n'), environment);
   assert.notEqual(timedOut.status, 0, 'a PM2 wait-ready timeout was accepted');
   const timedOutEvents = fs.readFileSync(eventLog, 'utf8');
   assert.doesNotMatch(timedOutEvents, /validate:9,10|delete:v2:7,8/);
+
+  fs.rmSync(eventLog);
+  const nearTimeout = runBash([
+    'START_ELAPSED_SECONDS=59.999',
+    source,
+  ].join('\n'), environment);
+  assert.equal(nearTimeout.status, 0, nearTimeout.stderr || nearTimeout.stdout);
+  assert.match(nearTimeout.stdout, /delete:v2:7,8/);
 
   fs.rmSync(eventLog);
   fs.rmSync(path.join(release, '.merge4appstore-worker-health-v1'));

@@ -813,12 +813,32 @@ verify_pm2_worker_health() {
   return 1
 }
 
+run_timed_command() {
+  local result_name="$1"
+  shift
+  local timing_output command_status
+  case "$result_name" in ''|*[!A-Za-z0-9_]*) return 2 ;; esac
+  # Bash's SECONDS has one-second granularity and can round a sub-60-second
+  # command up at the boundary. The reserved-word timer reports milliseconds;
+  # preserve the command's normal stdout/stderr while capturing only its time.
+  exec 8>&1 9>&2
+  if timing_output="$({ TIMEFORMAT='%R'; time "$@" 1>&8 2>&9; } 2>&1)"; then
+    command_status=0
+  else
+    command_status=$?
+  fi
+  exec 8>&- 9>&-
+  case "$timing_output" in ''|*[!0-9.]*|.*|*.|*.*.*) return 2 ;; esac
+  printf -v "$result_name" '%s' "$timing_output"
+  return "$command_status"
+}
+
 start_release() {
   local release="$1"
   local secret_file="$2"
   local deployment_sha="$3"
   local existing_ids created_ids unhealthy_target_ids worker_health_mode
-  local start_seconds start_elapsed_seconds
+  local start_elapsed_seconds
   local kill_timeout_ms=$((DRAIN_TIMEOUT_MS + 10000))
   configure_process_environment "$release" "$secret_file" "$deployment_sha"
 
@@ -845,10 +865,9 @@ start_release() {
   # PM2 startOrReload retains pm_cwd and pm_exec_path from the old generation
   # when an ecosystem file changes cwd. Start a complete target generation
   # beside the old workers, verify it, and only then retire the captured IDs.
-  start_seconds="$SECONDS"
   # Keep the script cwd-relative: PM2 rewrites absolute script paths containing
   # spaces through `bash -c`, which loses argument boundaries.
-  pm2 start webhook-server.js \
+  run_timed_command start_elapsed_seconds pm2 start webhook-server.js \
     --name "$SERVICE_NAME" \
     --cwd "$release" \
     --instances 2 \
@@ -865,8 +884,10 @@ start_release() {
     --filter-env XCODE_CLOUD_WEBHOOK_TOKEN \
     --filter-env MERGE4APPSTORE_BUILD_TOKEN_ \
     --force || return 1
-  start_elapsed_seconds=$((SECONDS - start_seconds))
-  if [ "$start_elapsed_seconds" -ge 60 ]; then
+  if ! PM2_START_ELAPSED_SECONDS="$start_elapsed_seconds" "$NODE_BINARY" -e '
+    const elapsed = Number(process.env.PM2_START_ELAPSED_SECONDS);
+    process.exit(Number.isFinite(elapsed) && elapsed < 60 ? 0 : 1);
+  '; then
     echo "ERROR: PM2 generation start reached the wait-ready timeout (${start_elapsed_seconds}s)" >&2
     return 1
   fi
