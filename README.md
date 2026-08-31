@@ -710,7 +710,7 @@ requires `APP_BUNDLE_ID`, `APP_NAME`, `GITHUB_REPO_OWNER`, and
 | `MERGE4APPSTORE_MIRROR_TTL_MS` | Minimum interval between successful mirror refreshes (default `60000`) |
 | `MERGE4APPSTORE_MIRROR_TIMEOUT_MS` | Timeout for each request-time mirror Git command (default `15000`) |
 | `MERGE4APPSTORE_MIRROR_PREWARM_TIMEOUT_MS` | Timeout used by `prepare:mirrors` for validation and maintenance Git commands (default `60000`) |
-| `MERGE4APPSTORE_MIRROR_PREWARM_FETCH_TIMEOUT_MS` | Timeout used by `prepare:mirrors` for each network fetch (default `120000`) |
+| `MERGE4APPSTORE_MIRROR_PREWARM_FETCH_TIMEOUT_MS` | Timeout used by `prepare:mirrors` for each network fetch (default `180000`) |
 | `MERGE4APPSTORE_MIRROR_CLONE_TIMEOUT_MS` | Timeout used by `prepare:mirrors` for each first-time blobless clone (default `120000`); request-time initialization retains the shorter request-time command timeout so provider fallback fits inside the request deadline |
 | `MERGE4APPSTORE_MIRROR_REQUEST_LOCK_TIMEOUT_MS` | Maximum request-time wait for a concurrent mirror mutation before provider fallback (default and maximum `5000`) |
 | `MERGE4APPSTORE_MIRROR_LOCK_TIMEOUT_MS` | Deprecated lower-only alias for `MERGE4APPSTORE_MIRROR_REQUEST_LOCK_TIMEOUT_MS`; retained for compatibility and capped at `5000` |

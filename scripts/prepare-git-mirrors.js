@@ -19,9 +19,10 @@ function positiveInteger(value, fallback) {
 }
 
 const defaultPrewarmAttempts = 2;
-const defaultRepositoryTimeoutMs = 7 * 60_000;
+const defaultRepositoryTimeoutMs = 9 * 60_000;
 const defaultPrewarmCommandTimeoutMs = 60_000;
-const defaultPrewarmNetworkTimeoutMs = 120_000;
+const defaultPrewarmCloneTimeoutMs = 120_000;
+const defaultPrewarmFetchTimeoutMs = 180_000;
 const defaultPrewarmLockTimeoutMs = 60_000;
 const defaultPrewarmRetryDelayMs = 5_000;
 
@@ -140,11 +141,11 @@ export function prewarmGitMirrorOptions(environment = process.env) {
     ),
     cloneTimeoutMs: positiveInteger(
       environment.MERGE4APPSTORE_MIRROR_CLONE_TIMEOUT_MS,
-      defaultPrewarmNetworkTimeoutMs,
+      defaultPrewarmCloneTimeoutMs,
     ),
     fetchTimeoutMs: positiveInteger(
       environment.MERGE4APPSTORE_MIRROR_PREWARM_FETCH_TIMEOUT_MS,
-      defaultPrewarmNetworkTimeoutMs,
+      defaultPrewarmFetchTimeoutMs,
     ),
     lockTimeoutMs: positiveInteger(
       environment.MERGE4APPSTORE_MIRROR_PREWARM_LOCK_TIMEOUT_MS,
