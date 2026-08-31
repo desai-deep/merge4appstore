@@ -1537,7 +1537,8 @@ test('retries transient deployment probes with bounded diagnostics', () => {
 test('aggregate mirror prewarm budget exceeds sequential clone and recovery budgets', () => {
   const outer = /timeout --kill-after=30s (\d+)m npm run prepare:mirrors/.exec(deployScript);
   const clone = /MERGE4APPSTORE_MIRROR_CLONE_TIMEOUT_MS,\s*([\d_]+)/.exec(prepareMirrorsScript);
-  assert.ok(outer && clone);
+  const repositoryDeadline = /defaultRepositoryTimeoutMs = (\d+) \* 60_000/.exec(prepareMirrorsScript);
+  assert.ok(outer && clone && repositoryDeadline);
   const configuredRepositories = new Set(
     fs.readdirSync(path.join(repositoryRoot, 'profiles'))
       .filter(name => /\.ya?ml$/.test(name))
@@ -1546,11 +1547,13 @@ test('aggregate mirror prewarm budget exceeds sequential clone and recovery budg
   ).size;
   const outerTimeoutMs = Number(outer[1]) * 60_000;
   const cloneTimeoutMs = Number(clone[1].replaceAll('_', ''));
+  const repositoryTimeoutMs = Number(repositoryDeadline[1]) * 60_000;
   const perRepositoryLockAndVerificationAllowanceMs = 3 * 60_000;
   assert.ok(
     outerTimeoutMs > configuredRepositories
       * (cloneTimeoutMs + perRepositoryLockAndVerificationAllowanceMs),
   );
+  assert.ok(outerTimeoutMs > configuredRepositories * repositoryTimeoutMs);
 });
 
 test('publishes deploy failures and monitors public health out of band', () => {

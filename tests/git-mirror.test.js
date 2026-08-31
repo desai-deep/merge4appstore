@@ -65,7 +65,8 @@ test('prewarms every repository sequentially and aggregates per-repository failu
       mirrorFor: (owner, repository) => ({
         refresh: async options => {
           events.push(`${owner}/${repository}:start`);
-          assert.deepEqual(options, { force: true });
+          assert.equal(options.force, true);
+          assert.equal(options.signal instanceof AbortSignal, true);
           if (failures.has(repository)) throw failures.get(repository);
           events.push(`${owner}/${repository}:ready`);
         },
@@ -94,6 +95,178 @@ test('prewarms every repository sequentially and aggregates per-repository failu
     'Git mirror ready: example/second',
     'Git mirror failed: example/third: third fetch failed',
   ]);
+});
+
+test('retries one transient deployment prewarm failure before advancing', async () => {
+  const events = [];
+  const messages = [];
+  const attempts = new Map();
+  const repositories = new Map([
+    ['example/first', { owner: 'example', name: 'first' }],
+    ['example/second', { owner: 'example', name: 'second' }],
+  ]);
+
+  await prewarmGitMirrors(repositories, {
+    mirrorFor: (owner, repository) => ({
+      refresh: async ({ force, signal }) => {
+        assert.equal(force, true);
+        assert.equal(signal.aborted, false);
+        const attempt = (attempts.get(repository) || 0) + 1;
+        attempts.set(repository, attempt);
+        events.push(`${owner}/${repository}:attempt-${attempt}`);
+        if (repository === 'first' && attempt === 1) {
+          const error = new Error('temporary helper startup failure');
+          error.statusCode = 503;
+          error.retryAfter = 5;
+          throw error;
+        }
+      },
+    }),
+    logger: {
+      log: message => messages.push(message),
+      warn: message => messages.push(message),
+      error: message => messages.push(message),
+    },
+    repositoryTimeoutMs: 10_000,
+    sleep: async (milliseconds, signal) => {
+      assert.equal(milliseconds, 5_000);
+      assert.equal(signal.aborted, false);
+      events.push(`sleep:${milliseconds}`);
+    },
+  });
+
+  assert.deepEqual(events, [
+    'example/first:attempt-1',
+    'sleep:5000',
+    'example/first:attempt-2',
+    'example/second:attempt-1',
+  ]);
+  assert.deepEqual(messages, [
+    'Git mirror transient failure: example/first: temporary helper startup failure; retrying in 5000ms (attempt 2/2)',
+    'Git mirror ready: example/first',
+    'Git mirror ready: example/second',
+  ]);
+});
+
+test('waits for the configured mirror backoff before retrying the same instance', async t => {
+  const fixture = await createRepository(t);
+  let now = 1_000;
+  let cloneCalls = 0;
+  const mirror = new GitMirror('example', 'backoff-prewarm', {
+    stateDirectory: fixture.stateDirectory,
+    remoteUrl: fixture.remoteUrl,
+    retryBackoffMs: 60_000,
+    now: () => now,
+    run: async (args, options) => {
+      if (args[0] === 'clone') {
+        cloneCalls += 1;
+        if (cloneCalls === 1) {
+          const error = new Error('fixture initial transport failure');
+          error.code = 128;
+          throw error;
+        }
+      }
+      return git(args, options);
+    },
+  });
+  const sleeps = [];
+
+  await prewarmGitMirrors(new Map([
+    ['example/backoff-prewarm', { owner: 'example', name: 'backoff-prewarm' }],
+  ]), {
+    mirrorFor: () => mirror,
+    logger: { log() {}, warn() {}, error() {} },
+    repositoryTimeoutMs: 120_000,
+    sleep: async milliseconds => {
+      sleeps.push(milliseconds);
+      now += milliseconds + 1;
+    },
+  });
+
+  assert.deepEqual(sleeps, [60_000]);
+  assert.equal(cloneCalls, 2);
+});
+
+test('aggregates an exhausted transient prewarm failure and still tries later repositories', async () => {
+  const events = [];
+  const finalFailure = new Error('transport still unavailable');
+  finalFailure.statusCode = 503;
+  finalFailure.retryAfter = 1;
+  const repositories = new Map([
+    ['example/failing', { owner: 'example', name: 'failing' }],
+    ['example/healthy', { owner: 'example', name: 'healthy' }],
+  ]);
+
+  await assert.rejects(
+    prewarmGitMirrors(repositories, {
+      mirrorFor: (_owner, repository) => ({
+        refresh: async () => {
+          events.push(repository);
+          if (repository === 'failing') throw finalFailure;
+        },
+      }),
+      logger: { log() {}, warn() {}, error() {} },
+      repositoryTimeoutMs: 1_000,
+      sleep: async milliseconds => { events.push(`sleep:${milliseconds}`); },
+    }),
+    error => {
+      assert.equal(error instanceof AggregateError, true);
+      assert.deepEqual(error.errors, [finalFailure]);
+      return true;
+    },
+  );
+  assert.equal(events[0], 'failing');
+  assert.match(events[1], /^sleep:\d+$/);
+  const retryDelay = Number(events[1].slice('sleep:'.length));
+  assert.ok(retryDelay > 0 && retryDelay <= 1_000);
+  assert.deepEqual(events.slice(2), ['failing', 'healthy']);
+});
+
+test('repository deadline cancels a transient retry wait before another attempt', async () => {
+  let attempts = 0;
+  const transient = new Error('long provider backoff');
+  transient.statusCode = 503;
+  transient.retryAfter = 60;
+
+  await assert.rejects(
+    prewarmGitMirrors(new Map([
+      ['example/backoff-timeout', { owner: 'example', name: 'backoff-timeout' }],
+    ]), {
+      mirrorFor: () => ({
+        refresh: async () => {
+          attempts += 1;
+          throw transient;
+        },
+      }),
+      logger: { log() {}, warn() {}, error() {} },
+      repositoryTimeoutMs: 10,
+    }),
+    error => error instanceof AggregateError
+      && error.errors.length === 1
+      && error.errors[0].code === 'EMIRRORPREWARMTIMEOUT',
+  );
+  assert.equal(attempts, 1);
+});
+
+test('aborts a repository that exceeds its deployment prewarm deadline', async () => {
+  const repositories = new Map([
+    ['example/stalled', { owner: 'example', name: 'stalled' }],
+  ]);
+
+  await assert.rejects(
+    prewarmGitMirrors(repositories, {
+      mirrorFor: () => ({
+        refresh: async ({ signal }) => new Promise((resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+      }),
+      logger: { log() {}, warn() {}, error() {} },
+      repositoryTimeoutMs: 10,
+    }),
+    error => error instanceof AggregateError
+      && error.errors.length === 1
+      && error.errors[0].code === 'EMIRRORPREWARMTIMEOUT',
+  );
 });
 
 test('accepts only Git releases that enforce GIT_NO_LAZY_FETCH', () => {
