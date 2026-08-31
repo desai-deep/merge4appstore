@@ -24,7 +24,7 @@
  *   APP_STORE_CONNECT_API_KEY_ID      - App Store Connect API Key ID
  *   APP_STORE_CONNECT_ISSUER_ID       - App Store Connect Issuer ID
  *   APP_STORE_CONNECT_API_KEY_CONTENT - API private key (base64 encoded)
- *   GH_TOKEN                          - GitHub token for PR comments (used by gh CLI)
+ *   GH_TOKEN or GitHub App credentials - Repository-scoped GitHub authentication
  *   APP_BUNDLE_ID                     - Your app's bundle identifier
  *   APP_NAME                          - App name (must match App Store Connect)
  *   GITHUB_REPO_OWNER                 - GitHub org/user
@@ -47,6 +47,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { parseCliArgs } from './lib/cli.js';
+import { loadWebhookEnvironment } from './lib/secret-environment.js';
 import {
   applyAutomationProfile,
   applyBuildPurposeProfile,
@@ -73,6 +74,22 @@ if (dotenvResult.error && !missingOptionalProfileEnv) {
   console.error(`ERROR: Could not load config file ${cli.configPath}: ${dotenvResult.error.message}`);
   process.exit(1);
 }
+// Immutable deployments point at a validated, VPS-owned credential file.
+// Local callers can keep App credentials in their normal config environment.
+try {
+  loadWebhookEnvironment(process.env.MERGE4APPSTORE_WEBHOOK_ENV, {
+    environment: process.env,
+    override: true,
+    required: false,
+  });
+} catch (error) {
+  console.error(`ERROR: Could not load webhook environment: ${error.message}`);
+  process.exit(1);
+}
+if (process.env.MERGE4APPSTORE_JOB_GITHUB_INSTALLATION_ID) {
+  process.env.GITHUB_INSTALLATION_ID = process.env.MERGE4APPSTORE_JOB_GITHUB_INSTALLATION_ID;
+  delete process.env.MERGE4APPSTORE_JOB_GITHUB_INSTALLATION_ID;
+}
 
 let repositoryProfile = null;
 if (cli.profilePath) {
@@ -89,6 +106,7 @@ if (cli.profilePath) {
 import { CONFIG, log } from './lib/config.js';
 import { AppStoreConnectAPI } from './lib/app-store-connect.js';
 import { GitHubAPI } from './lib/github.js';
+import { createGitHubEnvironmentProvider } from './lib/github-app-auth.js';
 import { GitHubTags } from './lib/git.js';
 import { releaseLock, waitForLock } from './lib/lock.js';
 import { runDeployCheck } from './lib/deploy.js';
@@ -139,7 +157,7 @@ async function main() {
   }
 
   // Validate required environment variables
-  const requiredSharedVars = ['GH_TOKEN', 'GITHUB_REPO_OWNER', 'GITHUB_REPO_NAME'];
+  const requiredSharedVars = ['GITHUB_REPO_OWNER', 'GITHUB_REPO_NAME'];
   if (!['release-pr', 'rebase-prs', 'build-status'].includes(mode)) requiredSharedVars.push(
     'APP_STORE_CONNECT_API_KEY_ID',
     'APP_STORE_CONNECT_ISSUER_ID',
@@ -155,15 +173,56 @@ async function main() {
     }
   }
 
-  const createClients = () => ({
-    asc: new AppStoreConnectAPI(
-      process.env.APP_STORE_CONNECT_API_KEY_ID,
-      process.env.APP_STORE_CONNECT_ISSUER_ID,
-      process.env.APP_STORE_CONNECT_API_KEY_CONTENT
-    ),
-    github: new GitHubAPI(CONFIG.repoOwner, CONFIG.repoName, CONFIG.productionBranch),
-    tags: new GitHubTags(CONFIG.repoOwner, CONFIG.repoName),
-  });
+  const repositoryId = repositoryProfile?.repository.github_id
+    ?? process.env.GITHUB_REPOSITORY_ID
+    ?? null;
+  let githubEnvironmentProvider;
+  try {
+    githubEnvironmentProvider = createGitHubEnvironmentProvider(
+      CONFIG.repoOwner,
+      CONFIG.repoName,
+      {
+        environment: process.env,
+        repositoryId,
+      },
+    );
+    // Validate and preflight repository authentication before any App Store
+    // work starts. Each client creation below obtains a fresh, safety-windowed
+    // token so a long-lived `all` run cannot keep this startup snapshot.
+    await githubEnvironmentProvider();
+  } catch (error) {
+    log(`ERROR: GitHub authentication failed: ${error.message}`);
+    process.exit(1);
+  }
+
+  const instantiateGitHub = environment => new GitHubAPI(
+    CONFIG.repoOwner,
+    CONFIG.repoName,
+    CONFIG.productionBranch,
+    {
+      environment,
+      environmentProvider: githubEnvironmentProvider,
+      repositoryId,
+    },
+  );
+
+  const createGitHub = async () => instantiateGitHub(await githubEnvironmentProvider());
+
+  const createClients = async () => {
+    const environment = await githubEnvironmentProvider();
+    return {
+      asc: new AppStoreConnectAPI(
+        process.env.APP_STORE_CONNECT_API_KEY_ID,
+        process.env.APP_STORE_CONNECT_ISSUER_ID,
+        process.env.APP_STORE_CONNECT_API_KEY_CONTENT
+      ),
+      github: instantiateGitHub(environment),
+      tags: new GitHubTags(CONFIG.repoOwner, CONFIG.repoName, {
+        environment,
+        environmentProvider: githubEnvironmentProvider,
+      }),
+    };
+  };
 
   const selectAutomation = name => {
     if (!repositoryProfile) return { enabled: true, appRole: 'legacy' };
@@ -176,7 +235,7 @@ async function main() {
   try {
     if (mode === 'build-status') {
       if (!repositoryProfile) throw new Error('build-status mode requires --profile');
-      const github = new GitHubAPI(CONFIG.repoOwner, CONFIG.repoName, CONFIG.productionBranch);
+      const github = await createGitHub();
       await reportXcodeBuildStatus(github, {
         status: process.env.BUILD_STATUS,
         workflowId: process.env.BUILD_WORKFLOW_ID,
@@ -192,15 +251,15 @@ async function main() {
       if (!repositoryProfile) throw new Error('rebase-prs mode requires --profile');
       const policy = resolveAutoRebasePullRequests(repositoryProfile);
       if (!policy.enabled) throw new Error('automatic pull request rebasing is disabled');
-      const github = new GitHubAPI(CONFIG.repoOwner, CONFIG.repoName, CONFIG.productionBranch);
-      rebaseOpenPullRequests(github, policy.baseBranch, DRY_RUN, log);
+      const github = await createGitHub();
+      await rebaseOpenPullRequests(github, policy.baseBranch, DRY_RUN, log);
     }
 
     if (mode === 'release-pr') {
       if (!repositoryProfile) throw new Error('release-pr mode requires --profile');
       const policy = resolveReleasePullRequest(repositoryProfile);
       if (!policy.enabled) throw new Error('release pull request automation is disabled');
-      const github = new GitHubAPI(CONFIG.repoOwner, CONFIG.repoName, CONFIG.productionBranch);
+      const github = await createGitHub();
       reconcileReleasePullRequest(github, policy, DRY_RUN);
     }
 
@@ -211,7 +270,7 @@ async function main() {
       }
       const purpose = process.env.BUILD_PURPOSE || 'pull_request';
       const build = applyBuildPurposeProfile(repositoryProfile, purpose);
-      const { asc, github } = createClients();
+      const { asc, github } = await createClients();
       await refreshTestFlightNotes(asc, github, build, {
         commit: process.env.BUILD_COMMIT_SHA,
         branch: process.env.BUILD_BRANCH,
@@ -228,7 +287,7 @@ async function main() {
       const build = applyBuildPurposeProfile(repositoryProfile, purpose);
       log(`trigger: using ${build.provider}/${build.appRole} (${build.appName}, ${build.workflowId})`);
       const triggerDryRun = effectiveTriggerDryRun(build.triggerMode, DRY_RUN);
-      const { asc, github } = createClients();
+      const { asc, github } = await createClients();
       const provider = new XcodeCloudBuildProvider(asc);
       const intent = buildIntentFromEnvironment(build);
       const result = await runManagedBuildTrigger(provider, github, intent, triggerDryRun);
@@ -244,7 +303,7 @@ async function main() {
     if (mode === 'deploy' || mode === 'all') {
       const automation = selectAutomation('deploy');
       if (automation.enabled) {
-        const { asc, github } = createClients();
+        const { asc, github } = await createClients();
         await runDeployCheck(asc, github, DRY_RUN, {
           metadataPath: automation.metadataPath,
           reconcileMetadata: process.env.RECONCILE_METADATA === 'true',
@@ -256,7 +315,7 @@ async function main() {
     if (mode === 'sync' || mode === 'all') {
       const automation = selectAutomation('sync');
       if (automation.enabled) {
-        const { asc, tags, github } = createClients();
+        const { asc, tags, github } = await createClients();
         await runReleaseSync(asc, tags, github, DRY_RUN);
       }
     }
@@ -266,7 +325,7 @@ async function main() {
     if (shouldRunExpiration) {
       const automation = selectAutomation('expire');
       if (automation.enabled) {
-        const { asc, github } = createClients();
+        const { asc, github } = await createClients();
         await runClosedPRBuildExpiry(asc, github, DRY_RUN);
       }
     }

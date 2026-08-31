@@ -79,6 +79,42 @@ When a profile is supplied, `.env` is optional if the required shared
 credentials are already injected into the process environment, as they are in
 GitHub Actions or another secret-aware runner.
 
+GitHub App credentials can be kept in the same private webhook environment as
+the receiver secrets. Runtime commands load that file only when its absolute
+path is supplied explicitly:
+
+```bash
+MERGE4APPSTORE_ENV=/srv/merge4appstore/.env \
+MERGE4APPSTORE_WEBHOOK_ENV=/srv/merge4appstore.state/current-webhook.env \
+node index.js --profile profiles/runningorder.yml
+```
+
+The encoded webhook file always contains the four receiver/build secrets. The
+optional GitHub App authentication group is
+`GITHUB_APP_ID` plus `GITHUB_APP_PRIVATE_KEY_BASE64`; set both or neither.
+`GITHUB_INSTALLATION_ID` is an optional fast path once that pair is present.
+The optional App-webhook cutover group is `GITHUB_APP_WEBHOOK_SECRET`,
+`GITHUB_APP_WEBHOOK_MODE`, and `GITHUB_CLASSIC_WEBHOOKS_ENABLED`; it is also
+all-or-none. The only safe combinations are `shadow` with classic webhooks
+enabled and `managed` with classic webhooks disabled. The environment writer
+validates these groups and writes only to an existing absolute regular file:
+
+```bash
+install -m 600 /dev/null /srv/merge4appstore/.webhook.env
+# Populate the documented values through a secret-aware shell or password
+# manager, then serialize them without putting values on the command line.
+node scripts/write-webhook-env.js /srv/merge4appstore/.webhook.env
+```
+
+To validate App installation access without exposing a token, use the same
+explicit file paths:
+
+```bash
+MERGE4APPSTORE_ENV=/srv/merge4appstore/.env \
+MERGE4APPSTORE_WEBHOOK_ENV=/srv/merge4appstore.state/current-webhook.env \
+npm run verify:github-app -- desai-deep/runningorder-ios --full
+```
+
 Each repository profile has a required `prod` app and may add `uat` and
 `internal` apps. Every automation can select an app role; omitted selections
 default to `prod`. This keeps the common single-app case terse while allowing a
@@ -324,8 +360,8 @@ Pull-request workflows use **Manual Start - Branch, Pull Request**.
 
 ```bash
 # Run every repository every 5 minutes
-*/5 * * * * umask 077; cd /srv/merge4appstore.state/current && PATH='/absolute/node/bin:/absolute/gh/bin:/absolute/git/bin:/absolute/flock/bin:/absolute/logrotate/bin:/usr/bin:/bin' MERGE4APPSTORE_ENV=/srv/merge4appstore/.env MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state DRY_RUN=false RECONCILE_METADATA=false /absolute/node/bin/node index.js --profile profiles/runningorder.yml >> /srv/merge4appstore.state/logs/cron.log 2>&1
-*/5 * * * * umask 077; cd /srv/merge4appstore.state/current && PATH='/absolute/node/bin:/absolute/gh/bin:/absolute/git/bin:/absolute/flock/bin:/absolute/logrotate/bin:/usr/bin:/bin' MERGE4APPSTORE_ENV=/srv/merge4appstore/.env MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state DRY_RUN=false RECONCILE_METADATA=false /absolute/node/bin/node index.js --profile profiles/jamsontoast.yml >> /srv/merge4appstore.state/logs/cron.log 2>&1
+*/5 * * * * umask 077; cd /srv/merge4appstore.state/current && PATH='/absolute/node/bin:/absolute/gh/bin:/absolute/git/bin:/absolute/flock/bin:/absolute/logrotate/bin:/usr/bin:/bin' MERGE4APPSTORE_ENV=/srv/merge4appstore/.env MERGE4APPSTORE_WEBHOOK_ENV=/srv/merge4appstore.state/current-webhook.env MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state DRY_RUN=false RECONCILE_METADATA=false /absolute/node/bin/node index.js --profile profiles/runningorder.yml >> /srv/merge4appstore.state/logs/cron.log 2>&1
+*/5 * * * * umask 077; cd /srv/merge4appstore.state/current && PATH='/absolute/node/bin:/absolute/gh/bin:/absolute/git/bin:/absolute/flock/bin:/absolute/logrotate/bin:/usr/bin:/bin' MERGE4APPSTORE_ENV=/srv/merge4appstore/.env MERGE4APPSTORE_WEBHOOK_ENV=/srv/merge4appstore.state/current-webhook.env MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state DRY_RUN=false RECONCILE_METADATA=false /absolute/node/bin/node index.js --profile profiles/jamsontoast.yml >> /srv/merge4appstore.state/logs/cron.log 2>&1
 ```
 
 Every CLI, cron, and webhook process for the same installation must use the
@@ -341,6 +377,8 @@ webhooks`, exposed behind HTTPS:
 
 - `POST /webhooks/github/:instance` verifies GitHub's raw-body HMAC SHA-256
   signature and handles PR open/update/close plus beta and production pushes.
+- `POST /webhooks/github-app` verifies the GitHub App webhook secret and routes
+  an installation delivery by the configured immutable repository ID.
 - `POST /webhooks/xcode-cloud/:instance/:token` accepts Xcode Cloud build
   lifecycle events. Because Apple doesn't document a signing header for these
   events, use a high-entropy URL token and never store it in profile YAML.
@@ -669,13 +707,42 @@ when no deployment is running. Set repository variable
 documented default.
 
 Webhook credentials never transit GitHub Actions during a normal deployment.
-The deployer copies the VPS's existing control `.webhook.env` into the candidate
-release before changing any pointers, then compares it with the active rollback
-credentials. Credential rotation is therefore a separate coordinated
-maintenance operation: rotate the active and retained rollback files together,
+The deployer copies the VPS's existing control `.webhook.env` into a private
+candidate credential before changing any pointers, validates its encoded schema, and compares
+the four established receiver/build secrets with the active rollback
+credentials. App credentials can therefore be introduced as a staged schema
+extension without rewriting the older retained credential file. Credential
+rotation is still a separate coordinated maintenance operation: rotate the
+active and retained rollback files together,
 reload and authenticate the service, update GitHub/Xcode Cloud senders, and
 only then resume normal deployment. This prevents a code rollback from silently
 restoring credentials that senders no longer use.
+
+Deploy the schema-aware code once while the active webhook file still contains
+only the four mandatory secrets. After that healthy deployment, add the complete
+App authentication group to the now-compatible active credential and deploy
+again. Configure the GitHub App webhook URL as
+`https://api.runningorder.app/merge4appstore/webhooks/github-app`, then add the
+complete cutover group in `shadow`/`true`. Shadow deliveries are authenticated
+and observed but do not dispatch work; the classic per-repository hooks remain
+active. Move to `managed`/`false` only after shadow delivery has been verified.
+The deployer rejects a first-time move directly to managed mode. During the
+shadow-to-managed handoff it keeps execution behind the durable gate and lets
+both classic and App copies claim the same provider-neutral event receipt.
+Whichever signed copy arrives first owns the work; its paired copy is a durable
+duplicate. The idempotent hook reconciler disables each classic hook before the
+gate is released, so mixed PM2 generations and hook delivery ordering cannot
+lose or double-dispatch the event. A post-commit reconciliation failure leaves
+the healthy runtime, queued receipts, gate, and journal in place; correct the
+GitHub/PAT failure and rerun the failed deployment to finish the cutover.
+
+`GH_TOKEN` remains required on the VPS during this migration. Application and
+mirror operations use refreshable repository-scoped App installation tokens
+when the App group is configured, but the deployment script still uses the PAT
+for its bounded branch-head preparation smoke and for listing, creating,
+enabling, or disabling classic repository hooks. Removing the PAT requires a
+separate migration of both paths; App-based hook reconciliation would require
+GitHub's **Webhooks: write** repository permission.
 
 Pull requests run the test job in the deployment workflow and validate every
 tracked repository profile without requiring production credentials. The VPS
@@ -690,7 +757,7 @@ deployment job is disabled for pull-request events.
 | `APP_STORE_CONNECT_API_KEY_ID` | App Store Connect API Key ID |
 | `APP_STORE_CONNECT_ISSUER_ID` | App Store Connect Issuer ID |
 | `APP_STORE_CONNECT_API_KEY_CONTENT` | API private key (base64 encoded) |
-| `GH_TOKEN` | GitHub token for PR comments/issues and, when configured, read access to repository metadata/assets |
+| `GH_TOKEN` | GitHub PAT fallback; production deployment still requires it for branch-head smoke checks and classic repository-hook reconciliation |
 App and repository values live in YAML profiles. The legacy environment-only
 configuration remains supported; when no `--profile` is supplied it still
 requires `APP_BUNDLE_ID`, `APP_NAME`, `GITHUB_REPO_OWNER`, and
@@ -710,6 +777,12 @@ requires `APP_BUNDLE_ID`, `APP_NAME`, `GITHUB_REPO_OWNER`, and
 | `IOS_REPO_PATH` | Optional server checkout used to trigger the next beta build |
 | `MERGE4APPSTORE_ENV` | Alternative to the `--config` command-line option |
 | `MERGE4APPSTORE_WEBHOOK_ENV` | Private webhook-only environment file loaded after `MERGE4APPSTORE_ENV`, overriding duplicate values; deployments point this at the active release credential |
+| `GITHUB_APP_ID` | GitHub App ID; in the private webhook file it must be paired with `GITHUB_APP_PRIVATE_KEY_BASE64` |
+| `GITHUB_APP_PRIVATE_KEY_BASE64` | Complete GitHub App PEM encoded as base64; never persisted in PM2 state or initial process environment |
+| `GITHUB_INSTALLATION_ID` | Optional installation-ID fast path; repository-scoped discovery is used when omitted |
+| `GITHUB_APP_WEBHOOK_SECRET` | App-level webhook HMAC secret; configured as part of the all-or-none cutover group |
+| `GITHUB_APP_WEBHOOK_MODE` | `shadow` to verify without dispatch or `managed` to dispatch App deliveries |
+| `GITHUB_CLASSIC_WEBHOOKS_ENABLED` | Must be `true` with `shadow` and `false` with `managed` |
 | `MERGE4APPSTORE_PROFILE` | Alternative to the `--profile` command-line option |
 | `MERGE4APPSTORE_LOCK_WAIT_MS` | Maximum time to wait for another job for the same repository (default `600000`) |
 | `MERGE4APPSTORE_STATE_DIR` | Absolute private directory for persistent Git mirrors and deployment coordination (default `~/.local/state/merge4appstore`) |
@@ -728,7 +801,7 @@ requires `APP_BUNDLE_ID`, `APP_NAME`, `GITHUB_REPO_OWNER`, and
 | `MERGE4APPSTORE_LEGACY_DRAIN_QUIET_SECONDS` | Continuous no-child/no-live-lock window required before deleting the first-generation webhook process (default `30`) |
 | `MERGE4APPSTORE_MIN_FREE_BYTES` | Absolute free-space floor enforced by VPS deployment (default and minimum `1073741824`, 1 GiB) |
 | `MERGE4APPSTORE_MIN_FREE_PERCENT` | Percentage free-space floor enforced in addition to the byte floor (default and minimum `10`) |
-| `MERGE4APPSTORE_DELIVERY_PAUSE_FILE` | Private regular file whose presence durably pauses execution while continuing to accept and persist deliveries; deployment manages this during first migration |
+| `MERGE4APPSTORE_DELIVERY_PAUSE_FILE` | Private regular file whose presence durably pauses execution while continuing to accept and persist deliveries; deployment manages it during release and webhook-provider handoffs |
 | `MERGE4APPSTORE_RECOVERY_INTERVAL_MS` | Pending-delivery recovery scan interval (default `5000`) |
 | `MERGE4APPSTORE_JOB_RETRY_MS` | Delay before retrying a failed webhook job (default `5000`) |
 | `MERGE4APPSTORE_JOB_MAX_ATTEMPTS` | Attempts before a webhook delivery enters the failed queue (default `8`) |

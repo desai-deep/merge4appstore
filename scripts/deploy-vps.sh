@@ -546,7 +546,12 @@ validate_pm2_dumps_no_secrets() {
       const forbidden = name => (
         name === "GH_TOKEN"
         || name === "GH_WEBHOOK_SECRET"
+        || name === "GITHUB_CLASSIC_WEBHOOKS_ENABLED"
+        || name === "GITHUB_INSTALLATION_ID"
+        || name === "GITHUB_REPOSITORY_ID"
+        || name === "MERGE4APPSTORE_JOB_GITHUB_INSTALLATION_ID"
         || name === "XCODE_CLOUD_WEBHOOK_TOKEN"
+        || name.startsWith("GITHUB_APP_")
         || name.startsWith("APP_STORE_CONNECT_API_")
         || name.startsWith("MERGE4APPSTORE_BUILD_TOKEN_")
       );
@@ -651,7 +656,7 @@ configure_process_environment() {
   local environment_name
   while IFS='=' read -r environment_name _; do
     case "$environment_name" in
-      APP_STORE_CONNECT_API_*|GH_TOKEN|GH_WEBHOOK_SECRET|XCODE_CLOUD_WEBHOOK_TOKEN|MERGE4APPSTORE_BUILD_TOKEN_*|BUILD_*|RECONCILE_METADATA)
+      APP_STORE_CONNECT_API_*|GH_TOKEN|GH_WEBHOOK_SECRET|GITHUB_APP_*|GITHUB_CLASSIC_WEBHOOKS_ENABLED|GITHUB_INSTALLATION_ID|GITHUB_REPOSITORY_ID|MERGE4APPSTORE_JOB_GITHUB_INSTALLATION_ID|XCODE_CLOUD_WEBHOOK_TOKEN|MERGE4APPSTORE_BUILD_TOKEN_*|BUILD_*|RECONCILE_METADATA)
         unset "$environment_name"
         ;;
     esac
@@ -881,6 +886,11 @@ start_release() {
     --filter-env BUILD_ \
     --filter-env GH_TOKEN \
     --filter-env GH_WEBHOOK_SECRET \
+    --filter-env GITHUB_APP_ \
+    --filter-env GITHUB_CLASSIC_WEBHOOKS_ENABLED \
+    --filter-env GITHUB_INSTALLATION_ID \
+    --filter-env GITHUB_REPOSITORY_ID \
+    --filter-env MERGE4APPSTORE_JOB_GITHUB_INSTALLATION_ID \
     --filter-env XCODE_CLOUD_WEBHOOK_TOKEN \
     --filter-env MERGE4APPSTORE_BUILD_TOKEN_ \
     --force || return 1
@@ -949,13 +959,21 @@ validate_pm2_release() {
       const forbidden = name => (
         name === "GH_TOKEN"
         || name === "GH_WEBHOOK_SECRET"
+        || name === "GITHUB_CLASSIC_WEBHOOKS_ENABLED"
+        || name === "GITHUB_INSTALLATION_ID"
+        || name === "GITHUB_REPOSITORY_ID"
+        || name === "MERGE4APPSTORE_JOB_GITHUB_INSTALLATION_ID"
         || name === "XCODE_CLOUD_WEBHOOK_TOKEN"
+        || name.startsWith("GITHUB_APP_")
         || name.startsWith("APP_STORE_CONNECT_API_")
         || name.startsWith("MERGE4APPSTORE_BUILD_TOKEN_")
       );
       for (const processInfo of processes) {
         const pm2Environment = processInfo.pm2_env || {};
         const appEnvironment = pm2Environment.env || {};
+        if (!Number.isSafeInteger(processInfo.pid) || processInfo.pid <= 1) {
+          throw new Error(`PM2 worker ${processInfo.pm_id} has an invalid pid`);
+        }
         if (pm2Environment.status !== "online" || pm2Environment.exec_mode !== "cluster_mode") {
           throw new Error(`PM2 worker ${processInfo.pm_id} is not an online cluster worker`);
         }
@@ -965,6 +983,11 @@ validate_pm2_release() {
           "BUILD_",
           "GH_TOKEN",
           "GH_WEBHOOK_SECRET",
+          "GITHUB_APP_",
+          "GITHUB_CLASSIC_WEBHOOKS_ENABLED",
+          "GITHUB_INSTALLATION_ID",
+          "GITHUB_REPOSITORY_ID",
+          "MERGE4APPSTORE_JOB_GITHUB_INSTALLATION_ID",
           "XCODE_CLOUD_WEBHOOK_TOKEN",
           "MERGE4APPSTORE_BUILD_TOKEN_",
         ];
@@ -1014,6 +1037,15 @@ validate_pm2_release() {
           if (unknownBuildContext) throw new Error(`PM2 worker ${processInfo.pm_id} persisted unknown build context ${unknownBuildContext}`);
           const staleBuildContext = buildContextNames.find(name => (environment[name] ?? "") !== "");
           if (staleBuildContext) throw new Error(`PM2 worker ${processInfo.pm_id} persisted stale build context ${staleBuildContext}`);
+        }
+        const procEnvironment = fs.readFileSync(`/proc/${processInfo.pid}/environ`, "utf8")
+          .split("\0")
+          .filter(Boolean)
+          .map(entry => entry.split("=", 1)[0])
+          .filter(Boolean);
+        const procLeak = procEnvironment.find(forbidden);
+        if (procLeak) {
+          throw new Error(`PM2 worker ${processInfo.pm_id} exposed forbidden secret ${procLeak} in /proc`);
         }
       }
     });
@@ -1088,6 +1120,19 @@ validate_production_environment() {
     }
     const transient = Object.keys(parsed).find(name => name === "RECONCILE_METADATA" || name.startsWith("BUILD_"));
     if (transient) throw new Error(`Production control environment contains transient job context ${transient}`);
+    const webhookOnly = Object.keys(parsed).find(name => (
+      name === "GH_WEBHOOK_SECRET"
+      || name === "GITHUB_CLASSIC_WEBHOOKS_ENABLED"
+      || name === "GITHUB_INSTALLATION_ID"
+      || name === "GITHUB_REPOSITORY_ID"
+      || name === "XCODE_CLOUD_WEBHOOK_TOKEN"
+      || name === "MERGE4APPSTORE_JOB_GITHUB_INSTALLATION_ID"
+      || name.startsWith("GITHUB_APP_")
+      || name.startsWith("MERGE4APPSTORE_BUILD_TOKEN_")
+    ));
+    if (webhookOnly) {
+      throw new Error(`Production control environment contains webhook-only configuration ${webhookOnly}`);
+    }
   '
 }
 
@@ -1099,7 +1144,7 @@ validate_webhook_environment() {
     import { pathToFileURL } from "node:url";
     const module = await import(pathToFileURL(path.join(process.env.RELEASE_DIRECTORY, "lib/secret-environment.js")));
     const parsed = module.readEnvironmentFile(process.env.ENVIRONMENT_FILE);
-    module.validateEnvironmentNames(parsed, module.WEBHOOK_SECRET_NAMES, { requireAll: true });
+    module.validateWebhookEnvironment(parsed);
   '
 }
 
@@ -1505,7 +1550,7 @@ install_managed_cron() {
   local release="$1"
   local pause_cron="$2"
   local current_crontab profile_file profile_name profile_relative profile_quoted marker cron_line managed_cron
-  local current_release_quoted control_env_quoted state_dir_quoted cron_log_quoted node_binary_quoted cron_path_quoted verification
+  local current_release_quoted control_env_quoted webhook_env_quoted state_dir_quoted cron_log_quoted node_binary_quoted cron_path_quoted verification
   local flock_binary_quoted logrotate_binary_quoted logrotate_config_quoted logrotate_state_quoted logrotate_lock_quoted
   local logrotate_log_quoted rotation_line
   local profiles=("$release"/profiles/*.yml "$release"/profiles/*.yaml)
@@ -1515,6 +1560,7 @@ install_managed_cron() {
     | grep -Fv '# merge4appstore:' | grep -Fv '# merge4appstore-logrotate' || true)"
   current_release_quoted="$(shell_quote "$STATE_DIR/current")"
   control_env_quoted="$(shell_quote "$CONTROL_ENV")"
+  webhook_env_quoted="$(shell_quote "$STATE_DIR/current-webhook.env")"
   state_dir_quoted="$(shell_quote "$STATE_DIR")"
   cron_log_quoted="$(shell_quote "$LOGS_DIR/cron.log")"
   node_binary_quoted="$(shell_quote "$NODE_BINARY")"
@@ -1538,7 +1584,7 @@ install_managed_cron() {
       profile_relative="profiles/$(basename "$profile_file")"
       profile_quoted="$(shell_quote "$profile_relative")"
       marker="# merge4appstore:$profile_name"
-      cron_line="*/5 * * * * umask 077; cd $current_release_quoted && PATH=$cron_path_quoted MERGE4APPSTORE_ENV=$control_env_quoted MERGE4APPSTORE_STATE_DIR=$state_dir_quoted DRY_RUN=false RECONCILE_METADATA=false $node_binary_quoted index.js --profile $profile_quoted >> $cron_log_quoted 2>&1 $marker"
+      cron_line="*/5 * * * * umask 077; cd $current_release_quoted && PATH=$cron_path_quoted MERGE4APPSTORE_ENV=$control_env_quoted MERGE4APPSTORE_WEBHOOK_ENV=$webhook_env_quoted MERGE4APPSTORE_STATE_DIR=$state_dir_quoted DRY_RUN=false RECONCILE_METADATA=false $node_binary_quoted index.js --profile $profile_quoted >> $cron_log_quoted 2>&1 $marker"
       current_crontab="$(printf '%s\n%s\n' "$current_crontab" "$cron_line")"
     done
   fi
@@ -1556,6 +1602,7 @@ install_managed_cron() {
     [ "$(printf '%s\n' "$verification" | grep -Fc '# merge4appstore:' || true)" -eq "${#profiles[@]}" ] || return 1
     [ -z "$(printf '%s\n' "$managed_cron" | grep -v 'MERGE4APPSTORE_STATE_DIR=' || true)" ] || return 1
     [ -z "$(printf '%s\n' "$managed_cron" | grep -v 'MERGE4APPSTORE_ENV=' || true)" ] || return 1
+    [ -z "$(printf '%s\n' "$managed_cron" | grep -v 'MERGE4APPSTORE_WEBHOOK_ENV=' || true)" ] || return 1
     for profile_file in "${profiles[@]}"; do
       profile_name="$(basename "$profile_file")"
       profile_name="${profile_name%.*}"
@@ -1634,9 +1681,13 @@ configure_repository_hooks() {
   local secret="$2"
   local output_directory="$3"
   local token profile_file instance repository webhook_url hooks_file hook_id hook_payload hook_create_payload result
+  local classic_webhooks_enabled
   local profiles=("$release"/profiles/*.yml "$release"/profiles/*.yaml)
   token="$(read_env_value_from_release "$release" "$CONTROL_ENV" GH_TOKEN)"
   [ -n "$token" ] || return 1
+  classic_webhooks_enabled="$(read_env_value_from_release "$release" "$secret" GITHUB_CLASSIC_WEBHOOKS_ENABLED)"
+  if [ -z "$classic_webhooks_enabled" ]; then classic_webhooks_enabled=true; fi
+  case "$classic_webhooks_enabled" in true|false) ;; *) return 1 ;; esac
   for profile_file in "${profiles[@]}"; do
     instance="$(cd "$release" && node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>console.log(loadRepositoryProfile(process.argv[1]).instance))" "$profile_file")" || return 1
     repository="$(cd "$release" && node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>{const p=loadRepositoryProfile(process.argv[1]);console.log(p.repository.owner+'/'+p.repository.name)})" "$profile_file")" || return 1
@@ -1649,13 +1700,15 @@ configure_repository_hooks() {
     printf '%s' "$result" > "$hooks_file" || return 1
     hook_id="$(read_hook_id "$hooks_file" "$webhook_url")" || return 1
     hook_payload="$output_directory/hook-payload-$instance.json"
-    WEBHOOK_ENV="$secret" WEBHOOK_URL="$webhook_url" HOOK_PAYLOAD="$hook_payload" RELEASE_DIRECTORY="$release" node --input-type=module -e '
+    WEBHOOK_ENV="$secret" WEBHOOK_URL="$webhook_url" HOOK_PAYLOAD="$hook_payload" \
+      CLASSIC_WEBHOOKS_ENABLED="$classic_webhooks_enabled" RELEASE_DIRECTORY="$release" node --input-type=module -e '
       import fs from "node:fs";
       import path from "node:path";
       import { pathToFileURL } from "node:url";
       const { readEnvironmentFile } = await import(pathToFileURL(path.join(process.env.RELEASE_DIRECTORY, "lib/secret-environment.js")));
       const webhookSecret = readEnvironmentFile(process.env.WEBHOOK_ENV).GH_WEBHOOK_SECRET;
-      const payload = { active: true, events: ["push", "pull_request"], config: { url: process.env.WEBHOOK_URL, content_type: "json", secret: webhookSecret } };
+      const active = process.env.CLASSIC_WEBHOOKS_ENABLED === "true";
+      const payload = { active, events: ["push", "pull_request"], config: { url: process.env.WEBHOOK_URL, content_type: "json", secret: webhookSecret } };
       fs.writeFileSync(process.env.HOOK_PAYLOAD, JSON.stringify(payload), { mode: 0o600 });
     ' || return 1
     result=""
@@ -1663,7 +1716,7 @@ configure_repository_hooks() {
       GH_TOKEN="$token" retry_directory="$output_directory" retry_capture result "GitHub hook update for $repository" 4 \
         timeout 30s gh api --method PATCH "repos/$repository/hooks/$hook_id" --input "$hook_payload" \
         || return 1
-    else
+    elif [ "$classic_webhooks_enabled" = "true" ]; then
       hook_create_payload="$output_directory/hook-create-$instance.json"
       HOOK_PAYLOAD="$hook_payload" HOOK_CREATE_PAYLOAD="$hook_create_payload" node -e '
         const fs=require("fs");const payload=JSON.parse(fs.readFileSync(process.env.HOOK_PAYLOAD));payload.name="web";fs.writeFileSync(process.env.HOOK_CREATE_PAYLOAD,JSON.stringify(payload),{mode:0o600});
@@ -1671,7 +1724,11 @@ configure_repository_hooks() {
       create_repository_hook_safely "$token" "$repository" "$webhook_url" \
         "$hook_create_payload" "$output_directory" "$instance" || return 1
     fi
-    echo "Configured GitHub webhook for $repository"
+    if [ "$classic_webhooks_enabled" = "true" ]; then
+      echo "Configured active classic GitHub webhook for $repository"
+    else
+      echo "Verified classic GitHub webhook is disabled for $repository"
+    fi
   done
 }
 
@@ -2000,11 +2057,14 @@ finish_committed_transaction() {
   case "$pause_cron" in true|false) ;; *) return 1 ;; esac
   case "$reconcile_profile" in none|jamsontoast|runningorder) ;; *) return 1 ;; esac
 
-  if [ "$had_legacy_snapshot" = "1" ] && [ "$phase" != "legacy-stopped" ] \
-    && [ "$phase" != "cron-configured" ] && [ "$phase" != "hooks-configured" ] \
-    && [ "$phase" != "reconciled" ] && [ "$phase" != "complete" ]; then
-    activate_delivery_pause "$source" || return 1
-  fi
+  # Older releases cleared the gate between cron-configured and
+  # hooks-configured. Re-own it for every committed phase that can still
+  # mutate hook routing so recovery preserves the cross-provider handoff.
+  case "$phase" in
+    service-committed|committed|legacy-draining|legacy-stopped|cron-configured)
+      activate_delivery_pause "$source" || return 1
+      ;;
+  esac
   configure_process_environment "$release" "$secret" "$sha"
   if ! validate_pm2_release >/dev/null 2>&1; then
     start_release "$release" "$secret" "$sha" || return 1
@@ -2036,15 +2096,19 @@ finish_committed_transaction() {
     hooks-configured|reconciled) ;;
     *) write_transaction_phase_for "$source" cron-configured || return 1 ;;
   esac
-  clear_delivery_pause "$source" || return 1
 
   if [ "$phase" != "hooks-configured" ] && [ "$phase" != "reconciled" ]; then
     retry_directory="$source" configure_repository_hooks "$release" "$secret" "$source" || return 1
     write_transaction_phase_for "$source" hooks-configured || return 1
   fi
+  # Both classic and App endpoints claim one provider-neutral receipt while
+  # the gate exists. Reconcile the remote hook first, then release queued work
+  # only after GitHub and the sole serving generation agree on the provider.
+  clear_delivery_pause "$source" || return 1
   if [ "$phase" != "reconciled" ]; then
     if [ "$reconcile_profile" != "none" ]; then
-      (cd "$release" && env MERGE4APPSTORE_ENV="$CONTROL_ENV" MERGE4APPSTORE_STATE_DIR="$STATE_DIR" \
+      (cd "$release" && env MERGE4APPSTORE_ENV="$CONTROL_ENV" MERGE4APPSTORE_WEBHOOK_ENV="$secret" \
+        MERGE4APPSTORE_STATE_DIR="$STATE_DIR" \
         timeout 10m node index.js deploy --profile "profiles/$reconcile_profile.yml") || return 1
     fi
     write_transaction_phase_for "$source" reconciled || return 1
@@ -2295,9 +2359,47 @@ if [ -n "$rotation_reference" ]; then
     [ "$(read_env_value "$rotation_reference" "$secret_key")" = "$(read_env_value "$candidate_secret" "$secret_key")" ] \
       || fail "Webhook credential rotation must be completed separately before deployment ($secret_key differs)"
   done
+  # App credentials may be introduced by the documented staged rollout. Once
+  # a retained rollback credential contains one, normal deployments must keep
+  # it byte-for-byte stable; coordinated rotation updates active and retained
+  # rollback files together before deployment.
+  for secret_key in GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY_BASE64 GITHUB_APP_WEBHOOK_SECRET GITHUB_INSTALLATION_ID; do
+    retained_value="$(read_env_value "$rotation_reference" "$secret_key")"
+    if [ -n "$retained_value" ]; then
+      [ "$retained_value" = "$(read_env_value "$candidate_secret" "$secret_key")" ] \
+        || fail "GitHub App credential rotation must be completed separately before deployment ($secret_key differs)"
+    fi
+  done
+fi
+
+candidate_app_mode="$(read_env_value "$candidate_secret" GITHUB_APP_WEBHOOK_MODE)"
+candidate_app_webhook_secret="$(read_env_value "$candidate_secret" GITHUB_APP_WEBHOOK_SECRET)"
+if [ -n "$candidate_app_webhook_secret" ]; then
+  [ -n "$old_current_secret" ] \
+    || fail "GitHub App webhook rollout requires a prior authentication-only deployment"
+  for required_prior_auth_key in GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY_BASE64; do
+    [ -n "$(read_env_value "$old_current_secret" "$required_prior_auth_key")" ] \
+      || fail "GitHub App webhook rollout requires a prior authentication-only deployment ($required_prior_auth_key was absent)"
+  done
+fi
+if [ "$candidate_app_mode" = "managed" ]; then
+  [ -n "$old_current_secret" ] \
+    || fail "GitHub App managed mode requires a prior shadow deployment"
+  prior_app_mode="$(read_env_value "$old_current_secret" GITHUB_APP_WEBHOOK_MODE)"
+  case "$prior_app_mode" in
+    managed) ;;
+    shadow)
+      for required_app_key in GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY_BASE64 GITHUB_APP_WEBHOOK_SECRET; do
+        [ -n "$(read_env_value "$old_current_secret" "$required_app_key")" ] \
+          || fail "GitHub App managed mode requires a verified prior shadow deployment ($required_app_key was absent)"
+      done
+      ;;
+    *) fail "GitHub App managed mode requires a prior shadow deployment" ;;
+  esac
 fi
 
 export MERGE4APPSTORE_ENV="$CONTROL_ENV"
+export MERGE4APPSTORE_WEBHOOK_ENV="$candidate_secret"
 export MERGE4APPSTORE_STATE_DIR="$STATE_DIR"
 if ! (cd "$CANDIDATE_RELEASE" && timeout --kill-after=30s 15m npm run prepare:mirrors); then
   fail "Git mirror prewarming failed before cutover"
@@ -2308,10 +2410,12 @@ repository_profiles=("$CANDIDATE_RELEASE"/profiles/*.yml "$CANDIDATE_RELEASE"/pr
 [ "${#repository_profiles[@]}" -gt 0 ] || fail "Candidate release contains no repository profiles"
 for profile_file in "${repository_profiles[@]}"; do
   (cd "$CANDIDATE_RELEASE" && env \
-    MERGE4APPSTORE_ENV="$CONTROL_ENV" MERGE4APPSTORE_STATE_DIR="$STATE_DIR" DRY_RUN=true \
+    MERGE4APPSTORE_ENV="$CONTROL_ENV" MERGE4APPSTORE_WEBHOOK_ENV="$candidate_secret" \
+    MERGE4APPSTORE_STATE_DIR="$STATE_DIR" DRY_RUN=true \
     timeout 5m node index.js deploy --profile "$profile_file")
   (cd "$CANDIDATE_RELEASE" && env \
-    MERGE4APPSTORE_ENV="$CONTROL_ENV" MERGE4APPSTORE_STATE_DIR="$STATE_DIR" DRY_RUN=true \
+    MERGE4APPSTORE_ENV="$CONTROL_ENV" MERGE4APPSTORE_WEBHOOK_ENV="$candidate_secret" \
+    MERGE4APPSTORE_STATE_DIR="$STATE_DIR" DRY_RUN=true \
     timeout 5m node index.js expire --profile "$profile_file")
 done
 

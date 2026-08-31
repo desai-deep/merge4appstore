@@ -16,11 +16,21 @@ import { loadRepositoryProfile } from './lib/profile.js';
 import { resolveBuildPurpose } from './lib/profile.js';
 import { AppStoreConnectAPI } from './lib/app-store-connect.js';
 import { GitHubAPI } from './lib/github.js';
+import {
+  createGitHubAuthenticator,
+  githubEnvironmentForRepository,
+} from './lib/github-app-auth.js';
+import {
+  createGitHubInstallationState,
+  MemoryGitHubInstallationState,
+} from './lib/github-installation-state.js';
 import { inferBuildPurpose, prepareBuild } from './lib/build-prepare.js';
-import { loadEnvironmentFile, WEBHOOK_SECRET_NAMES } from './lib/secret-environment.js';
+import { loadWebhookEnvironment } from './lib/secret-environment.js';
 import {
   jobsForGitHubEvent,
   jobsForXcodeCloudEvent,
+  githubAppWebhookMode,
+  githubClassicWebhooksEnabled,
   safeEqual,
   verifyGitHubSignature,
   webhookSettings,
@@ -29,18 +39,15 @@ import {
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: process.env.MERGE4APPSTORE_ENV || path.join(ROOT, '.env') });
-if (process.env.MERGE4APPSTORE_WEBHOOK_ENV) {
-  try {
-    loadEnvironmentFile(process.env.MERGE4APPSTORE_WEBHOOK_ENV, {
-      override: true,
-      allowedNames: WEBHOOK_SECRET_NAMES,
-      requireAll: true,
-    });
-  } catch (error) {
-    throw new Error(
-      `Could not load MERGE4APPSTORE_WEBHOOK_ENV ${process.env.MERGE4APPSTORE_WEBHOOK_ENV}: ${error.message}`,
-    );
-  }
+try {
+  loadWebhookEnvironment(process.env.MERGE4APPSTORE_WEBHOOK_ENV, {
+    override: true,
+    required: false,
+  });
+} catch (error) {
+  throw new Error(
+    `Could not load MERGE4APPSTORE_WEBHOOK_ENV ${process.env.MERGE4APPSTORE_WEBHOOK_ENV}: ${error.message}`,
+  );
 }
 
 export function loadProfiles(directory) {
@@ -72,19 +79,34 @@ function readBody(request, limit = 1024 * 1024) {
   });
 }
 
-export function runJob(entry, job, spawnProcess = spawn, {
-  onSpawn = () => {},
-  onSettled = () => {},
-  onTimeout = () => {},
-  timeoutMs = 0,
-} = {}) {
-  const args = [path.join(ROOT, 'index.js'), job.mode, '--profile', entry.profilePath];
-  const environment = { ...process.env };
+export function jobEnvironment(job, baseEnvironment = process.env) {
+  const environment = { ...baseEnvironment };
+  for (const name of Object.keys(environment)) {
+    if (
+      name === 'DRY_RUN'
+      || name === 'GH_TOKEN'
+      || name === 'GH_WEBHOOK_SECRET'
+      || name === 'GITHUB_CLASSIC_WEBHOOKS_ENABLED'
+      || name === 'GITHUB_INSTALLATION_ID'
+      || name === 'GITHUB_REPOSITORY_ID'
+      || name === 'MERGE4APPSTORE_JOB_GITHUB_INSTALLATION_ID'
+      || name === 'RECONCILE_METADATA'
+      || name === 'XCODE_CLOUD_WEBHOOK_TOKEN'
+      || name.startsWith('APP_STORE_CONNECT_API_')
+      || name.startsWith('BUILD_')
+      || name.startsWith('GITHUB_APP_')
+      || name.startsWith('MERGE4APPSTORE_BUILD_TOKEN_')
+    ) delete environment[name];
+  }
   if (job.purpose) environment.BUILD_PURPOSE = job.purpose;
   if (job.commitSha) environment.BUILD_COMMIT_SHA = job.commitSha;
   if (job.branch) environment.BUILD_BRANCH = job.branch;
   if (job.pullRequest) environment.BUILD_PULL_REQUEST = job.pullRequest;
   if (job.deliveryId) environment.BUILD_SOURCE_DELIVERY_ID = job.deliveryId;
+  if (job.installationId) {
+    environment.MERGE4APPSTORE_JOB_GITHUB_INSTALLATION_ID = String(job.installationId);
+  }
+  if (job.repositoryId) environment.GITHUB_REPOSITORY_ID = String(job.repositoryId);
   if (job.reconcileMetadata) environment.RECONCILE_METADATA = 'true';
   if (job.dryRun) environment.DRY_RUN = 'true';
   if (job.buildStatus) environment.BUILD_STATUS = job.buildStatus;
@@ -92,6 +114,17 @@ export function runJob(entry, job, spawnProcess = spawn, {
   if (job.runId) environment.BUILD_RUN_ID = job.runId;
   if (job.buildNumber) environment.BUILD_NUMBER = String(job.buildNumber);
   if (job.completedAt) environment.BUILD_COMPLETED_AT = job.completedAt;
+  return environment;
+}
+
+export function runJob(entry, job, spawnProcess = spawn, {
+  onSpawn = () => {},
+  onSettled = () => {},
+  onTimeout = () => {},
+  timeoutMs = 0,
+} = {}) {
+  const args = [path.join(ROOT, 'index.js'), job.mode, '--profile', entry.profilePath];
+  const environment = jobEnvironment(job);
 
   return new Promise(resolve => {
     const child = spawnProcess(process.execPath, args, {
@@ -328,6 +361,119 @@ export function webhookDeliveryKey(provider, instance, delivery) {
   return `${provider}:${instance}:${delivery}`;
 }
 
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.keys(value).sort().map(key => [key, stableValue(value[key])]),
+  );
+}
+
+// GitHub assigns a different delivery id to each hook, so the repository hook
+// and GitHub App copies of one event cannot be deduplicated by header. Build a
+// provider-neutral identity from the fields that define the supported event.
+// During a hook cutover both endpoints use this key while execution is gated,
+// allowing either copy to durably own the work without running it twice.
+export function githubEventDeliveryKey(
+  instance,
+  event,
+  payload,
+  delivery,
+  configuredRepositoryId = null,
+) {
+  const repositoryId = positiveIdentifier(payload?.repository?.id)
+    || positiveIdentifier(configuredRepositoryId);
+  let identity;
+  if (event === 'push') {
+    identity = {
+      version: 1,
+      instance,
+      event,
+      repositoryId,
+      ref: payload.ref || null,
+      before: payload.before || null,
+      after: payload.after || null,
+      created: payload.created === true,
+      deleted: payload.deleted === true,
+      forced: payload.forced === true,
+    };
+  } else if (event === 'pull_request') {
+    const pull = payload.pull_request || {};
+    identity = {
+      version: 1,
+      instance,
+      event,
+      repositoryId,
+      action: payload.action || null,
+      number: payload.number ?? pull.number ?? null,
+      pullRequestId: pull.id ?? pull.node_id ?? null,
+      headSha: pull.head?.sha || null,
+      headRef: pull.head?.ref || null,
+      baseRef: pull.base?.ref || null,
+      state: pull.state || null,
+      draft: pull.draft === true,
+      merged: pull.merged === true,
+      updatedAt: pull.updated_at || null,
+      closedAt: pull.closed_at || null,
+      mergedAt: pull.merged_at || null,
+      changes: stableValue(payload.changes || null),
+    };
+  } else {
+    // Unsupported events have no cross-provider work to reconcile. Retain the
+    // source delivery id so unrelated observations cannot suppress each other.
+    identity = { version: 1, instance, event, repositoryId, delivery };
+  }
+  const digest = crypto.createHash('sha256')
+    .update(JSON.stringify(identity))
+    .digest('hex');
+  return webhookDeliveryKey('github-event', instance, digest);
+}
+
+function positiveIdentifier(value) {
+  return /^\d+$/.test(String(value)) && BigInt(value) > 0n
+    ? String(value)
+    : null;
+}
+
+export function entriesForGitHubAppEvent(profiles, payload) {
+  const repositories = [
+    payload.repository,
+    ...(Array.isArray(payload.repositories) ? payload.repositories : []),
+    ...(Array.isArray(payload.repositories_added) ? payload.repositories_added : []),
+    ...(Array.isArray(payload.repositories_removed) ? payload.repositories_removed : []),
+  ].filter(Boolean);
+  const repositoryIds = new Set(
+    repositories.map(repository => positiveIdentifier(repository?.id)).filter(Boolean),
+  );
+  return Object.values(profiles).filter(entry => {
+    const configuredId = positiveIdentifier(entry.profile.repository.github_id);
+    return configuredId !== null && repositoryIds.has(configuredId);
+  });
+}
+
+function abortError(signal) {
+  if (signal?.reason) return signal.reason;
+  const error = new Error('Build preparation was cancelled');
+  error.name = 'AbortError';
+  return error;
+}
+
+async function awaitWithSignal(value, signal) {
+  if (!signal) return value;
+  if (signal.aborted) throw abortError(signal);
+  let onAbort;
+  const aborted = new Promise((resolve, reject) => {
+    onAbort = () => reject(abortError(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+  try {
+    return await Promise.race([Promise.resolve(value), aborted]);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
 export function normalizePreparePayload(payload) {
   return {
     ...payload,
@@ -341,23 +487,48 @@ export function createPrepareRequest({
     ttlMs: 60_000,
     maxEntries: 100,
   }),
-  githubFactory = profile => new GitHubAPI(
-    profile.repository.owner,
-    profile.repository.name,
-    profile.repository.production_branch || 'main',
+  authenticator = createGitHubAuthenticator(),
+  repositoryAuthenticationFactory = (profile, { signal = null } = {}) => (
+    githubEnvironmentForRepository(
+      profile.repository.owner,
+      profile.repository.name,
+      process.env,
+      {
+        authenticator,
+        repositoryId: profile.repository.github_id || null,
+        signal,
+      },
+    )
   ),
+  githubFactory = null,
   ascFactory = () => new AppStoreConnectAPI(
     process.env.APP_STORE_CONNECT_API_KEY_ID,
     process.env.APP_STORE_CONNECT_ISSUER_ID,
     process.env.APP_STORE_CONNECT_API_KEY_CONTENT,
   ),
 } = {}) {
+  const createGitHub = githubFactory || (async (profile, { signal = null } = {}) => {
+    const environment = await awaitWithSignal(
+      repositoryAuthenticationFactory(profile, { signal }),
+      signal,
+    );
+    return new GitHubAPI(
+      profile.repository.owner,
+      profile.repository.name,
+      profile.repository.production_branch || 'main',
+      {
+        environment,
+        repositoryId: profile.repository.github_id || null,
+        signal,
+      },
+    );
+  });
   return async (entry, payload, { signal = null } = {}) => {
     let normalizedPayload = normalizePreparePayload(payload);
     let purpose = normalizedPayload.purpose !== undefined && normalizedPayload.purpose !== null
       ? inferBuildPurpose(entry.profile, normalizedPayload)
       : null;
-    const github = githubFactory(entry.profile, { signal });
+    const github = await awaitWithSignal(createGitHub(entry.profile, { signal }), signal);
     github.signal = signal;
     const betaBranch = entry.profile.repository.beta_branch || 'develop';
     const productionBranch = entry.profile.repository.production_branch || 'main';
@@ -472,9 +643,18 @@ function withDeadline(promise, timeoutMs, onTimeout = () => {}) {
 export function createWebhookServer({
   profiles,
   dispatch = null,
-  prepare = createPrepareRequest(),
+  prepare = null,
   prepareCache = createPrepareCache(),
   deliveryStore = createDeliveryStore(),
+  installationState = deliveryStore?.stateDirectory
+    ? createGitHubInstallationState({ stateDirectory: deliveryStore.stateDirectory })
+    : new MemoryGitHubInstallationState(),
+  authenticator = createGitHubAuthenticator(),
+  githubAppMode: configuredGitHubAppMode = githubAppWebhookMode(),
+  githubAppSecret = process.env.GITHUB_APP_WEBHOOK_SECRET || '',
+  classicGitHubWebhooksEnabled: configuredClassicGitHubWebhooksEnabled = (
+    githubClassicWebhooksEnabled()
+  ),
   deploymentSha = process.env.MERGE4APPSTORE_DEPLOY_SHA || null,
   workerId = /^(0|[1-9]\d*)$/.test(process.env.pm_id || '')
     && Number.isSafeInteger(Number(process.env.pm_id)) ? Number(process.env.pm_id) : null,
@@ -482,6 +662,10 @@ export function createWebhookServer({
   maxPrepareFlights = 100,
   recoveryIntervalMs = positiveNumber(process.env.MERGE4APPSTORE_RECOVERY_INTERVAL_MS, 5_000),
   retryDelayMs = positiveNumber(process.env.MERGE4APPSTORE_JOB_RETRY_MS, 5_000),
+  suspendedRetryDelayMs = positiveNumber(
+    process.env.MERGE4APPSTORE_SUSPENDED_INSTALLATION_RETRY_MS,
+    60_000,
+  ),
   maxDeliveryAttempts = positiveNumber(process.env.MERGE4APPSTORE_JOB_MAX_ATTEMPTS, 8),
   pendingStaleAfterMs = 15 * 60_000,
   deliveryPausedUntil = Number(process.env.MERGE4APPSTORE_DELIVERY_PAUSED_UNTIL || 0),
@@ -495,6 +679,34 @@ export function createWebhookServer({
   if (workerId !== null && (!Number.isSafeInteger(workerId) || workerId < 0)) {
     throw new RangeError('workerId must be a non-negative integer or null');
   }
+  const configuredAppMode = githubAppWebhookMode({
+    GITHUB_APP_WEBHOOK_MODE: configuredGitHubAppMode,
+  });
+  const classicWebhooksConfigured = githubClassicWebhooksEnabled({
+    GITHUB_CLASSIC_WEBHOOKS_ENABLED: String(configuredClassicGitHubWebhooksEnabled),
+  });
+  const profileIds = Object.values(profiles).map(entry => (
+    positiveIdentifier(entry.profile.repository.github_id)
+  ));
+  const allProfilesHaveIds = profileIds.every(Boolean);
+  const uniqueProfileIds = new Set(profileIds.filter(Boolean)).size === profileIds.length;
+  const appAuthenticatorReady = Boolean(
+    authenticator
+    && typeof authenticator.verifyRepositoryInstallation === 'function',
+  );
+  const githubAppReady = Boolean(
+    githubAppSecret
+    && allProfilesHaveIds
+    && uniqueProfileIds
+    && (configuredAppMode === 'shadow' || appAuthenticatorReady),
+  );
+  const safeWebhookCutover = configuredAppMode === 'managed'
+    ? !classicWebhooksConfigured
+    : classicWebhooksConfigured;
+  const githubWebhookRoutingReady = safeWebhookCutover
+    && (configuredAppMode !== 'managed' || githubAppReady);
+  const classicDispatchEnabled = configuredAppMode !== 'managed' && classicWebhooksConfigured;
+  const prepareRequest = prepare || createPrepareRequest({ authenticator });
   const jobRunner = dispatch || createJobRunner();
   const enqueue = createSerialDispatcher(jobRunner);
   const prepareFlights = new Map();
@@ -525,8 +737,21 @@ export function createWebhookServer({
       throw error;
     }
   };
+  const persistInstallationState = async (description, operation) => {
+    try {
+      return await operation();
+    } catch (cause) {
+      markDeliveryStoreFatal(cause);
+      const error = new Error(`${description}; the delivery worker must restart`, { cause });
+      error.deliveryStorageFatal = true;
+      throw error;
+    }
+  };
   const deliveryReady = Promise.resolve()
-    .then(() => deliveryStore.initialize?.())
+    .then(() => Promise.all([
+      deliveryStore.initialize?.(),
+      installationState.initialize?.(),
+    ]))
     .catch(error => {
       deliveryInitializationError = error;
       throw error;
@@ -564,17 +789,48 @@ export function createWebhookServer({
     }
     return Number.isFinite(deliveryPausedUntil) && Date.now() < deliveryPausedUntil;
   };
+  const executeDeliveryJob = async (entry, job) => {
+    if (job.mode === 'github-installation-state') {
+      await persistInstallationState(
+        'Could not persist GitHub installation state',
+        () => installationState.setSuspended(
+          job.installationId,
+          job.suspended === true,
+          { eventAt: job.eventAt || null, deliveryId: job.deliveryId || null },
+        ),
+      );
+      return 0;
+    }
+    if (job.installationId && await persistInstallationState(
+      'Could not read GitHub installation state',
+      () => installationState.isSuspended(job.installationId),
+    )) {
+      const error = new Error(`GitHub installation ${job.installationId} is suspended`);
+      error.deliveryBlocked = true;
+      error.installationId = String(job.installationId);
+      throw error;
+    }
+    return enqueue(entry, job);
+  };
   const runDelivery = (deliveryClaim, intent) => {
     const background = (async () => {
       try {
-        const entry = profiles[intent?.instance];
-        if (!entry || !Array.isArray(intent?.jobs)) {
+        if (!Array.isArray(intent?.jobs)) {
           throw new Error(`Cannot recover webhook delivery for unknown instance ${intent?.instance || '(missing)'}`);
+        }
+        const entry = profiles[intent.instance];
+        if (intent.jobs.some(job => job?.mode !== 'github-installation-state') && !entry) {
+          throw new Error(`Cannot recover webhook delivery for unknown instance ${intent.instance || '(missing)'}`);
         }
         const cursor = Math.max(0, Number(deliveryClaim.cursor || 0));
         for (let index = cursor; index < intent.jobs.length; index += 1) {
           const job = intent.jobs[index];
-          const exitCode = await enqueue(entry, job);
+          if (job?.mode !== 'github-installation-state' && isDeliveryPaused()) {
+            const error = new Error('Deployment migration drain');
+            error.deliveryPaused = true;
+            throw error;
+          }
+          const exitCode = await executeDeliveryJob(entry, job);
           if (typeof exitCode === 'number' && exitCode !== 0) {
             throw new Error(`Webhook job ${entry.profile.instance}:${job.mode} exited ${exitCode}`);
           }
@@ -594,7 +850,37 @@ export function createWebhookServer({
       } catch (error) {
         if (error.deliveryStorageFatal) throw error;
         const attempts = Math.max(1, Number(deliveryClaim.attempts || 1));
-        if (attempts >= maxDeliveryAttempts) {
+        if (error.deliveryPaused) {
+          const delayMs = Math.max(0, deliveryPausedUntil - Date.now());
+          const retrying = await persistDelivery(
+            'Could not defer webhook delivery during migration',
+            () => deliveryStore.retry(deliveryClaim, error, { delayMs }),
+          );
+          if (!retrying) {
+            const dispositionError = new Error('Webhook delivery ownership changed before migration deferral', { cause: error });
+            dispositionError.dispositionUnknown = true;
+            throw dispositionError;
+          }
+          error.deferredForMigration = true;
+        } else if (error.deliveryBlocked) {
+          const retrying = await persistDelivery(
+            'Could not defer a webhook delivery for a suspended installation',
+            () => deliveryStore.retry(
+              deliveryClaim,
+              error,
+              {
+                delayMs: suspendedRetryDelayMs,
+                reason: `installation-suspended:${error.installationId}`,
+              },
+            ),
+          );
+          if (!retrying) {
+            const dispositionError = new Error('Webhook delivery ownership changed before its installation deferral could be persisted', { cause: error });
+            dispositionError.dispositionUnknown = true;
+            throw dispositionError;
+          }
+          error.deferredForInstallation = true;
+        } else if (attempts >= maxDeliveryAttempts) {
           const failed = await persistDelivery(
             'Could not persist failed webhook delivery',
             () => deliveryStore.fail(deliveryClaim, error),
@@ -625,11 +911,29 @@ export function createWebhookServer({
         ? `failed ${maxDeliveryAttempts} times and requires manual recovery`
         : error.deliveryStorageFatal
           ? 'delivery storage failed and the worker must restart'
+        : error.deferredForMigration
+          ? 'is deferred during deployment migration'
+        : error.deferredForInstallation
+          ? 'is deferred until the GitHub installation is active'
         : error.dispositionUnknown
           ? 'ownership changed; another worker must recover it'
           : 'will be retried';
       console.error(`${new Date().toISOString()} webhook delivery attempt failed; ${disposition}: ${error.stack || error.message}`);
     });
+  };
+  const applyInstallationStateBeforeAcknowledgement = async (deliveryClaim, intent) => {
+    const entry = profiles[intent.instance];
+    let cursor = Math.max(0, Number(deliveryClaim.cursor || 0));
+    while (intent.jobs[cursor]?.mode === 'github-installation-state') {
+      await executeDeliveryJob(entry, intent.jobs[cursor]);
+      cursor += 1;
+      if (!await persistDelivery(
+        'Could not persist GitHub installation delivery progress',
+        () => deliveryStore.advance(deliveryClaim, cursor),
+      )) {
+        throw new Error('GitHub installation delivery ownership changed while recording progress');
+      }
+    }
   };
   const recoverPending = async () => {
     if (recoveryStopped || recovering || isDeliveryPaused() || typeof deliveryStore.claimPending !== 'function') return;
@@ -645,8 +949,24 @@ export function createWebhookServer({
       recovering = false;
     }
   };
-  const triggerRecovery = () => {
-    track(recoverPending()).catch(error => {
+  const recoverInstallation = async installationId => {
+    if (recoveryStopped || isDeliveryPaused() || typeof deliveryStore.claimPending !== 'function') return;
+    try {
+      await deliveryReady;
+      const claims = await deliveryStore.claimPending({
+        releaseInstallationId: installationId,
+      });
+      for (const claim of claims) runDelivery(claim, claim.intent);
+    } catch (error) {
+      markDeliveryStoreFatal(error);
+      console.error(`${new Date().toISOString()} could not release webhook deliveries for GitHub installation ${installationId}: ${error.stack || error.message}`);
+    }
+  };
+  const triggerRecovery = (installationId = null) => {
+    const recovery = installationId === null
+      ? recoverPending()
+      : recoverInstallation(installationId);
+    track(recovery).catch(error => {
       console.error(`${new Date().toISOString()} recovery scan failed: ${error.stack || error.message}`);
     });
   };
@@ -669,8 +989,9 @@ export function createWebhookServer({
         } catch (error) {
           probeError = error;
         }
-        const ok = !probeError;
+        const ok = !probeError && githubWebhookRoutingReady;
         const degraded = deliveryPaused
+          || !githubWebhookRoutingReady
           || Number(deliveryQueue?.failed || 0) > 0
           || Number(deliveryQueue?.corrupt || 0) > 0
           || (
@@ -690,14 +1011,213 @@ export function createWebhookServer({
             ? new Date(deliveryPausedUntil).toISOString()
             : null,
           delivery_paused: deliveryPaused,
-          ...(probeError ? { error: 'Webhook runtime state is unavailable' } : {}),
+          github_app_mode: configuredAppMode,
+          github_app_ready: githubAppReady,
+          github_classic_webhooks_enabled: classicDispatchEnabled,
+          ...(probeError
+            ? { error: 'Webhook runtime state is unavailable' }
+            : !githubWebhookRoutingReady
+              ? { error: 'GitHub webhook routing is not configured safely' }
+              : {}),
         }, ok ? {} : { 'retry-after': '30' });
       }
       if (request.method !== 'POST') return send(response, 404, { error: 'Not found' });
 
       const prepareMatch = url.pathname.match(/^\/v1\/builds\/prepare\/([^/]+)$/);
       const githubMatch = url.pathname.match(/^\/webhooks\/github\/([^/]+)$/);
+      const githubAppMatch = url.pathname === '/webhooks/github-app';
       const xcodeMatch = url.pathname.match(/^\/webhooks\/xcode-cloud\/([^/]+)\/([^/]+)$/);
+
+      if (githubAppMatch) {
+        if (!githubAppSecret) {
+          return send(response, 503, { error: 'GitHub App webhook secret is not configured' });
+        }
+        if (!allProfilesHaveIds || !uniqueProfileIds) {
+          return send(response, 503, { error: 'GitHub App repository ids are not configured safely' });
+        }
+        if (configuredAppMode === 'managed' && !appAuthenticatorReady) {
+          return send(response, 503, { error: 'GitHub App credentials are not configured' });
+        }
+        if (configuredAppMode === 'managed' && !githubWebhookRoutingReady) {
+          return send(response, 503, { error: 'GitHub webhook routing is not configured safely' });
+        }
+        const event = singleHeader(request.headers['x-github-event']);
+        if (!event) return send(response, 400, { error: 'Missing GitHub event' });
+        const delivery = singleHeader(request.headers['x-github-delivery']);
+        if (!delivery) return send(response, 400, { error: 'Missing delivery id' });
+        const rawBody = await readBody(request);
+        const signature = singleHeader(request.headers['x-hub-signature-256']);
+        if (!verifyGitHubSignature(rawBody, signature, githubAppSecret)) {
+          return send(response, 401, { error: 'Invalid signature' });
+        }
+        let payload;
+        try { payload = JSON.parse(rawBody.toString('utf8')); }
+        catch { return send(response, 400, { error: 'Invalid JSON' }); }
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          return send(response, 400, { error: 'JSON payload must be an object' });
+        }
+        if (event === 'ping') {
+          return send(response, 200, { ok: true, zen: payload.zen || null });
+        }
+        const installationId = positiveIdentifier(payload.installation?.id);
+        if (!installationId) {
+          return send(response, 400, { error: 'Missing or invalid installation id' });
+        }
+        if (payload.repository && !positiveIdentifier(payload.repository.id)) {
+          return send(response, 400, { error: 'Missing or invalid repository id' });
+        }
+        const targets = entriesForGitHubAppEvent(profiles, payload);
+        if (payload.repository && targets.length !== 1) {
+          return send(response, 403, { error: 'GitHub App repository is not configured' });
+        }
+
+        let suspensionTransition = null;
+        if (event === 'installation') {
+          if (
+            ['deleted', 'suspend'].includes(payload.action)
+            || Boolean(payload.installation?.suspended_at)
+          ) suspensionTransition = true;
+          else if (['created', 'unsuspend', 'new_permissions_accepted'].includes(payload.action)) {
+            suspensionTransition = false;
+          }
+        }
+        const transitionJob = suspensionTransition === null ? [] : [{
+          mode: 'github-installation-state',
+          installationId,
+          suspended: suspensionTransition,
+          eventAt: payload.installation?.updated_at
+            || payload.installation?.suspended_at
+            || Date.now(),
+          deliveryId: delivery,
+        }];
+        const planned = targets.map(entry => ({
+          entry,
+          jobs: jobsForGitHubEvent(
+            entry.profile,
+            event,
+            payload,
+            delivery,
+            { requireRepositoryId: true },
+          ).map(job => ({
+            ...job,
+            installationId,
+            repositoryId: entry.profile.repository.github_id,
+          })),
+        }));
+        const deliveryPaused = isDeliveryPaused();
+        const deliveryIntents = [];
+        if (transitionJob.length > 0) {
+          deliveryIntents.push({
+            key: webhookDeliveryKey('github-installation', installationId, delivery),
+            intent: {
+              instance: `github-installation:${installationId}`,
+              jobs: transitionJob,
+            },
+          });
+        }
+        for (const target of planned) {
+          const jobs = configuredAppMode === 'managed' || deliveryPaused ? target.jobs : [];
+          // Installation lifecycle state is owned once per installation, not
+          // once per repository. Empty shadow receipts remain useful for
+          // observing and deduplicating ordinary App deliveries.
+          if (transitionJob.length > 0 && jobs.length === 0) continue;
+          const instance = target.entry.profile.instance;
+          deliveryIntents.push({
+            key: jobs.length > 0
+              ? githubEventDeliveryKey(
+                instance,
+                event,
+                payload,
+                delivery,
+                target.entry.profile.repository.github_id,
+              )
+              : webhookDeliveryKey('github-app', instance, delivery),
+            intent: { instance, jobs },
+          });
+        }
+        const claims = [];
+        try {
+          await deliveryReady;
+          for (const plannedIntent of deliveryIntents) {
+            const { key, intent } = plannedIntent;
+            let claim;
+            try {
+              claim = await deliveryStore.claim(key, intent);
+            } catch (error) {
+              if (error.code !== 'ECORRUPTRECEIPT') markDeliveryStoreFatal(error);
+              error.statusCode ||= 503;
+              error.retryAfter ||= 30;
+              throw error;
+            }
+            if (!claim) continue;
+            const claimed = { claim, intent };
+            claims.push(claimed);
+            // Installation lifecycle state is safety state, not a deployment
+            // side effect. Persist it before acknowledging even while job
+            // execution is gated, so queued repository work cannot overtake a
+            // suspend/delete delivery when recovery order differs by worker.
+            await applyInstallationStateBeforeAcknowledgement(claim, intent);
+            if (Number(claim.cursor || 0) >= intent.jobs.length) {
+              const completed = await persistDelivery(
+                'Could not persist GitHub App observation completion',
+                () => deliveryStore.complete(claim),
+              );
+              if (!completed) {
+                throw new Error('GitHub App delivery ownership changed before completion');
+              }
+              claimed.completed = true;
+            } else if (deliveryPaused || isDeliveryPaused()) {
+              const delayMs = Math.max(0, deliveryPausedUntil - Date.now());
+              const deferred = await persistDelivery(
+                'Could not defer GitHub App delivery during migration',
+                () => deliveryStore.retry(
+                  claim,
+                  new Error('Deployment migration drain'),
+                  { delayMs },
+                ),
+              );
+              if (!deferred) {
+                throw new Error('GitHub App delivery ownership changed before migration deferral');
+              }
+              claimed.deferred = true;
+            }
+          }
+        } catch (error) {
+          for (const claimed of claims) {
+            if (!claimed.deferred && !claimed.completed) {
+              runDelivery(claimed.claim, claimed.intent);
+            }
+          }
+          throw error;
+        }
+        if (deliveryIntents.length > 0 && claims.length === 0) {
+          return send(response, 200, {
+            accepted: true,
+            duplicate: true,
+            mode: configuredAppMode,
+          });
+        }
+        const suspended = await persistInstallationState(
+          'Could not read GitHub installation state',
+          () => installationState.isSuspended(installationId),
+        );
+        send(response, 202, {
+          accepted: true,
+          mode: configuredAppMode,
+          installation: installationId,
+          suspended,
+          repositories: planned.map(target => target.entry.profile.instance),
+          jobs: planned.flatMap(target => target.jobs).map(job => (
+            `${job.mode}${job.purpose ? `:${job.purpose}` : ''}`
+          )),
+        });
+        for (const claimed of claims) {
+          if (!claimed.deferred && !claimed.completed) runDelivery(claimed.claim, claimed.intent);
+        }
+        if (suspensionTransition === false) triggerRecovery(installationId);
+        return;
+      }
+
       let instance;
       try { instance = decodeURIComponent(prepareMatch?.[1] || githubMatch?.[1] || xcodeMatch?.[1] || ''); }
       catch { return send(response, 400, { error: 'Invalid instance' }); }
@@ -715,6 +1235,7 @@ export function createWebhookServer({
       const settings = webhookSettings(entry.profile);
       let jobs;
       let deliveryKey;
+      let deliveryWasPaused = false;
       if (prepareMatch) {
         const bearer = singleHeader(request.headers.authorization).replace(/^Bearer\s+/i, '');
         if (!settings.buildToken || !safeEqual(bearer, settings.buildToken)) {
@@ -739,7 +1260,7 @@ export function createWebhookServer({
             controller,
             task: track(prepareCache.get(
               prepareKey,
-              () => prepare(entry, payload, { signal: controller.signal }),
+              () => prepareRequest(entry, payload, { signal: controller.signal }),
               { signal: controller.signal },
             )),
           };
@@ -762,11 +1283,32 @@ export function createWebhookServer({
         if (!verifyGitHubSignature(rawBody, signature, settings.githubSecret)) {
           return send(response, 401, { error: 'Invalid signature' });
         }
+        if (configuredAppMode === 'managed' && !githubWebhookRoutingReady) {
+          return send(response, 503, { error: 'Managed GitHub App runtime is not configured safely' });
+        }
         const event = singleHeader(request.headers['x-github-event']);
         const delivery = singleHeader(request.headers['x-github-delivery']);
         if (!delivery) return send(response, 400, { error: 'Missing delivery id' });
-        deliveryKey = webhookDeliveryKey('github', instance, delivery);
         jobs = jobsForGitHubEvent(entry.profile, event, payload, delivery);
+        const deliveryPaused = isDeliveryPaused();
+        deliveryWasPaused = deliveryPaused;
+        if (!classicDispatchEnabled && !deliveryPaused) {
+          return send(response, 202, {
+            accepted: true,
+            suppressed: true,
+            mode: configuredAppMode,
+            jobs: jobs.map(job => `${job.mode}${job.purpose ? `:${job.purpose}` : ''}`),
+          });
+        }
+        deliveryKey = jobs.length > 0
+          ? githubEventDeliveryKey(
+            instance,
+            event,
+            payload,
+            delivery,
+            entry.profile.repository.github_id,
+          )
+          : webhookDeliveryKey('github', instance, delivery);
       } else if (xcodeMatch) {
         let suppliedToken;
         try { suppliedToken = decodeURIComponent(xcodeMatch[2]); }
@@ -795,7 +1337,7 @@ export function createWebhookServer({
         throw error;
       }
       if (!deliveryClaim) return send(response, 200, { accepted: true, duplicate: true });
-      if (isDeliveryPaused()) {
+      if (deliveryWasPaused || isDeliveryPaused()) {
         const delayMs = Math.max(0, deliveryPausedUntil - Date.now());
         const deferred = await persistDelivery(
           'Could not defer webhook delivery during migration',

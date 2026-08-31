@@ -21,7 +21,8 @@
     "prepare:mirrors": "node scripts/prepare-git-mirrors.js",
     "retry:deliveries": "node scripts/retry-webhook-deliveries.js",
     "test": "node --test tests/*.test.js",
-    "validate:profiles": "node scripts/validate-profiles.js"
+    "validate:profiles": "node scripts/validate-profiles.js",
+    "verify:github-app": "node scripts/verify-github-app.js"
   },
   "keywords": [
     "ios",

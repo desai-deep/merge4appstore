@@ -6,6 +6,10 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
+import {
+  serializeEncodedEnvironment,
+  WEBHOOK_SECRET_NAMES,
+} from '../lib/secret-environment.js';
 
 const workflow = fs.readFileSync(new URL('../.github/workflows/deploy.yml', import.meta.url), 'utf8');
 const dependabot = fs.readFileSync(new URL('../.github/dependabot.yml', import.meta.url), 'utf8');
@@ -53,6 +57,15 @@ function extractMirrorInspection() {
   const call = inspectRun.indexOf('\n  inspect_git_mirrors\n', start);
   assert.ok(start >= 0 && call > start, 'mirror inspection must be an extractable shell function');
   return inspectRun.slice(start, call);
+}
+
+function extractMirrorIdentityValidation() {
+  const inspection = extractMirrorInspection();
+  const start = inspection.indexOf('[ "$jams_mirrors" -le 1 ]');
+  const endMarker = '\n    fi';
+  const end = inspection.indexOf(endMarker, start);
+  assert.ok(start >= 0 && end > start, 'mirror identity validation must be extractable');
+  return inspection.slice(start, end + endMarker.length);
 }
 
 function shellSection(start, end) {
@@ -317,14 +330,63 @@ test('inspection verifies both private blobless mirrors without lazy fetching', 
   assert.match(inspectRun, /GIT_NO_REPLACE_OBJECTS=1 git -C "\$DEPLOY_DIR"[\s\S]*ls-tree --name-only/);
   assert.match(inspectRun, /Current release tree could not be inspected/);
   assert.match(inspectRun, /temporary_mirrors=\("\$mirrors_dir"\/\*\.tmp-\*\)/);
-  assert.match(inspectRun, /desai-deep\/jamsontoast\\\|https:\/\/github\.com\/desai-deep\/JamsOnToast\.git/);
-  assert.match(inspectRun, /desai-deep\/runningorder-ios\\\|https:\/\/github\.com\/desai-deep\/runningorder-ios\.git/);
+  assert.match(inspectRun, /id:390842121\\\|https:\/\/github\.com\/desai-deep\/JamsOnToast\.git/);
+  assert.match(inspectRun, /id:789442740\\\|https:\/\/github\.com\/desai-deep\/runningorder-ios\.git/);
   assert.match(inspectRun, /remote\.origin\.promisor/);
   assert.match(inspectRun, /remote\.origin\.partialclonefilter/);
   assert.match(inspectRun, /\.merge4appstore-refresh/);
   assert.match(inspectRun, /GIT_NO_LAZY_FETCH=1 GIT_NO_REPLACE_OBJECTS=1 GIT_TERMINAL_PROMPT=0/);
   assert.match(inspectRun, /fsck --connectivity-only --no-dangling/);
   assert.match(inspectRun, /Expected exactly one ready mirror for each configured repository/);
+});
+
+test('mirror inspection accepts migration states and rejects duplicate or partial identities', () => {
+  const validation = extractMirrorIdentityValidation();
+  const runValidation = ({ jams, runningorder, legacyJams, legacyRunningorder }) => runBash([
+    'set -Eeuo pipefail',
+    `jams_mirrors=${jams}`,
+    `runningorder_mirrors=${runningorder}`,
+    `legacy_jams_mirrors=${legacyJams}`,
+    `legacy_runningorder_mirrors=${legacyRunningorder}`,
+    validation,
+    'echo mirror-identities=accepted',
+  ].join('\n'));
+
+  const legacyOnly = runValidation({
+    jams: 0,
+    runningorder: 0,
+    legacyJams: 1,
+    legacyRunningorder: 1,
+  });
+  assert.equal(legacyOnly.status, 0, legacyOnly.stderr || legacyOnly.stdout);
+  assert.match(legacyOnly.stdout, /git_mirrors=legacy-identities-ready/);
+  assert.match(legacyOnly.stdout, /mirror-identities=accepted/);
+
+  const migrated = runValidation({
+    jams: 1,
+    runningorder: 1,
+    legacyJams: 1,
+    legacyRunningorder: 1,
+  });
+  assert.equal(migrated.status, 0, migrated.stderr || migrated.stdout);
+
+  for (const counters of [
+    { jams: 2, runningorder: 1, legacyJams: 0, legacyRunningorder: 0 },
+    { jams: 0, runningorder: 0, legacyJams: 2, legacyRunningorder: 1 },
+  ]) {
+    const duplicate = runValidation(counters);
+    assert.notEqual(duplicate.status, 0);
+    assert.match(duplicate.stdout, /Duplicate Git mirrors are present/);
+  }
+
+  const partialMigration = runValidation({
+    jams: 1,
+    runningorder: 0,
+    legacyJams: 0,
+    legacyRunningorder: 1,
+  });
+  assert.notEqual(partialMigration.status, 0);
+  assert.match(partialMigration.stdout, /Expected exactly one ready mirror for each configured repository/);
 });
 
 test('inspection fails closed for corrupt current release pointers and markers', t => {
@@ -594,7 +656,7 @@ test('journals every mutating boundary and commits before legacy teardown', () =
   const gateClear = finalizer.indexOf('clear_delivery_pause');
   const hookConfigure = finalizer.indexOf('configure_repository_hooks');
   assert.ok(legacyStop >= 0 && legacyStop < cronInstall);
-  assert.ok(cronInstall < gateClear && gateClear < hookConfigure);
+  assert.ok(cronInstall < hookConfigure && hookConfigure < gateClear);
 });
 
 test('deletes the legacy server only after observable job quiescence', t => {
@@ -1191,13 +1253,151 @@ test('fails closed when GitHub returns duplicate exact webhook URLs', t => {
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
+test('keeps classic hooks active in shadow mode and disables them in managed mode', t => {
+  const directory = temporaryDirectory(t, 'merge4appstore-hook-cutover-');
+  const secret = path.join(directory, 'webhook.env');
+  const events = path.join(directory, 'events');
+  const required = Object.fromEntries(WEBHOOK_SECRET_NAMES.map(name => [name, `${name}-value`]));
+  fs.writeFileSync(secret, serializeEncodedEnvironment(required, WEBHOOK_SECRET_NAMES), { mode: 0o600 });
+  const hookFunctions = shellSection('read_hook_id() {', 'legacy_descendant_count() {');
+  const common = [
+    'set -u',
+    'shopt -s nullglob',
+    'CONTROL_ENV="$TEST_DIRECTORY/control.env"',
+    'PUBLIC_BASE_URL=https://example.invalid/merge4appstore',
+    'read_env_value_from_release() {',
+    '  case "$3" in',
+    '    GH_TOKEN) printf "pat" ;;',
+    '    GITHUB_CLASSIC_WEBHOOKS_ENABLED) printf "%s" "$CLASSIC_SETTING" ;;',
+    '    *) return 1 ;;',
+    '  esac',
+    '}',
+    hookFunctions,
+  ];
+
+  const shadow = runBash([
+    ...common,
+    'CLASSIC_SETTING=true',
+    'retry_capture() {',
+    '  local result_name="$1" description="$2"',
+    '  case "$description" in',
+    '    *listing*) printf -v "$result_name" "%s" "[[]]" ;;',
+    '    *) return 1 ;;',
+    '  esac',
+    '}',
+    'create_repository_hook_safely() {',
+    '  HOOK_PAYLOAD="$4" node -e \x27const fs=require("fs");const value=JSON.parse(fs.readFileSync(process.env.HOOK_PAYLOAD));if(value.active!==true)process.exit(1)\x27 || return 1',
+    '  printf "create:%s:%s\\n" "$2" "$3" >> "$TEST_EVENTS"',
+    '}',
+    'configure_repository_hooks "$TEST_RELEASE" "$TEST_SECRET" "$TEST_DIRECTORY" || exit 10',
+    '[ "$(grep -Fc "create:" "$TEST_EVENTS")" -eq 2 ] || exit 11',
+  ].join('\n'), {
+    TEST_DIRECTORY: directory,
+    TEST_EVENTS: events,
+    TEST_RELEASE: repositoryRoot,
+    TEST_SECRET: secret,
+  });
+  assert.equal(shadow.status, 0, shadow.stderr || shadow.stdout);
+  assert.match(fs.readFileSync(events, 'utf8'), /create:desai-deep\/JamsOnToast/);
+  assert.match(fs.readFileSync(events, 'utf8'), /create:desai-deep\/runningorder-ios/);
+
+  fs.rmSync(events);
+  const managed = runBash([
+    ...common,
+    'CLASSIC_SETTING=false',
+    'retry_capture() {',
+    '  local result_name="$1" description="$2" payload="" previous="" argument',
+    '  shift 3',
+    '  case "$description" in',
+    '    *listing*)',
+    '      case "$description" in *JamsOnToast*) instance=jamsontoast ;; *) instance=runningorder-ios ;; esac',
+    '      printf -v "$result_name" "%s" "[[{\\"id\\":7,\\"config\\":{\\"url\\":\\"$PUBLIC_BASE_URL/webhooks/github/$instance\\"}}]]"',
+    '      ;;',
+    '    *update*)',
+    '      for argument in "$@"; do',
+    '        if [ "$previous" = --input ]; then payload="$argument"; break; fi',
+    '        previous="$argument"',
+    '      done',
+    '      [ -n "$payload" ] || return 1',
+    '      HOOK_PAYLOAD="$payload" node -e \x27const fs=require("fs");const value=JSON.parse(fs.readFileSync(process.env.HOOK_PAYLOAD));if(value.active!==false)process.exit(1)\x27 || return 1',
+    '      printf "disable:%s\\n" "$description" >> "$TEST_EVENTS"',
+    '      printf -v "$result_name" "%s" "{}"',
+    '      ;;',
+    '    *) return 1 ;;',
+    '  esac',
+    '}',
+    'create_repository_hook_safely() { return 1; }',
+    'configure_repository_hooks "$TEST_RELEASE" "$TEST_SECRET" "$TEST_DIRECTORY" || exit 20',
+    '[ "$(grep -Fc "disable:" "$TEST_EVENTS")" -eq 2 ] || exit 21',
+  ].join('\n'), {
+    TEST_DIRECTORY: directory,
+    TEST_EVENTS: events,
+    TEST_RELEASE: repositoryRoot,
+    TEST_SECRET: secret,
+  });
+  assert.equal(managed.status, 0, managed.stderr || managed.stdout);
+});
+
+test('enforces the staged GitHub App authentication and webhook rollout', async t => {
+  const directory = temporaryDirectory(t, 'merge4appstore-app-rollout-');
+  const guardStart = deployScript.indexOf('candidate_app_mode="$(read_env_value');
+  const guard = deployScript.slice(
+    guardStart,
+    deployScript.indexOf('export MERGE4APPSTORE_ENV="$CONTROL_ENV"', guardStart),
+  );
+  assert.ok(guard.length > 0);
+  const writeEnvironment = (name, values) => {
+    const file = path.join(directory, `${name}.env`);
+    fs.writeFileSync(file, `${Object.entries(values).map(([key, value]) => `${key}=${value}`).join('\n')}\n`);
+    return file;
+  };
+  const legacy = writeEnvironment('legacy', { GH_WEBHOOK_SECRET: 'classic' });
+  const auth = writeEnvironment('auth', {
+    GITHUB_APP_ID: '123',
+    GITHUB_APP_PRIVATE_KEY_BASE64: 'key',
+  });
+  const shadow = writeEnvironment('shadow', {
+    GITHUB_APP_ID: '123',
+    GITHUB_APP_PRIVATE_KEY_BASE64: 'key',
+    GITHUB_APP_WEBHOOK_SECRET: 'webhook',
+    GITHUB_APP_WEBHOOK_MODE: 'shadow',
+    GITHUB_CLASSIC_WEBHOOKS_ENABLED: 'true',
+  });
+  const managed = writeEnvironment('managed', {
+    GITHUB_APP_ID: '123',
+    GITHUB_APP_PRIVATE_KEY_BASE64: 'key',
+    GITHUB_APP_WEBHOOK_SECRET: 'webhook',
+    GITHUB_APP_WEBHOOK_MODE: 'managed',
+    GITHUB_CLASSIC_WEBHOOKS_ENABLED: 'false',
+  });
+  const evaluate = (oldSecret, candidateSecret) => runBash([
+    'set -u',
+    'read_env_value() { awk -F= -v key="$2" \x27$1 == key { print substr($0, length(key) + 2); exit }\x27 "$1"; }',
+    'fail() { echo "$1" >&2; exit 90; }',
+    `old_current_secret=${JSON.stringify(oldSecret)}`,
+    `candidate_secret=${JSON.stringify(candidateSecret)}`,
+    guard,
+  ].join('\n'));
+
+  assert.notEqual(evaluate(legacy, managed).status, 0, 'legacy to managed must fail');
+  assert.notEqual(evaluate(legacy, shadow).status, 0, 'legacy to auth plus shadow must fail');
+  assert.equal(evaluate(legacy, auth).status, 0, 'authentication-only introduction must pass');
+  assert.equal(evaluate(auth, shadow).status, 0, 'authentication-only to shadow must pass');
+  assert.equal(evaluate(shadow, managed).status, 0, 'verified shadow to managed must pass');
+});
+
 test('loads secrets from private files without persisting their values in PM2', () => {
   assert.match(deployScript, /MERGE4APPSTORE_ENV=\"\$CONTROL_ENV\"/);
   assert.match(deployScript, /MERGE4APPSTORE_WEBHOOK_ENV=\"\$secret_file\"/);
   assert.match(deployScript, /persisted forbidden secret/);
   assert.match(deployScript, /APP_STORE_CONNECT_API_\*\|GH_TOKEN\|GH_WEBHOOK_SECRET/);
+  assert.match(deployScript, /GH_WEBHOOK_SECRET\|GITHUB_APP_\*\|GITHUB_CLASSIC_WEBHOOKS_ENABLED\|GITHUB_INSTALLATION_ID/);
+  assert.match(deployScript, /for secret_key in GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY_BASE64 GITHUB_APP_WEBHOOK_SECRET GITHUB_INSTALLATION_ID/);
+  assert.match(deployScript, /GitHub App managed mode requires a prior shadow deployment/);
+  assert.match(deployScript, /name\.startsWith\("GITHUB_APP_"\)/);
+  assert.match(deployScript, /fs\.readFileSync\(`\/proc\/\$\{processInfo\.pid\}\/environ`/);
   assert.match(deployScript, /pm2_env[\s\S]*MERGE4APPSTORE_WEBHOOK_ENV/);
-  assert.match(ecosystem, /filter_env:[\s\S]*'GH_TOKEN'[\s\S]*'MERGE4APPSTORE_BUILD_TOKEN_'/);
+  assert.match(ecosystem, /filter_env:[\s\S]*'GH_TOKEN'[\s\S]*'GITHUB_APP_'[\s\S]*'GITHUB_INSTALLATION_ID'[\s\S]*'GITHUB_REPOSITORY_ID'[\s\S]*'MERGE4APPSTORE_JOB_GITHUB_INSTALLATION_ID'[\s\S]*'MERGE4APPSTORE_BUILD_TOKEN_'/);
   assert.match(ecosystem, /env:[\s\S]*DRY_RUN: 'false'[\s\S]*RECONCILE_METADATA: 'false'/);
   assert.match(ecosystem, /filter_env:[\s\S]*'BUILD_'[\s\S]*'DRY_RUN'/);
   assert.match(webhookServer, /MERGE4APPSTORE_ENV/);
@@ -1207,8 +1407,15 @@ test('loads secrets from private files without persisting their values in PM2', 
   assert.match(deployScript, /install -m 600 -- "\$CONTROL_WEBHOOK_ENV" "\$candidate_secret_new"/);
   assert.match(deployScript, /cmp -s -- "\$CONTROL_WEBHOOK_ENV" "\$candidate_secret"/);
   assert.match(workflow, /"\$state_dir\/secrets\/"\*/);
+  assert.match(workflow, /active_webhook_pointer="\$state_dir\/current-webhook\.env"/);
+  assert.match(workflow, /Control webhook environment does not select the active runtime secret/);
   assert.doesNotMatch(workflow, /write-webhook-env|STAGED_WEBHOOK_ENV/);
   assert.match(deployScript, /readEnvironmentFile/);
+  assert.match(deployScript, /module\.validateWebhookEnvironment\(parsed\)/);
+  assert.match(deployScript, /export MERGE4APPSTORE_WEBHOOK_ENV="\$candidate_secret"[\s\S]*npm run prepare:mirrors/);
+  assert.match(deployScript, /MERGE4APPSTORE_WEBHOOK_ENV="\$candidate_secret"[\s\S]*DRY_RUN=true/);
+  assert.match(deployScript, /MERGE4APPSTORE_WEBHOOK_ENV="\$secret"[\s\S]*node index\.js deploy/);
+  assert.doesNotMatch(workflow, /secrets\.GITHUB_APP_|secrets\.GH_WEBHOOK_SECRET/);
   assert.match(deployScript, /access_log .*NGINX_ACCESS_LOG.*merge4appstore_upstream_v1/);
   assert.doesNotMatch(deployScript, /access_log off/);
   assert.match(deployScript, /error_log \/dev\/null crit/);
@@ -1279,6 +1486,39 @@ test('precreates an empty private logrotate state before its first real pass', t
   const candidateDebug = deployScript.indexOf('validate_logrotate_configuration "$transaction_dir/logrotate.candidate"');
   const realPass = deployScript.indexOf('run_logrotate_configuration "$LOGROTATE_CONFIG"');
   assert.ok(initialization >= 0 && initialization < candidateDebug && candidateDebug < realPass);
+});
+
+test('removes GitHub App credentials before starting a PM2 generation', () => {
+  const configure = shellSection('configure_process_environment() {', 'pm2_app_ids() {');
+  const result = runBash([
+    'set -u',
+    'SERVICE_NAME=v2',
+    'CONTROL_ENV=/control/.env',
+    'STATE_DIR=/state',
+    'PREPARE_TIMEOUT_MS=45000',
+    'DRAIN_TIMEOUT_MS=600000',
+    'DELIVERY_PAUSE_FILE=/state/delivery.pause',
+    'SERVICE_HOST=127.0.0.1',
+    'SERVICE_PORT=8788',
+    'LOGS_DIR=/state/logs',
+    configure,
+    'configure_process_environment /release /state/secrets/candidate.env "$TEST_SHA"',
+    'for name in GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY_BASE64 GITHUB_APP_WEBHOOK_SECRET GITHUB_APP_WEBHOOK_MODE GITHUB_CLASSIC_WEBHOOKS_ENABLED GITHUB_INSTALLATION_ID GITHUB_REPOSITORY_ID MERGE4APPSTORE_JOB_GITHUB_INSTALLATION_ID; do',
+    '  [ -z "${!name+x}" ] || exit 10',
+    'done',
+    '[ "$MERGE4APPSTORE_WEBHOOK_ENV" = /state/secrets/candidate.env ] || exit 11',
+  ].join('\n'), {
+    GITHUB_APP_ID: '123',
+    GITHUB_APP_PRIVATE_KEY_BASE64: 'private-key',
+    GITHUB_APP_WEBHOOK_SECRET: 'webhook-secret',
+    GITHUB_APP_WEBHOOK_MODE: 'managed',
+    GITHUB_CLASSIC_WEBHOOKS_ENABLED: 'false',
+    GITHUB_INSTALLATION_ID: '456',
+    GITHUB_REPOSITORY_ID: '11',
+    MERGE4APPSTORE_JOB_GITHUB_INSTALLATION_ID: 'stale-job-installation',
+    TEST_SHA: 'b'.repeat(40),
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
 test('overwrites stale PM2 release and job context for every generation', () => {
@@ -1593,6 +1833,7 @@ test('validates a staged PM2 generation without accepting a mixed final topology
   const worker = (id, cwd, script) => ({
     name: 'v2',
     pm_id: id,
+    pid: process.pid,
     pm2_env: {
       status: 'online',
       exec_mode: 'cluster_mode',
@@ -1612,6 +1853,11 @@ test('validates a staged PM2 generation without accepting a mixed final topology
         'BUILD_',
         'GH_TOKEN',
         'GH_WEBHOOK_SECRET',
+        'GITHUB_APP_',
+        'GITHUB_CLASSIC_WEBHOOKS_ENABLED',
+        'GITHUB_INSTALLATION_ID',
+        'GITHUB_REPOSITORY_ID',
+        'MERGE4APPSTORE_JOB_GITHUB_INSTALLATION_ID',
         'XCODE_CLOUD_WEBHOOK_TOKEN',
         'MERGE4APPSTORE_BUILD_TOKEN_',
       ],
@@ -1629,7 +1875,10 @@ test('validates a staged PM2 generation without accepting a mixed final topology
     worker(9, candidateRelease, candidateScript),
     worker(10, candidateRelease, candidateScript),
   ]);
-  const validator = shellSection('validate_pm2_release() {', 'pm2_app_count() {');
+  const validator = shellSection('validate_pm2_release() {', 'pm2_app_count() {').replace(
+    'fs.readFileSync(`/proc/${processInfo.pid}/environ`, "utf8")',
+    '"SAFE_SETTING=yes\\0"',
+  );
   const result = runBash([
     'set -u',
     'NODE_BINARY="$TEST_NODE_BINARY"',
@@ -1726,14 +1975,18 @@ test('requires both staged PM2 worker IDs to answer health before retiring the o
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
-test('rejects dry-run and transient job flags in the production control environment', t => {
+test('rejects dry-run, transient, and webhook-only values in the production control environment', t => {
   const directory = temporaryDirectory(t, 'merge4appstore-production-env-');
   const clean = path.join(directory, 'clean.env');
   const dryRun = path.join(directory, 'dry-run.env');
   const transient = path.join(directory, 'transient.env');
+  const appSecret = path.join(directory, 'app-secret.env');
+  const repositoryContext = path.join(directory, 'repository-context.env');
   fs.writeFileSync(clean, 'DRY_RUN=false\nSTATIC_SETTING=yes\n');
   fs.writeFileSync(dryRun, 'DRY_RUN=true\n');
   fs.writeFileSync(transient, 'BUILD_COMMIT_SHA=abc123\n');
+  fs.writeFileSync(appSecret, 'GITHUB_APP_PRIVATE_KEY=stale-key\n');
+  fs.writeFileSync(repositoryContext, 'GITHUB_REPOSITORY_ID=11\nMERGE4APPSTORE_JOB_GITHUB_INSTALLATION_ID=456\n');
   const validator = shellSection('validate_production_environment() {', 'verify_health_url() {');
   const result = runBash([
     'set -u',
@@ -1742,12 +1995,16 @@ test('rejects dry-run and transient job flags in the production control environm
     'validate_production_environment "$TEST_RELEASE" "$TEST_CLEAN" || exit 10',
     'if validate_production_environment "$TEST_RELEASE" "$TEST_DRY_RUN"; then exit 11; fi',
     'if validate_production_environment "$TEST_RELEASE" "$TEST_TRANSIENT"; then exit 12; fi',
+    'if validate_production_environment "$TEST_RELEASE" "$TEST_APP_SECRET"; then exit 13; fi',
+    'if validate_production_environment "$TEST_RELEASE" "$TEST_REPOSITORY_CONTEXT"; then exit 14; fi',
   ].join('\n'), {
     TEST_NODE_BINARY: process.execPath,
     TEST_RELEASE: repositoryRoot,
     TEST_CLEAN: clean,
     TEST_DRY_RUN: dryRun,
     TEST_TRANSIENT: transient,
+    TEST_APP_SECRET: appSecret,
+    TEST_REPOSITORY_CONTEXT: repositoryContext,
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
@@ -1790,6 +2047,8 @@ test('replaces PM2 legacy-secret backups and rejects forbidden dump keys', t => 
     'if validate_pm2_dumps_no_secrets; then exit 14; fi',
     `printf '%s\n' '${JSON.stringify([{ name: 'legacy', pm2_env: { env: { SAFE_SETTING: 'yes' } } }])}' > "$PM2_HOME/dump.pm2.bak"`,
     'if validate_pm2_dumps_no_secrets; then exit 15; fi',
+    `printf '%s\n' '${JSON.stringify([{ name: 'v2', pm2_env: { env: { GITHUB_APP_PRIVATE_KEY_BASE64: 'secret' } } }])}' > "$PM2_HOME/dump.pm2.bak"`,
+    'if validate_pm2_dumps_no_secrets; then exit 16; fi',
   ].join('\n'), {
     TEST_DIRECTORY: directory,
     TEST_NODE_BINARY: process.execPath,
@@ -1871,6 +2130,8 @@ test('pauses, restores, and installs managed cron idempotently before unpausing 
     'grep -Fq "\x27$TEST_TOOL_DIRECTORY/flock\x27 -n \x27$TEST_STATE/logrotate.lock\x27" "$CRONTAB_STATE" || exit 35',
     'grep -Fq "MERGE4APPSTORE_STATE_DIR=" "$CRONTAB_STATE" || exit 12',
     'grep -Fq "MERGE4APPSTORE_ENV=" "$CRONTAB_STATE" || exit 13',
+    'grep -Fq "MERGE4APPSTORE_WEBHOOK_ENV=" "$CRONTAB_STATE" || exit 37',
+    'grep -Fq "\x27$TEST_STATE/current-webhook.env\x27" "$CRONTAB_STATE" || exit 38',
     'grep -Fq "DRY_RUN=false RECONCILE_METADATA=false" "$CRONTAB_STATE" || exit 22',
     'grep "# merge4appstore:" "$CRONTAB_STATE" | grep -Fq "umask 077;" || exit 36',
     'grep -Fq "PATH=\x27$TEST_CRON_PATH\x27" "$CRONTAB_STATE" || exit 23',
@@ -1912,6 +2173,7 @@ test('pauses, restores, and installs managed cron idempotently before unpausing 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const finalizer = shellSection('finish_committed_transaction() {', 'recover_interrupted_transactions() {');
   assert.ok(finalizer.indexOf('install_managed_cron') < finalizer.indexOf('clear_delivery_pause'));
+  assert.ok(finalizer.indexOf('configure_repository_hooks') < finalizer.indexOf('clear_delivery_pause'));
 });
 
 test('retries transient deployment probes with bounded diagnostics', () => {

@@ -2,6 +2,102 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { GitHubAPI } from '../lib/github.js';
+import { GitHubTags } from '../lib/git.js';
+
+test('sanitizes the environment for every synchronous gh call', () => {
+  let invocation;
+  const github = new GitHubAPI('example', 'ios', 'main', {
+    mirror: null,
+    environment: {
+      PATH: '/bin',
+      HOME: '/home/service',
+      GH_TOKEN: 'repository-token',
+      GITHUB_APP_PRIVATE_KEY: 'must-not-leak',
+      APP_STORE_CONNECT_API_KEY_CONTENT: 'must-not-leak-either',
+    },
+    runSync: (command, args, options) => {
+      invocation = { command, args, options };
+      return ' result \n';
+    },
+  });
+
+  assert.equal(github.exec(['api', 'repos/example/ios']), 'result');
+  assert.equal(invocation.command, 'gh');
+  assert.equal(invocation.options.env.GH_TOKEN, 'repository-token');
+  assert.equal(invocation.options.env.GITHUB_APP_PRIVATE_KEY, undefined);
+  assert.equal(invocation.options.env.APP_STORE_CONNECT_API_KEY_CONTENT, undefined);
+});
+
+test('refreshes and isolates the environment for every asynchronous gh call', async () => {
+  const environments = [];
+  let token = 0;
+  const controller = new AbortController();
+  const github = new GitHubAPI('example', 'ios', 'main', {
+    mirror: null,
+    signal: controller.signal,
+    environment: { PATH: '/bin', GH_TOKEN: 'stale' },
+    environmentProvider: async ({ signal }) => {
+      assert.equal(signal, controller.signal);
+      token += 1;
+      return {
+        PATH: '/bin',
+        GH_TOKEN: `rotated-${token}`,
+        GITHUB_APP_PRIVATE_KEY_BASE64: 'must-not-leak',
+      };
+    },
+    runAsync: async (_command, _args, options) => {
+      environments.push(options.env);
+      return { stdout: 'ok\n' };
+    },
+  });
+
+  assert.equal(await github.execAsync(['api', 'one']), 'ok');
+  assert.equal(await github.execAsync(['api', 'two']), 'ok');
+  assert.deepEqual(environments.map(environment => environment.GH_TOKEN), [
+    'rotated-1', 'rotated-2',
+  ]);
+  assert.equal(environments[0].GITHUB_APP_PRIVATE_KEY_BASE64, undefined);
+});
+
+test('refreshes safety-windowed credentials before a synchronous GitHub operation group', async () => {
+  const environments = [];
+  const provider = async () => ({
+    PATH: '/bin',
+    GH_TOKEN: 'fresh-installation-token',
+    GITHUB_APP_PRIVATE_KEY_BASE64: 'must-not-leak',
+  });
+  const github = new GitHubAPI('example', 'ios', 'main', {
+    mirror: null,
+    environment: { PATH: '/bin', GH_TOKEN: 'startup-token' },
+    environmentProvider: provider,
+    runSync: (_command, _args, options) => {
+      environments.push(options.env);
+      return 'ok';
+    },
+  });
+  const tags = new GitHubTags('example', 'ios', {
+    environment: { PATH: '/bin', GH_TOKEN: 'startup-token' },
+    environmentProvider: provider,
+    execFile: (_command, _args, options) => {
+      environments.push(options.env);
+      return 'ok';
+    },
+  });
+
+  await Promise.all([
+    github.refreshEnvironment(),
+    tags.refreshEnvironment(),
+  ]);
+  github.exec(['api', 'repos/example/ios']);
+  tags.exec(['api', 'repos/example/ios']);
+  assert.deepEqual(environments.map(environment => environment.GH_TOKEN), [
+    'fresh-installation-token',
+    'fresh-installation-token',
+  ]);
+  assert.ok(environments.every(environment => (
+    environment.GITHUB_APP_PRIVATE_KEY_BASE64 === undefined
+  )));
+});
 
 test('lists open pull requests with the state needed for safe rebasing', () => {
   const github = new GitHubAPI('example', 'ios');

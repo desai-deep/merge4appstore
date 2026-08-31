@@ -22,8 +22,18 @@ if (profileFiles.length === 0) {
   throw new Error('No repository profiles found');
 }
 
+const repositoryIds = new Map();
 for (const file of profileFiles) {
   const profile = loadRepositoryProfile(path.join(profilesDir, file));
+  if (profile.repository.github_id !== undefined) {
+    const previous = repositoryIds.get(profile.repository.github_id);
+    if (previous) {
+      throw new Error(
+        `Duplicate repository.github_id ${profile.repository.github_id}: ${previous} and ${file}`,
+      );
+    }
+    repositoryIds.set(profile.repository.github_id, file);
+  }
   const routes = ['deploy', 'sync', 'expire']
     .map(name => {
       const automation = resolveAutomation(profile, name);
@@ -41,5 +51,5 @@ for (const file of profileFiles) {
     : 'disabled';
   const releasePR = resolveReleasePullRequest(profile);
   const autoRebase = resolveAutoRebasePullRequests(profile);
-  console.log(`${file}: ${routes}; builds: ${builds}; release-pr: ${releasePR.enabled ? `${releasePR.headBranch}->${releasePR.baseBranch}` : 'disabled'}; auto-rebase: ${autoRebase.enabled ? autoRebase.baseBranch : 'disabled'}`);
+  console.log(`${file}: github-id=${profile.repository.github_id || 'legacy-name-routing'}; ${routes}; builds: ${builds}; release-pr: ${releasePR.enabled ? `${releasePR.headBranch}->${releasePR.baseBranch}` : 'disabled'}; auto-rebase: ${autoRebase.enabled ? autoRebase.baseBranch : 'disabled'}`);
 }

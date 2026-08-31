@@ -7,8 +7,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 
+import { createGitHubEnvironmentProvider } from '../lib/github-app-auth.js';
 import { GitMirror, getGitMirror } from '../lib/git-mirror.js';
 import { loadRepositoryProfile } from '../lib/profile.js';
+import { loadWebhookEnvironment } from '../lib/secret-environment.js';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const root = path.resolve(path.dirname(scriptPath), '..');
@@ -86,7 +88,9 @@ export async function prewarmGitMirrors(
       }
     };
     try {
-      const mirror = mirrorFor(repository.owner, repository.name);
+      const mirror = mirrorFor(repository.owner, repository.name, {
+        repositoryId: repository.github_id || null,
+      });
       for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
         assertRepositoryBudget();
         try {
@@ -155,6 +159,11 @@ export function prewarmGitMirrorOptions(environment = process.env) {
 
 export async function prepareConfiguredGitMirrors() {
   dotenv.config({ path: process.env.MERGE4APPSTORE_ENV || path.join(root, '.env') });
+  loadWebhookEnvironment(process.env.MERGE4APPSTORE_WEBHOOK_ENV, {
+    environment: process.env,
+    override: true,
+    required: false,
+  });
   const mirrorOptions = prewarmGitMirrorOptions();
 
   const profilesDirectory = path.resolve(
@@ -173,7 +182,18 @@ export async function prepareConfiguredGitMirrors() {
   await prewarmGitMirrors(repositories, {
     // This command is a standalone process. Construct dedicated instances so
     // deployment-only budgets cannot be shadowed by an earlier registry entry.
-    mirrorFor: (owner, repository) => new GitMirror(owner, repository, mirrorOptions),
+    mirrorFor: (owner, repository, { repositoryId = null } = {}) => {
+      const environmentProvider = createGitHubEnvironmentProvider(owner, repository, {
+        environment: process.env,
+        repositoryId,
+      });
+      return new GitMirror(owner, repository, {
+        ...mirrorOptions,
+        environment: process.env,
+        environmentProvider,
+        repositoryId,
+      });
+    },
   });
 }
 
