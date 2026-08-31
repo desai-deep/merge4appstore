@@ -610,7 +610,9 @@ health identities, and only then deletes the previous IDs. A partial start or
 failed health proof leaves the known-good generation in place and triggers the
 same convergent handoff back to the retained release. Older retained releases
 without worker identities remain recoverable through exact-SHA health plus a
-strict PM2 ready-timeout check.
+strict PM2 ready-timeout check. The PM2 start command also has an independent
+75-second wall-clock cap, so a stalled PM2 control connection returns to the
+transaction rollback path instead of holding the delivery gate indefinitely.
 
 Before the release pointers are committed, any error or termination restores
 the prior PM2 release, nginx files, secret pointer, `current`/`previous` links,

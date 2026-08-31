@@ -14,6 +14,7 @@ SERVICE_HOST="127.0.0.1"
 SERVICE_PORT="8788"
 DRAIN_TIMEOUT_MS="${MERGE4APPSTORE_DRAIN_TIMEOUT_MS:-600000}"
 LEGACY_DRAIN_QUIET_SECONDS="${MERGE4APPSTORE_LEGACY_DRAIN_QUIET_SECONDS:-30}"
+PM2_START_TIMEOUT_SECONDS=75
 PUBLIC_BASE_URL="${MERGE4APPSTORE_PUBLIC_BASE_URL:-https://api.runningorder.app/merge4appstore}"
 NGINX_SERVER_NAME="${MERGE4APPSTORE_NGINX_SERVER_NAME:-api.runningorder.app}"
 NGINX_SNIPPET="/etc/nginx/snippets/merge4appstore-webhooks.conf"
@@ -940,7 +941,9 @@ start_release() {
   # beside the old workers, verify it, and only then retire the captured IDs.
   # Keep the script cwd-relative: PM2 rewrites absolute script paths containing
   # spaces through `bash -c`, which loses argument boundaries.
-  run_timed_command start_elapsed_seconds pm2 start webhook-server.js \
+  if ! run_timed_command start_elapsed_seconds \
+    timeout --kill-after=10s "${PM2_START_TIMEOUT_SECONDS}s" \
+    pm2 start webhook-server.js \
     --name "$SERVICE_NAME" \
     --cwd "$release" \
     --instances 2 \
@@ -956,7 +959,10 @@ start_release() {
     --filter-env GH_WEBHOOK_SECRET \
     --filter-env XCODE_CLOUD_WEBHOOK_TOKEN \
     --filter-env MERGE4APPSTORE_BUILD_TOKEN_ \
-    --force || return 1
+    --force; then
+    echo "ERROR: PM2 generation start failed or exceeded ${PM2_START_TIMEOUT_SECONDS}s" >&2
+    return 1
+  fi
   if ! PM2_START_ELAPSED_SECONDS="$start_elapsed_seconds" "$NODE_BINARY" -e '
     const elapsed = Number(process.env.PM2_START_ELAPSED_SECONDS);
     process.exit(Number.isFinite(elapsed) && elapsed < 60 ? 0 : 1);
