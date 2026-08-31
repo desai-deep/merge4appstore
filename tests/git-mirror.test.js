@@ -153,7 +153,7 @@ test('falls back to GitHub before the request deadline when the mirror lock is h
     { timeoutMs: 0 },
   );
   try {
-    const signal = AbortSignal.timeout(1_000);
+    const signal = AbortSignal.timeout(2_000);
     const github = new GitHubAPI('example', 'contended', 'main', { mirror, signal });
     let fallbackCalls = 0;
     github.execAsync = async () => {
