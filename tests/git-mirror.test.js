@@ -263,6 +263,123 @@ test('coalesces unvalidated mirror verification failures behind initialization b
   assert.equal(verificationCalls, 1);
 });
 
+test('does not record initialization backoff when unvalidated verification is cancelled', async t => {
+  const fixture = await createRepository(t);
+  const seed = new GitMirror('example', 'cancelled-verification', {
+    stateDirectory: fixture.stateDirectory,
+    remoteUrl: fixture.remoteUrl,
+  });
+  await seed.refresh({ force: true });
+
+  const cancellation = new Error('request cancelled during mirror verification');
+  const controller = new AbortController();
+  let cancelVerification = true;
+  let verificationCalls = 0;
+  const mirror = new GitMirror('example', 'cancelled-verification', {
+    stateDirectory: fixture.stateDirectory,
+    remoteUrl: fixture.remoteUrl,
+    retryBackoffMs: 60_000,
+    run: async (args, options) => {
+      if (args.includes('fsck')) {
+        verificationCalls += 1;
+        if (cancelVerification) {
+          cancelVerification = false;
+          controller.abort(cancellation);
+          throw cancellation;
+        }
+      }
+      return git(args, options);
+    },
+  });
+
+  await assert.rejects(
+    mirror.refresh({ force: true, signal: controller.signal }),
+    error => error === cancellation,
+  );
+  assert.equal(mirror.retryAt, 0);
+  assert.equal(mirror.lastFailure, null);
+  assert.equal(mirror.refreshRetryAt, 0);
+  assert.equal(mirror.lastRefreshFailure, null);
+
+  await mirror.refresh({ force: true });
+  assert.equal(mirror.validated, true);
+  assert.equal(verificationCalls, 3);
+});
+
+test('shares forced initialization lock failures with later forced and ordinary calls', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge4appstore-forced-lock-backoff-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const now = 10_000;
+  const mirror = new GitMirror('example', 'forced-lock-backoff', {
+    stateDirectory: path.join(root, 'state'),
+    lockTimeoutMs: 50,
+    retryBackoffMs: 60_000,
+    now: () => now,
+  });
+  await mirror.ensureStateDirectories();
+  let lockCalls = 0;
+  const withMutationLock = mirror.withMutationLock.bind(mirror);
+  mirror.withMutationLock = (...args) => {
+    lockCalls += 1;
+    return withMutationLock(...args);
+  };
+  const release = await acquireProcessLock(
+    mirror.locksDirectory,
+    `mirror:${mirror.lockIdentity}`,
+    { timeoutMs: 0 },
+  );
+
+  let firstFailure;
+  try {
+    await assert.rejects(mirror.refresh({ force: true }), error => {
+      firstFailure = error;
+      return error.statusCode === 503 && error.retryAfter === 60;
+    });
+  } finally {
+    await release();
+  }
+  assert.equal(mirror.retryAt, now + 60_000);
+  assert.equal(mirror.lastFailure, firstFailure);
+  assert.equal(mirror.refreshRetryAt, now + 60_000);
+  assert.equal(mirror.lastRefreshFailure, firstFailure);
+  assert.equal(lockCalls, 1);
+
+  await assert.rejects(mirror.refresh({ force: true }), error => error === firstFailure);
+  await assert.rejects(mirror.refresh(), error => error === firstFailure);
+  assert.equal(lockCalls, 1);
+});
+
+test('shares forced pre-validation metadata failures with later initialization calls', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge4appstore-forced-metadata-backoff-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const now = 10_000;
+  const mirror = new GitMirror('example', 'forced-metadata-backoff', {
+    stateDirectory: path.join(root, 'state'),
+    retryBackoffMs: 60_000,
+    now: () => now,
+  });
+  let metadataCalls = 0;
+  mirror.getLastRefreshAt = async () => {
+    metadataCalls += 1;
+    const error = new Error('mirror refresh stamp is temporarily unreadable');
+    error.code = 'EIO';
+    throw error;
+  };
+
+  let firstFailure;
+  await assert.rejects(mirror.refresh({ force: true }), error => {
+    firstFailure = error;
+    return error.statusCode === 503 && error.retryAfter === 60;
+  });
+  assert.equal(mirror.retryAt, now + 60_000);
+  assert.equal(mirror.lastFailure, firstFailure);
+  assert.equal(metadataCalls, 1);
+
+  await assert.rejects(mirror.refresh({ force: true }), error => error === firstFailure);
+  await assert.rejects(mirror.refresh(), error => error === firstFailure);
+  assert.equal(metadataCalls, 1);
+});
+
 test('does not clone twice when temporary-clone connectivity is corrupt', async t => {
   const fixture = await createRepository(t);
   const now = 10_000;
