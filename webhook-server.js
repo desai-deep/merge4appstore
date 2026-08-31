@@ -9,7 +9,6 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import { AsyncTtlCache } from './lib/async-cache.js';
 import { createDeliveryStore } from './lib/delivery-store.js';
 import { createPrepareCache } from './lib/prepare-cache.js';
 import { loadRepositoryProfile } from './lib/profile.js';
@@ -337,10 +336,6 @@ export function normalizePreparePayload(payload) {
 }
 
 export function createPrepareRequest({
-  historyCache = new AsyncTtlCache({
-    ttlMs: 60_000,
-    maxEntries: 100,
-  }),
   githubFactory = profile => new GitHubAPI(
     profile.repository.owner,
     profile.repository.name,
@@ -393,11 +388,6 @@ export function createPrepareRequest({
     const build = resolveBuildPurpose(entry.profile, purpose);
     const asc = ascFactory(entry.profile, { signal });
     asc.signal = signal;
-    const loadPublishedCommits = asc.getPublishedWorkflowCommits.bind(asc);
-    asc.getPublishedWorkflowCommits = (workflowId, limit = 200) => historyCache.get(
-      `${entry.profile.instance}\0${build.appId}\0${workflowId}\0${limit}`,
-      () => loadPublishedCommits(workflowId, limit),
-    );
     return prepareBuild({
       profile: entry.profile,
       build,

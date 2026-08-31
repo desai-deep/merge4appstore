@@ -101,7 +101,10 @@ import {
   runManagedBuildTrigger,
   waitForBuildCompletion,
 } from './lib/trigger.js';
-import { refreshTestFlightNotes } from './lib/refresh-notes.js';
+import {
+  publishTestFlightNotesForRun,
+  refreshTestFlightNotes,
+} from './lib/refresh-notes.js';
 import { reconcileReleasePullRequest } from './lib/release-pr.js';
 import { rebaseOpenPullRequests } from './lib/rebase-prs.js';
 import { FileBuildStatusStore, reportXcodeBuildStatus } from './lib/build-status.js';
@@ -206,17 +209,28 @@ async function main() {
 
     if (mode === 'notes') {
       if (!repositoryProfile) throw new Error('notes mode requires --profile');
-      for (const name of ['BUILD_COMMIT_SHA', 'BUILD_BRANCH', 'BUILD_PULL_REQUEST']) {
-        if (!process.env[name]) throw new Error(`notes mode requires ${name}`);
-      }
       const purpose = process.env.BUILD_PURPOSE || 'pull_request';
       const build = applyBuildPurposeProfile(repositoryProfile, purpose);
       const { asc, github } = createClients();
-      await refreshTestFlightNotes(asc, github, build, {
-        commit: process.env.BUILD_COMMIT_SHA,
-        branch: process.env.BUILD_BRANCH,
-        pull_request: process.env.BUILD_PULL_REQUEST,
-      }, DRY_RUN);
+      if (process.env.BUILD_RUN_ID) {
+        await publishTestFlightNotesForRun(
+          asc,
+          github,
+          repositoryProfile,
+          build,
+          process.env.BUILD_RUN_ID,
+          DRY_RUN,
+        );
+      } else {
+        for (const name of ['BUILD_COMMIT_SHA', 'BUILD_BRANCH', 'BUILD_PULL_REQUEST']) {
+          if (!process.env[name]) throw new Error(`notes mode requires ${name}`);
+        }
+        await refreshTestFlightNotes(asc, github, build, {
+          commit: process.env.BUILD_COMMIT_SHA,
+          branch: process.env.BUILD_BRANCH,
+          pull_request: process.env.BUILD_PULL_REQUEST,
+        }, DRY_RUN);
+      }
     }
 
     if (mode === 'trigger') {

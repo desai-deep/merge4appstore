@@ -2414,7 +2414,7 @@ for profile_file in "${repository_profiles[@]}"; do
       --header "@$header_file" --header 'Content-Type: application/json' --data "$payload" \
       "http://$SERVICE_HOST:$SERVICE_PORT/v1/builds/prepare/$instance" \
     || fail "Preparation smoke for $instance failed after bounded retries"
-  PREPARED="$prepared" node -e 'const value=JSON.parse(process.env.PREPARED);if(!value.marketing_version)throw new Error("Preparation smoke response has no version");console.log(`Prepared endpoint: ${value.role}/${value.purpose} version ${value.marketing_version}`)'
+  PREPARED="$prepared" node -e 'const value=JSON.parse(process.env.PREPARED);if(value.schema_version!==2||!value.marketing_version)throw new Error("Preparation smoke response has an invalid schema or version");console.log(`Prepared endpoint: ${value.role}/${value.purpose} version ${value.marketing_version}`)'
 done
 write_transaction_phase candidate-ready
 

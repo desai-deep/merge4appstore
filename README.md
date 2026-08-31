@@ -463,17 +463,16 @@ Authorization: Bearer <repository-scoped token>
 
 The app client sends repository, commit, branch, and pull-request context. The
 service infers the build purpose from the repository profile, verifies that
-context and any optional purpose or workflow supplied by older clients, and
-returns the centrally selected marketing version, app role, and TestFlight
-notes as a versioned, provider-neutral response:
+context and any optional purpose or workflow supplied by the client, and
+returns the centrally selected marketing version and app role as a versioned,
+provider-neutral response:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "role": "internal",
   "purpose": "pull_request",
   "marketing_version": "1.5",
-  "testflight_notes": "Verify playback controls\n\n• Fix lock-screen state",
   "warnings": []
 }
 ```
@@ -503,9 +502,10 @@ App Store mutations.
 The checked-out repository owns adapters that read its current marketing
 version and consume this response. That adapter may update an Xcode project,
 an xcconfig, a Tuist definition, or another project format; merge4appstore does
-not assume a project-generation tool. It should validate `schema_version` and
-`marketing_version` before applying the non-secret values, then run whatever
-project preparation command the app needs. The only
+not assume a project-generation tool. It validates `schema_version` and
+`marketing_version`, applies the selected version, and runs whatever project
+preparation command the app needs. It does not generate or write a
+`TestFlight/WhatToTest` file. The only
 Xcode Cloud secrets/configuration required for this adapter are:
 
 - `MERGE4APPSTORE_BUILD_TOKEN`: repository-scoped preparation credential;
@@ -519,9 +519,16 @@ ci:
     token_env: MERGE4APPSTORE_BUILD_TOKEN_MY_REPOSITORY
 ```
 
+After every successful Xcode Cloud completion, the durable webhook delivery
+resolves the exact uploaded build or builds from the completed run. It retries
+until Apple reports each upload as valid, generates the notes centrally, and
+creates or updates the English `betaBuildLocalization` through the App Store
+Connect API. The just-uploaded build is excluded from published history so it
+cannot become its own comparison baseline.
+
 For pull-request builds, TestFlight notes contain every commit since the newest
-uploaded build from the same workflow whose commit is an ancestor of the
-current head, followed by the current PR body. The commit heading identifies
+earlier uploaded build from the same workflow whose commit is an ancestor of
+the current head, followed by the current PR body. The commit heading identifies
 that ancestor by marketing version and build number. The first build of a PR
 keeps the PR body first, labels the commits as belonging to the pull request,
 and falls back to all commits in that PR.

@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   compareVersions,
   formatTestFlightNotes,
+  generateTestFlightNotes,
   inferBuildPurpose,
   nextMinorVersion,
   prepareBuild,
@@ -76,38 +77,22 @@ test('sizes truncated TestFlight notes using the commits remaining after each ca
   assert.equal(result.omitted, 9);
 });
 
-test('prepares version and notes without exposing provider credentials to the app repo', async () => {
+test('prepares only the version and build role for the app repository', async () => {
   const profile = { repository: { owner: 'example', name: 'ios', beta_branch: 'develop' } };
   const build = { purpose: 'pull_request', appRole: 'uat', appId: '1', workflowId: 'wf-pr', includeCommits: true };
   const payload = { repository: 'example/ios', workflow_id: 'wf-pr', commit: COMMIT, branch: 'feature', target_branch: 'develop', pull_request: 42, current_marketing_version: '1.4' };
   const asc = {
     appId: null,
     getAppStoreVersions: async () => ({ data: [] }),
-    getPublishedWorkflowCommits: async () => [{ commitSha: 'previous', buildNumber: '101', marketingVersion: '1.4' }],
   };
-  let rangeOptions;
-  const github = {
-    getCommitSubject: () => 'Fallback subject',
-    getPRDetails: () => ({ title: 'Freshen controls', body: 'Please verify playback and lock-screen controls.', headRefOid: COMMIT }),
-    findPullRequestTitleForCommit: () => null,
-    getCommitSubjectsSince: async (_published, _head, options) => {
-      rangeOptions = options;
-      return { baseCommit: 'previous', baseBuildNumber: '101', baseMarketingVersion: '1.4', subjects: ['Add playback state', 'Fix lock screen'] };
-    },
-    getPullRequestCommitSubjects: () => [],
-  };
-  assert.deepEqual(await prepareBuild({ profile, build, payload, asc, github }), {
-    schema_version: 1,
+  assert.deepEqual(await prepareBuild({ profile, build, payload, asc }), {
+    schema_version: 2,
     role: 'uat',
     purpose: 'pull_request',
     marketing_version: '1.4',
-    testflight_notes: 'Commits since 1.4 (101):\n\n• Add playback state\n• Fix lock screen\n\nPlease verify playback and lock-screen controls.',
     warnings: [],
   });
   assert.equal(asc.appId, '1');
-  assert.equal(rangeOptions.branch, 'feature');
-  assert.ok(rangeOptions.signal instanceof AbortSignal);
-  assert.equal(rangeOptions.signal.aborted, false);
 });
 
 test('falls back conservatively when the Git history mirror is unavailable', async () => {
@@ -128,9 +113,9 @@ test('falls back conservatively when the Git history mirror is unavailable', asy
     getPullRequestCommitSubjectsAsync: async () => ['Add playback state'],
   };
 
-  const result = await prepareBuild({ profile, build, payload, asc, github });
+  const result = await generateTestFlightNotes({ profile, build, payload, asc, github });
 
-  assert.match(result.testflight_notes, /Add playback state/);
+  assert.match(result.text, /Add playback state/);
   assert.deepEqual(result.warnings, [
     'Git history mirror unavailable; using pull-request commits',
     'No ancestor published build found; using all pull-request commits',
@@ -141,7 +126,7 @@ test('treats published build history as optional when App Store Connect is unava
   const profile = { repository: { owner: 'example', name: 'ios', beta_branch: 'develop' } };
   const build = { purpose: 'pull_request', appRole: 'uat', appId: '1', workflowId: 'wf-pr', includeCommits: true };
   let mirrorCalled = false;
-  const result = await prepareBuild({
+  const result = await generateTestFlightNotes({
     profile,
     build,
     payload: { repository: 'example/ios', commit: COMMIT, branch: 'feature', target_branch: 'develop', pull_request: 42, current_marketing_version: '1.4' },
@@ -159,7 +144,7 @@ test('treats published build history as optional when App Store Connect is unava
   });
 
   assert.equal(mirrorCalled, false);
-  assert.match(result.testflight_notes, /First PR commit/);
+  assert.match(result.text, /First PR commit/);
   assert.deepEqual(result.warnings, [
     'Published build history unavailable; using pull-request commits',
     'No ancestor published build found; using all pull-request commits',
@@ -170,7 +155,7 @@ test('ignores mutable pull-request metadata after its head is force-pushed', asy
   const profile = { repository: { owner: 'example', name: 'ios', beta_branch: 'develop' } };
   const build = { purpose: 'pull_request', appRole: 'uat', appId: '1', workflowId: 'wf-pr', includeCommits: true };
   let pullRequestCommitsCalled = false;
-  const result = await prepareBuild({
+  const result = await generateTestFlightNotes({
     profile,
     build,
     payload: { repository: 'example/ios', commit: COMMIT, branch: 'feature', target_branch: 'develop', pull_request: 42, current_marketing_version: '1.4' },
@@ -192,8 +177,8 @@ test('ignores mutable pull-request metadata after its head is force-pushed', asy
   });
 
   assert.equal(pullRequestCommitsCalled, false);
-  assert.doesNotMatch(result.testflight_notes, /Unrelated|Instructions|Wrong/);
-  assert.match(result.testflight_notes, /Immutable old-head subject/);
+  assert.doesNotMatch(result.text, /Unrelated|Instructions|Wrong/);
+  assert.match(result.text, /Immutable old-head subject/);
   assert.deepEqual(result.warnings, [
     'Pull-request head changed; ignored its current title, description, and commits',
     'No ancestor published build found; using the current commit',
@@ -216,9 +201,9 @@ test('keeps the pull request description before commits for its first build', as
     getPullRequestCommitSubjects: () => ['Add playback state', 'Fix lock screen'],
   };
 
-  const result = await prepareBuild({ profile, build, payload, asc, github });
+  const result = await generateTestFlightNotes({ profile, build, payload, asc, github });
 
-  assert.equal(result.testflight_notes, 'Please verify playback and lock-screen controls.\n\nCommits in this pull request:\n\n• Add playback state\n• Fix lock screen');
+  assert.equal(result.text, 'Please verify playback and lock-screen controls.\n\nCommits in this pull request:\n\n• Add playback state\n• Fix lock screen');
   assert.deepEqual(result.warnings, ['No ancestor published build found; using all pull-request commits']);
 });
 
@@ -243,9 +228,9 @@ test('beta notes use the exact release pull request without listing commits', as
       throw new Error('beta notes must not search arbitrary associated pull requests');
     },
   };
-  const result = await prepareBuild({ profile, build, payload, asc, github });
+  const result = await generateTestFlightNotes({ profile, build, payload, asc, github });
   assert.deepEqual(lookups, [{ commit: COMMIT, base: 'main', head: 'develop' }]);
-  assert.equal(result.testflight_notes, '- #49 Freshen playback controls UI');
+  assert.equal(result.text, '- #49 Freshen playback controls UI');
 });
 
 test('beta notes fall back to the develop commit instead of an unrelated feature pull request', async () => {
@@ -261,8 +246,8 @@ test('beta notes fall back to the develop commit instead of an unrelated feature
     },
   };
 
-  const result = await prepareBuild({ profile, build, payload, asc, github });
-  assert.equal(result.testflight_notes, 'Merge pull request #49 from example/freshen-controls');
+  const result = await generateTestFlightNotes({ profile, build, payload, asc, github });
+  assert.equal(result.text, 'Merge pull request #49 from example/freshen-controls');
 });
 
 test('uses the pull request target branch when finding a title fallback', async () => {
@@ -280,9 +265,9 @@ test('uses the pull request target branch when finding a title fallback', async 
     },
   };
 
-  const result = await prepareBuild({ profile, build, payload, asc, github });
+  const result = await generateTestFlightNotes({ profile, build, payload, asc, github });
   assert.equal(titleBranch, 'develop');
-  assert.equal(result.testflight_notes, 'Improve playback');
+  assert.equal(result.text, 'Improve playback');
 });
 
 test('classifies an inaccessible commit as a bad request', async () => {
@@ -293,7 +278,7 @@ test('classifies an inaccessible commit as a bad request', async () => {
   const github = { getCommitSubject: () => null };
 
   await assert.rejects(
-    prepareBuild({ profile, build, payload, asc, github }),
+    generateTestFlightNotes({ profile, build, payload, asc, github }),
     error => error.statusCode === 400 && /Commit is not accessible/.test(error.message),
   );
 });
@@ -315,29 +300,23 @@ test('rejects mutable refs before asking GitHub to resolve them', async () => {
   assert.equal(githubCalled, false);
 });
 
-test('loads App Store versions and release notes concurrently', async () => {
+test('version preparation does not load GitHub or published build history', async () => {
   const profile = { repository: { owner: 'example', name: 'ios', beta_branch: 'develop' } };
   const build = { purpose: 'beta', appRole: 'prod', appId: '1', workflowId: 'wf-beta', includeCommits: false };
-  let versionsStarted = false;
-  let notesStarted = false;
-  let release;
-  const blocked = new Promise(resolve => { release = resolve; });
-  const preparing = prepareBuild({
+  let historyLoaded = false;
+  const result = await prepareBuild({
     profile,
     build,
     payload: { repository: 'example/ios', commit: COMMIT, branch: 'develop', current_marketing_version: '1.4' },
     asc: {
       appId: null,
-      getAppStoreVersions: async () => { versionsStarted = true; await blocked; return { data: [] }; },
+      getAppStoreVersions: async () => ({ data: [] }),
+      getPublishedWorkflowCommits: async () => { historyLoaded = true; return []; },
     },
     github: {
-      getCommitSubject: async () => { notesStarted = true; await blocked; return 'Release commit'; },
-      findOpenPullRequestForCommit: () => null,
+      getCommitSubject: () => { throw new Error('version preparation must not load GitHub'); },
     },
   });
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(versionsStarted, true);
-  assert.equal(notesStarted, true);
-  release();
-  assert.equal((await preparing).testflight_notes, 'Release commit');
+  assert.equal(historyLoaded, false);
+  assert.equal(result.schema_version, 2);
 });

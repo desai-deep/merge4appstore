@@ -8,7 +8,6 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import { MemoryDeliveryStore } from '../lib/delivery-store.js';
-import { AsyncTtlCache } from '../lib/async-cache.js';
 import { GitHubAPI } from '../lib/github.js';
 import { MemoryPrepareCache } from '../lib/prepare-cache.js';
 import {
@@ -551,7 +550,7 @@ test('serializes simultaneous webhook jobs for one repository', async () => {
   ]);
 });
 
-test('reports every production completion and deploys only a successful build', () => {
+test('publishes notes for every successful build and deploys only production', () => {
   const payload = {
     metadata: { attributes: { eventType: 'BUILD_COMPLETED' } },
     ciWorkflow: { id: 'wf-prod' },
@@ -569,6 +568,12 @@ test('reports every production completion and deploys only a successful build', 
     buildNumber: null,
     commitSha: null,
     completedAt: '2026-08-31T10:00:00Z',
+    deliveryId: 'build-1',
+  }, {
+    mode: 'notes',
+    purpose: 'production',
+    runId: 'build-1',
+    commitSha: null,
     deliveryId: 'build-1',
   }, { mode: 'deploy', deliveryId: 'build-1' }]);
   payload.ciBuildRun.attributes.completionStatus = 'FAILED';
@@ -645,7 +650,7 @@ test('protects the build preparation endpoint with its repository token', async 
   t.after(() => delete process.env[environmentName]);
   const server = createTestWebhookServer({
     profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
-    prepare: async (_entry, payload) => ({ purpose: payload.purpose, marketing_version: '1.5', testflight_notes: 'Notes' }),
+    prepare: async (_entry, payload) => ({ schema_version: 2, purpose: payload.purpose, marketing_version: '1.5' }),
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => server.close());
@@ -735,7 +740,7 @@ test('coalesces identical build preparation requests while they are in flight', 
     prepare: async () => {
       calls += 1;
       await blocked;
-      return { purpose: 'beta', marketing_version: '1.5', testflight_notes: 'Notes' };
+      return { schema_version: 2, purpose: 'beta', marketing_version: '1.5' };
     },
   });
   let receivedRequests = 0;
@@ -771,7 +776,7 @@ test('does not reuse a preparation result across immutable releases', async t =>
   let calls = 0;
   const prepare = async () => {
     calls += 1;
-    return { purpose: 'beta', marketing_version: String(calls), testflight_notes: 'Notes' };
+    return { schema_version: 2, purpose: 'beta', marketing_version: String(calls) };
   };
   const servers = ['release-one', 'release-two'].map(deploymentSha => createTestWebhookServer({
     profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
@@ -922,91 +927,6 @@ test('keeps timed-out abort-ignoring preparation work charged against capacity',
   assert.equal(calls, 2);
 });
 
-test('caches published build history across preparation clients', async () => {
-  let historyLoads = 0;
-  const prepare = createPrepareRequest({
-    githubFactory: () => ({
-      getCommitSubject: () => 'Current commit',
-      getPRDetails: () => ({ title: 'Improve player', body: '' }),
-      getCommitSubjectsSince: async () => ({
-        baseCommit: 'previous',
-        baseBuildNumber: '1',
-        baseMarketingVersion: '1.0',
-        subjects: ['Current commit'],
-      }),
-    }),
-    ascFactory: () => ({
-      appId: null,
-      getAppStoreVersions: async () => ({ data: [] }),
-      getPublishedWorkflowCommits: async () => {
-        historyLoads += 1;
-        return [{ commitSha: 'previous', sourceBranch: 'feature/player' }];
-      },
-    }),
-  });
-  const entry = { profile, profilePath: '/tmp/example.yml' };
-  const payload = {
-    repository: 'example/ios',
-    commit: COMMIT_SHA,
-    branch: 'feature/player',
-    target_branch: 'develop',
-    pull_request: 42,
-    current_marketing_version: '1.0',
-  };
-
-  await prepare(entry, payload);
-  await prepare(entry, payload);
-
-  assert.equal(historyLoads, 1);
-});
-
-test('does not renew stale published history indefinitely during an outage', async () => {
-  let now = 1_000;
-  let historyLoads = 0;
-  let failHistory = false;
-  const prepare = createPrepareRequest({
-    historyCache: new AsyncTtlCache({ ttlMs: 10, maxEntries: 10, now: () => now }),
-    githubFactory: () => ({
-      getCommitSubjectAsync: async () => 'Current commit',
-      getPRDetailsAsync: async () => ({ title: 'Improve player', body: '', headRefOid: COMMIT_SHA }),
-      getCommitSubjectsSince: async () => ({
-        baseCommit: 'previous',
-        baseBuildNumber: '1',
-        baseMarketingVersion: '1.0',
-        subjects: ['Current commit'],
-      }),
-      getPullRequestCommitSubjectsAsync: async () => ['Current commit'],
-    }),
-    ascFactory: () => ({
-      appId: null,
-      getAppStoreVersions: async () => ({ data: [] }),
-      getPublishedWorkflowCommits: async () => {
-        historyLoads += 1;
-        if (failHistory) throw new Error('App Store Connect history unavailable');
-        return [{ commitSha: 'previous', sourceBranch: 'feature/player' }];
-      },
-    }),
-  });
-  const entry = { profile, profilePath: '/tmp/example.yml' };
-  const payload = {
-    repository: 'example/ios',
-    commit: COMMIT_SHA,
-    branch: 'feature/player',
-    target_branch: 'develop',
-    pull_request: 42,
-    current_marketing_version: '1.0',
-  };
-
-  assert.deepEqual((await prepare(entry, payload)).warnings, []);
-  now += 11;
-  failHistory = true;
-  assert.deepEqual((await prepare(entry, payload)).warnings, [
-    'Published build history unavailable; using pull-request commits',
-    'No ancestor published build found; using all pull-request commits',
-  ]);
-  assert.equal(historyLoads, 2);
-});
-
 test('persists responsibility before acknowledging a webhook', async t => {
   process.env.XCODE_CLOUD_WEBHOOK_TOKEN = 'xcode-secret';
   t.after(() => delete process.env.XCODE_CLOUD_WEBHOOK_TOKEN);
@@ -1051,7 +971,7 @@ test('persists responsibility before acknowledging a webhook', async t => {
   releaseClaim();
   assert.equal((await request).status, 202);
   await server.waitForBackground();
-  assert.equal(dispatched, 2);
+  assert.equal(dispatched, 3);
 });
 
 test('deduplicates retried Xcode payloads by the stable build identity', async t => {
@@ -1276,7 +1196,7 @@ test('retains a successful-build delivery when deployment reconciliation exits n
   while ((await deliveryStore.queueStatus()).failed === 0 && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, 5));
   }
-  assert.deepEqual(calls, ['build-status', 'deploy', 'deploy']);
+  assert.deepEqual(calls, ['build-status', 'notes', 'deploy', 'deploy']);
   assert.deepEqual(await deliveryStore.queueStatus(), { pending: 0, failed: 1, corrupt: 0 });
   const health = await (await fetch(`http://127.0.0.1:${server.address().port}/health`)).json();
   assert.equal(health.degraded, true);
@@ -1469,10 +1389,10 @@ test('durably defers deliveries until a migration drain deadline expires', async
   assert.equal((await deliveryStore.queueStatus()).pending, 1);
 
   const deadline = Date.now() + 1_000;
-  while (dispatched < 2 && Date.now() < deadline) {
+  while (dispatched < 3 && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, 5));
   }
-  assert.equal(dispatched, 2);
+  assert.equal(dispatched, 3);
   assert.deepEqual(await deliveryStore.queueStatus(), { pending: 0, failed: 0, corrupt: 0 });
 });
 
@@ -1512,10 +1432,10 @@ test('durably defers deliveries behind a migration gate until it is removed', as
 
   fs.unlinkSync(pauseFile);
   const deadline = Date.now() + 1_000;
-  while (dispatched < 2 && Date.now() < deadline) {
+  while (dispatched < 3 && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, 5));
   }
-  assert.equal(dispatched, 2);
+  assert.equal(dispatched, 3);
   assert.deepEqual(await deliveryStore.queueStatus(), { pending: 0, failed: 0, corrupt: 0 });
 });
 
