@@ -641,9 +641,12 @@ logs instead of discovering a full disk during cutover.
 
 The workflow retries idempotent GitHub, authenticated preparation, and public
 health probes with bounded exponential backoff. Before cutover, it prewarms
-every configured Git mirror sequentially with the longer clone budget. Each
-repository has a six-minute deadline and one retry after a mirror reports a
-transient `503`; request-time mirror initialization is never retried. An
+every configured Git mirror sequentially with longer Git-command and clone
+budgets. Each repository has a six-minute deadline and one retry after a mirror
+reports a transient `503`; request-time mirror initialization is never retried.
+Runtime lock contention falls back after five seconds rather than consuming the
+45-second request deadline, while prewarming can wait up to 60 seconds for an
+active mutation to finish. An
 exhausted or permanent mirror failure rejects the candidate while the previous
 production release remains selected, so the deployment-alert issue makes the
 degraded optimization visible; rerun the failed workflow after the reported
@@ -703,9 +706,13 @@ requires `APP_BUNDLE_ID`, `APP_NAME`, `GITHUB_REPO_OWNER`, and
 | `MERGE4APPSTORE_LOCK_WAIT_MS` | Maximum time to wait for another job for the same repository (default `600000`) |
 | `MERGE4APPSTORE_STATE_DIR` | Absolute private directory for persistent Git mirrors and deployment coordination (default `~/.local/state/merge4appstore`) |
 | `MERGE4APPSTORE_MIRROR_TTL_MS` | Minimum interval between successful mirror refreshes (default `60000`) |
-| `MERGE4APPSTORE_MIRROR_TIMEOUT_MS` | Timeout for each steady-state mirror Git command (default `15000`) |
-| `MERGE4APPSTORE_MIRROR_CLONE_TIMEOUT_MS` | Timeout used by `prepare:mirrors` for each first-time blobless clone (default `120000`); request-time initialization retains the shorter command timeout so provider fallback fits inside the request deadline |
-| `MERGE4APPSTORE_MIRROR_LOCK_TIMEOUT_MS` | Maximum wait for a concurrent mirror mutation (default `60000`) |
+| `MERGE4APPSTORE_MIRROR_TIMEOUT_MS` | Timeout for each request-time mirror Git command (default `15000`) |
+| `MERGE4APPSTORE_MIRROR_PREWARM_TIMEOUT_MS` | Timeout used by `prepare:mirrors` for validation and maintenance Git commands (default `60000`) |
+| `MERGE4APPSTORE_MIRROR_PREWARM_FETCH_TIMEOUT_MS` | Timeout used by `prepare:mirrors` for each network fetch (default `120000`) |
+| `MERGE4APPSTORE_MIRROR_CLONE_TIMEOUT_MS` | Timeout used by `prepare:mirrors` for each first-time blobless clone (default `120000`); request-time initialization retains the shorter request-time command timeout so provider fallback fits inside the request deadline |
+| `MERGE4APPSTORE_MIRROR_REQUEST_LOCK_TIMEOUT_MS` | Maximum request-time wait for a concurrent mirror mutation before provider fallback (default and maximum `5000`) |
+| `MERGE4APPSTORE_MIRROR_LOCK_TIMEOUT_MS` | Deprecated lower-only alias for `MERGE4APPSTORE_MIRROR_REQUEST_LOCK_TIMEOUT_MS`; retained for compatibility and capped at `5000` |
+| `MERGE4APPSTORE_MIRROR_PREWARM_LOCK_TIMEOUT_MS` | Maximum deployment-prewarm wait for a concurrent mirror mutation (default `60000`) |
 | `MERGE4APPSTORE_MIRROR_RETRY_BACKOFF_MS` | Backoff before retrying an unavailable mirror (default `5000`) |
 | `MERGE4APPSTORE_MIRROR_CANDIDATE_LIMIT` | Maximum eligible local build ancestors to check in newest-first order, including branch-unknown candidates (default and maximum `20`) |
 | `MERGE4APPSTORE_PREPARE_TIMEOUT_MS` | Build-preparation HTTP deadline, kept below the proxy timeout (default `45000`) |

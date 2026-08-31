@@ -12,9 +12,15 @@ import {
   ensureStateDirectory,
   gitSupportsNoLazyFetch,
   GitMirror,
+  requestMirrorLockTimeoutMs,
   resolveStateDirectory,
 } from '../lib/git-mirror.js';
-import { prewarmGitMirrors } from '../scripts/prepare-git-mirrors.js';
+import { GitHubAPI } from '../lib/github.js';
+import { acquireProcessLock } from '../lib/process-lock.js';
+import {
+  prewarmGitMirrorOptions,
+  prewarmGitMirrors,
+} from '../scripts/prepare-git-mirrors.js';
 
 const execFileAsync = promisify(execFile);
 const stateDirectoryWorker = fileURLToPath(new URL('./fixtures/state-directory-worker.js', import.meta.url));
@@ -29,6 +35,7 @@ test('keeps request-time mirror initialization within the steady-state command b
 
   assert.equal(mirror.commandTimeoutMs, 12_345);
   assert.equal(mirror.cloneTimeoutMs, 12_345);
+  assert.equal(mirror.fetchTimeoutMs, 12_345);
 
   for (const [index, invalid] of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 'invalid'].entries()) {
     const normalized = new GitMirror('example', `invalid-${index}`, {
@@ -42,9 +49,90 @@ test('keeps request-time mirror initialization within the steady-state command b
   const invalidCommand = new GitMirror('example', 'invalid-command', {
     stateDirectory: path.join(root, 'state'),
     commandTimeoutMs: 0,
+    fetchTimeoutMs: 0,
+    lockTimeoutMs: 0,
   });
   assert.equal(invalidCommand.commandTimeoutMs, 15_000);
   assert.equal(invalidCommand.cloneTimeoutMs, 15_000);
+  assert.equal(invalidCommand.fetchTimeoutMs, 15_000);
+  assert.equal(invalidCommand.lockTimeoutMs, 5_000);
+
+  assert.equal(requestMirrorLockTimeoutMs({}), 5_000);
+  assert.equal(requestMirrorLockTimeoutMs({
+    MERGE4APPSTORE_MIRROR_LOCK_TIMEOUT_MS: '60000',
+  }), 5_000);
+  assert.equal(requestMirrorLockTimeoutMs({
+    MERGE4APPSTORE_MIRROR_REQUEST_LOCK_TIMEOUT_MS: '60000',
+    MERGE4APPSTORE_MIRROR_LOCK_TIMEOUT_MS: '1000',
+  }), 5_000);
+  assert.equal(requestMirrorLockTimeoutMs({
+    MERGE4APPSTORE_MIRROR_REQUEST_LOCK_TIMEOUT_MS: '2500',
+  }), 2_500);
+});
+
+test('gives deployment prewarming a longer Git command budget without changing runtime defaults', () => {
+  assert.deepEqual(prewarmGitMirrorOptions({}), {
+    commandTimeoutMs: 60_000,
+    cloneTimeoutMs: 120_000,
+    fetchTimeoutMs: 120_000,
+    lockTimeoutMs: 60_000,
+  });
+  assert.deepEqual(prewarmGitMirrorOptions({
+    MERGE4APPSTORE_MIRROR_PREWARM_TIMEOUT_MS: '90000',
+    MERGE4APPSTORE_MIRROR_CLONE_TIMEOUT_MS: '180000',
+    MERGE4APPSTORE_MIRROR_PREWARM_FETCH_TIMEOUT_MS: '150000',
+    MERGE4APPSTORE_MIRROR_PREWARM_LOCK_TIMEOUT_MS: '30000',
+  }), {
+    commandTimeoutMs: 90_000,
+    cloneTimeoutMs: 180_000,
+    fetchTimeoutMs: 150_000,
+    lockTimeoutMs: 30_000,
+  });
+  assert.deepEqual(prewarmGitMirrorOptions({
+    MERGE4APPSTORE_MIRROR_PREWARM_TIMEOUT_MS: 'invalid',
+    MERGE4APPSTORE_MIRROR_CLONE_TIMEOUT_MS: '0',
+    MERGE4APPSTORE_MIRROR_PREWARM_FETCH_TIMEOUT_MS: '-1',
+    MERGE4APPSTORE_MIRROR_PREWARM_LOCK_TIMEOUT_MS: '-1',
+  }), {
+    commandTimeoutMs: 60_000,
+    cloneTimeoutMs: 120_000,
+    fetchTimeoutMs: 120_000,
+    lockTimeoutMs: 60_000,
+  });
+});
+
+test('falls back to GitHub before the request deadline when the mirror lock is held', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge4appstore-mirror-lock-budget-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const mirror = new GitMirror('example', 'contended', {
+    stateDirectory: path.join(root, 'state'),
+    lockTimeoutMs: 50,
+  });
+  await mirror.ensureStateDirectories();
+  const release = await acquireProcessLock(
+    mirror.locksDirectory,
+    `mirror:${mirror.lockIdentity}`,
+    { timeoutMs: 0 },
+  );
+  try {
+    const signal = AbortSignal.timeout(1_000);
+    const github = new GitHubAPI('example', 'contended', 'main', { mirror, signal });
+    let fallbackCalls = 0;
+    github.execAsync = async () => {
+      fallbackCalls += 1;
+      return 'Provider fallback subject';
+    };
+    const startedAt = Date.now();
+    assert.equal(
+      await github.getCommitSubjectAsync('a'.repeat(40)),
+      'Provider fallback subject',
+    );
+    assert.ok(Date.now() - startedAt < 1_000);
+    assert.equal(signal.aborted, false);
+    assert.equal(fallbackCalls, 1);
+  } finally {
+    await release();
+  }
 });
 
 test('prewarms every repository sequentially and aggregates per-repository failures', async () => {
@@ -623,10 +711,12 @@ test('uses branch-aware ancestry locally, fetches a new head, and tolerates a st
   const fixture = await createRepository(t);
   let now = 10_000;
   let fetchCalls = 0;
+  const fetchTimeouts = [];
   let failFetch = false;
   const run = async (args, options) => {
     if (args.includes('fetch')) {
       fetchCalls += 1;
+      fetchTimeouts.push(options.timeoutMs);
       if (failFetch) {
         const error = new Error('remote temporarily unavailable');
         error.code = 128;
@@ -639,6 +729,8 @@ test('uses branch-aware ancestry locally, fetches a new head, and tolerates a st
     stateDirectory: fixture.stateDirectory,
     remoteUrl: fixture.remoteUrl,
     refreshTtlMs: 50,
+    commandTimeoutMs: 23_456,
+    fetchTimeoutMs: 78_901,
     candidateLimit: 3,
     now: () => now,
     run,
@@ -699,6 +791,7 @@ test('uses branch-aware ancestry locally, fetches a new head, and tolerates a st
   failFetch = true;
   assert.equal(await mirror.getCommitSubject(newHead), 'Third change');
   assert.equal(fetchCalls, 2);
+  assert.deepEqual(fetchTimeouts, [78_901, 78_901]);
 });
 
 test('treats contributor-controlled corruption-like commit subjects as ordinary text', async t => {
