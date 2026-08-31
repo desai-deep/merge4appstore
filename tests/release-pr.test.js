@@ -167,3 +167,11 @@ test('updates the exact open release PR', () => {
   assert.equal(updated[1], DEFAULT_RELEASE_PR_TITLE);
   assert.deepEqual(labeled, [69, RELEASE_PULL_REQUEST_LABEL]);
 });
+
+test('keeps release PR reconciliation successful when labeling fails', () => {
+  const github = githubFixture({
+    labelPullRequest: () => { throw new Error('Issues permission denied'); },
+  });
+
+  assert.equal(reconcileReleasePullRequest(github, policy).action, 'created');
+});

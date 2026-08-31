@@ -448,6 +448,11 @@ release_pull_request:
   note_limit: 50
 ```
 
+The GitHub token needs **Issues: Read and write** permission to create and apply
+the label. If that permission is unavailable or GitHub temporarily rejects the
+label write, release-PR creation and updates still succeed and the service logs
+a warning; a later reconciliation retries the label.
+
 This policy and its GitHub writes live in merge4appstore; app repositories do
 not need a release-PR workflow or checkout script.
 
