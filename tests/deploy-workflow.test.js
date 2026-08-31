@@ -574,6 +574,8 @@ test('journals every mutating boundary and commits before legacy teardown', () =
   const gate = main.indexOf('activate_delivery_pause "$transaction_dir"');
   const cronPausing = main.indexOf('write_transaction_phase legacy-cron-pausing');
   const cronMutation = main.indexOf('pause_managed_cron "$transaction_dir/crontab.before"');
+  const mirrorPreflight = main.indexOf('npm run prepare:mirrors');
+  const deployPreflight = main.indexOf('timeout 5m node index.js deploy --profile');
   const candidateStarting = main.indexOf('write_transaction_phase candidate-starting');
   const candidateStart = main.indexOf('start_release "$CANDIDATE_RELEASE"');
   const nginxSwitching = main.indexOf('write_transaction_phase nginx-switching');
@@ -583,6 +585,8 @@ test('journals every mutating boundary and commits before legacy teardown', () =
   const serviceCommitted = main.indexOf('write_transaction_phase service-committed');
   assert.ok(topology >= 0 && topology < gate && gate < cronPausing);
   assert.ok(cronPausing < cronMutation && cronMutation < candidateStarting);
+  assert.ok(cronMutation < mirrorPreflight && mirrorPreflight < deployPreflight);
+  assert.ok(deployPreflight < candidateStarting);
   assert.doesNotMatch(main.slice(gate, cronPausing), /if \[ "\$had_v2" -eq 0 \]/);
   assert.ok(candidateStarting < candidateStart);
   assert.ok(nginxSwitching < nginxMutation);

@@ -2292,21 +2292,9 @@ fi
 
 export MERGE4APPSTORE_ENV="$CONTROL_ENV"
 export MERGE4APPSTORE_STATE_DIR="$STATE_DIR"
-if ! (cd "$CANDIDATE_RELEASE" && timeout --kill-after=30s 15m npm run prepare:mirrors); then
-  fail "Git mirror prewarming failed before cutover"
-fi
-
 shopt -s nullglob
 repository_profiles=("$CANDIDATE_RELEASE"/profiles/*.yml "$CANDIDATE_RELEASE"/profiles/*.yaml)
 [ "${#repository_profiles[@]}" -gt 0 ] || fail "Candidate release contains no repository profiles"
-for profile_file in "${repository_profiles[@]}"; do
-  (cd "$CANDIDATE_RELEASE" && env \
-    MERGE4APPSTORE_ENV="$CONTROL_ENV" MERGE4APPSTORE_STATE_DIR="$STATE_DIR" DRY_RUN=true \
-    timeout 5m node index.js deploy --profile "$profile_file")
-  (cd "$CANDIDATE_RELEASE" && env \
-    MERGE4APPSTORE_ENV="$CONTROL_ENV" MERGE4APPSTORE_STATE_DIR="$STATE_DIR" DRY_RUN=true \
-    timeout 5m node index.js expire --profile "$profile_file")
-done
 
 v2_processes="$(pm2_app_count "$SERVICE_NAME")"
 if [ "$v2_processes" -gt 0 ]; then
@@ -2364,6 +2352,23 @@ pause_managed_cron "$transaction_dir/crontab.before" \
   || fail "Managed cron remained after quiescing"
 write_transaction_phase legacy-cron-paused
 echo "Paused managed cron; durable webhook execution is gated by $DELIVERY_PAUSE_FILE"
+
+# Gate new webhook execution and cron work before any live preflight that takes
+# a repository lock. This keeps a bad running release from continuously
+# reacquiring the lock needed to validate its replacement. The topology phase
+# above makes every failure from this point recoverable: rollback restores the
+# exact crontab snapshot and clears this deployment's pause gate.
+if ! (cd "$CANDIDATE_RELEASE" && timeout --kill-after=30s 15m npm run prepare:mirrors); then
+  fail "Git mirror prewarming failed before cutover"
+fi
+for profile_file in "${repository_profiles[@]}"; do
+  (cd "$CANDIDATE_RELEASE" && env \
+    MERGE4APPSTORE_ENV="$CONTROL_ENV" MERGE4APPSTORE_STATE_DIR="$STATE_DIR" DRY_RUN=true \
+    timeout 5m node index.js deploy --profile "$profile_file")
+  (cd "$CANDIDATE_RELEASE" && env \
+    MERGE4APPSTORE_ENV="$CONTROL_ENV" MERGE4APPSTORE_STATE_DIR="$STATE_DIR" DRY_RUN=true \
+    timeout 5m node index.js expire --profile "$profile_file")
+done
 
 write_transaction_phase candidate-starting
 start_release "$CANDIDATE_RELEASE" "$candidate_secret" "$DEPLOY_SHA"
