@@ -759,6 +759,24 @@ test('resolves the source and exact uploaded builds for post-build notes', async
   });
 });
 
+test('normalizes alternate Xcode Cloud source commit representations for notes', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  let sourceCommit = 'abcdef1234567890';
+  asc.request = async endpoint => endpoint.includes('/builds?')
+    ? { data: [] }
+    : {
+      data: {
+        id: 'run-142',
+        attributes: { completionStatus: 'SUCCEEDED', sourceCommit },
+        relationships: { workflow: { data: { id: 'workflow-pr' } } },
+      },
+    };
+
+  assert.equal((await asc.getBuildRunNotesContext('run-142')).commitSha, 'abcdef1234567890');
+  sourceCommit = { canonicalHash: 'fedcba0987654321' };
+  assert.equal((await asc.getBuildRunNotesContext('run-142')).commitSha, 'fedcba0987654321');
+});
+
 test('reuses an empty review draft instead of creating another submission', async () => {
   const asc = createASCWithVersions({ data: [] });
   asc.getReviewSubmissionIdForVersion = async () => null;

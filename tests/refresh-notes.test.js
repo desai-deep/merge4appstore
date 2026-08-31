@@ -129,6 +129,14 @@ test('uses a release pull request body for matching beta workflow builds', async
   };
   const github = {
     getCommitSubject: () => 'Remove app-local release PR automation',
+    findOpenPullRequestForCommit: (commit, base, head) => {
+      assert.deepEqual({ commit, base, head }, {
+        commit: 'release-head',
+        base: 'stable',
+        head: 'preview',
+      });
+      return { number: 65 };
+    },
     getPRDetails: () => ({
       title: 'Bug fixes and performance improvements',
       body: '## Release Notes\nCI improvements\nacross two lines\n\n## Automation\nMaintained automatically.',
@@ -138,8 +146,8 @@ test('uses a release pull request body for matching beta workflow builds', async
   const build = { purpose: 'beta', appId: 'app-1', workflowId: 'wf-beta', includeCommits: false };
 
   const result = await refreshTestFlightNotes(asc, github, build, {
-    commit: 'release-head', branch: 'develop', pull_request: '65',
-  });
+    commit: 'release-head', branch: 'preview',
+  }, false, { repository: { beta_branch: 'preview', production_branch: 'stable' } });
 
   assert.equal(result.updated, 1);
   assert.deepEqual(updated, [{ buildId: 'build-176', notes: 'CI improvements\nacross two lines' }]);

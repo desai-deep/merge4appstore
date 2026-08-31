@@ -229,7 +229,7 @@ async function main() {
           commit: process.env.BUILD_COMMIT_SHA,
           branch: process.env.BUILD_BRANCH,
           pull_request: process.env.BUILD_PULL_REQUEST,
-        }, DRY_RUN);
+        }, DRY_RUN, repositoryProfile);
       }
     }
 
