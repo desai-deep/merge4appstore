@@ -28,15 +28,22 @@ function abortReason(signal) {
 function delay(milliseconds, signal = null) {
   if (signal?.aborted) return Promise.reject(abortReason(signal));
   return new Promise((resolve, reject) => {
+    let settled = false;
     const onAbort = () => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       reject(abortReason(signal));
     };
     const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
       signal?.removeEventListener('abort', onAbort);
       resolve();
     }, milliseconds);
     signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
   });
 }
 

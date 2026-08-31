@@ -279,6 +279,41 @@ test('releases a lock acquired immediately before cancellation', {
   assert.equal(released, true);
 });
 
+test('observes cancellation that occurs while registering a retry delay', {
+  skip: process.platform === 'win32' ? 'Windows uses socket locks' : false,
+}, async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge4appstore-process-lock-abort-race-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const reason = new Error('fixture registration-race cancellation');
+  let attempts = 0;
+  const signal = {
+    aborted: false,
+    reason,
+    addEventListener() {
+      // Model an abort that happens after delay() checks `aborted`, but before
+      // its listener registration returns control to the caller.
+      this.aborted = true;
+    },
+    removeEventListener() {},
+  };
+
+  await assert.rejects(
+    tryAcquireProcessLock(root, 'retry-delay-abort-race', {
+      signal,
+      helperStartupAttempts: 2,
+      helperStartupRetryMs: 60_000,
+      fileLockAttempt: async () => {
+        attempts += 1;
+        const error = new Error('fixture startup timeout');
+        error.code = 'ELOCKSTARTTIMEOUT';
+        throw error;
+      },
+    }),
+    error => error === reason,
+  );
+  assert.equal(attempts, 1);
+});
+
 test('kills and closes a stalled helper process group before reporting timeout', {
   skip: process.platform === 'win32' ? 'Windows uses socket locks' : false,
 }, async t => {
