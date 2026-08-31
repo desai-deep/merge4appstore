@@ -139,6 +139,52 @@ test('prewarms a missing mirror with one lock and no redundant post-clone fetch'
   });
 });
 
+test('coalesces forced initialization failures behind one backoff window', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge4appstore-forced-backoff-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const now = 10_000;
+  let cloneCalls = 0;
+  let releaseClone;
+  let announceClone;
+  const cloneStarted = new Promise(resolve => {
+    announceClone = resolve;
+  });
+  const mirror = new GitMirror('example', 'forced-backoff', {
+    stateDirectory: path.join(root, 'state'),
+    retryBackoffMs: 60_000,
+    now: () => now,
+    run: async args => {
+      if (!args.includes('clone')) throw new Error(`Unexpected Git command: ${args.join(' ')}`);
+      cloneCalls += 1;
+      announceClone();
+      await new Promise(resolve => {
+        releaseClone = resolve;
+      });
+      const error = new Error('remote temporarily unavailable');
+      error.code = 128;
+      throw error;
+    },
+  });
+
+  const first = mirror.refresh({ force: true });
+  await cloneStarted;
+  const second = mirror.refresh({ force: true });
+  releaseClone();
+  const results = await Promise.allSettled([first, second]);
+  for (const result of results) {
+    assert.equal(result.status, 'rejected');
+    assert.equal(result.reason.statusCode, 503);
+    assert.equal(result.reason.retryAfter, 60);
+  }
+  assert.equal(cloneCalls, 1);
+
+  await assert.rejects(
+    mirror.refresh({ force: true }),
+    error => error.statusCode === 503 && error.retryAfter === 60,
+  );
+  assert.equal(cloneCalls, 1);
+});
+
 test('falls back to GitHub before the request deadline when the mirror lock is held', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge4appstore-mirror-lock-budget-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

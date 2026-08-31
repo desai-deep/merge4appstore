@@ -1534,7 +1534,7 @@ test('retries transient deployment probes with bounded diagnostics', () => {
   assert.match(deployScript, /attempt \$attempt\/\$max_attempts/);
 });
 
-test('aggregate mirror prewarm budget exceeds sequential repository and retry budgets', () => {
+test('aggregate mirror caps bound repositories and reserve network retry headroom', () => {
   const outer = /timeout --kill-after=30s (\d+)m npm run prepare:mirrors/.exec(deployScript);
   const clone = /MERGE4APPSTORE_MIRROR_CLONE_TIMEOUT_MS,\s*defaultPrewarmNetworkTimeoutMs/.exec(prepareMirrorsScript);
   const command = /defaultPrewarmCommandTimeoutMs = ([\d_]+)/.exec(prepareMirrorsScript);
@@ -1568,12 +1568,16 @@ test('aggregate mirror prewarm budget exceeds sequential repository and retry bu
   );
   assert.ok(outerTimeoutMs > configuredRepositories * repositoryTimeoutMs);
   assert.ok(repositoryTimeoutMs > commandTimeoutMs);
+  // This reserves headroom for the dominant network operation and lock on
+  // each attempt. Local validation, fsck, and maintenance remain sequentially
+  // governed by the hard repository AbortController; this is intentionally not
+  // a claim that every successful local command can consume its full timeout.
+  const nominalNetworkRetryBudgetMs = maximumAttempts
+    * (prewarmLockTimeoutMs
+      + Math.max(commandTimeoutMs, cloneTimeoutMs, fetchTimeoutMs))
+    + (maximumAttempts - 1) * retryDelayMs;
   assert.ok(
-    repositoryTimeoutMs
-      > maximumAttempts
-        * (prewarmLockTimeoutMs
-          + Math.max(commandTimeoutMs, cloneTimeoutMs, fetchTimeoutMs))
-        + (maximumAttempts - 1) * retryDelayMs,
+    repositoryTimeoutMs > nominalNetworkRetryBudgetMs,
   );
 });
 
