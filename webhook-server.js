@@ -24,6 +24,7 @@ import {
   safeEqual,
   verifyGitHubSignature,
   webhookSettings,
+  xcodeRunId,
 } from './lib/webhooks.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -767,7 +768,7 @@ export function createWebhookServer({
         if (!settings.xcodeToken || !safeEqual(suppliedToken, settings.xcodeToken)) {
           return send(response, 401, { error: 'Invalid token' });
         }
-        const runId = payload.ciBuildRun?.id || payload.webhook?.id;
+        const runId = xcodeRunId(payload);
         const eventType = payload.metadata?.attributes?.eventType || 'unknown';
         const status = payload.ciBuildRun?.attributes?.completionStatus || 'unknown';
         const delivery = runId

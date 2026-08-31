@@ -597,6 +597,17 @@ test('reports every production completion and deploys only a successful build', 
   }]);
   payload.ciWorkflow.id = 'wf-beta';
   assert.equal(jobsForXcodeCloudEvent(profile, payload)[0].purpose, 'beta');
+
+  payload.ciBuildRun.id = 42;
+  assert.equal(jobsForXcodeCloudEvent(profile, payload)[0].runId, '42');
+  payload.ciBuildRun.id = '';
+  payload.webhook = { id: 'webhook-build-1' };
+  assert.equal(jobsForXcodeCloudEvent(profile, payload)[0].runId, 'webhook-build-1');
+  delete payload.ciBuildRun.id;
+  delete payload.webhook;
+  assert.deepEqual(jobsForXcodeCloudEvent(profile, payload), []);
+  payload.webhook = { id: '   ' };
+  assert.deepEqual(jobsForXcodeCloudEvent(profile, payload), []);
 });
 
 test('reports the running deployment identity from the health endpoint', async t => {
