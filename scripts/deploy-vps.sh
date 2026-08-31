@@ -20,6 +20,7 @@ NGINX_SNIPPET="/etc/nginx/snippets/merge4appstore-webhooks.conf"
 NGINX_OBSERVABILITY_CONFIG="/etc/nginx/conf.d/merge4appstore-observability.conf"
 MIN_FREE_BYTES="${MERGE4APPSTORE_MIN_FREE_BYTES:-1073741824}"
 MIN_FREE_PERCENT="${MERGE4APPSTORE_MIN_FREE_PERCENT:-10}"
+# One minute beyond the webhook runner's 20-minute job deadline.
 PREFLIGHT_LOCK_WAIT_MS=1260000
 
 fail() {

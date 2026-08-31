@@ -1880,7 +1880,7 @@ test('lets gated deployment preflight outlive one in-flight webhook job', () => 
   assert.ok(jobTimeout && lockWait && deployOuter && expireOuter);
   const jobTimeoutMs = Number(jobTimeout[1]) * 60_000;
   const lockWaitMs = Number(lockWait[1]);
-  assert.ok(lockWaitMs > jobTimeoutMs);
+  assert.ok(lockWaitMs >= jobTimeoutMs + 60_000);
   assert.ok(Number(deployOuter[1]) * 60_000 > lockWaitMs);
   assert.ok(Number(expireOuter[1]) * 60_000 > lockWaitMs);
   assert.equal(
