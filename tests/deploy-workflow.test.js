@@ -583,6 +583,8 @@ test('journals every mutating boundary and commits before legacy teardown', () =
   const pointerSwitching = main.indexOf('write_transaction_phase pointers-switching');
   const pointerMutation = main.indexOf('replace_link "$CANDIDATE_RELEASE" "$STATE_DIR/current"');
   const serviceCommitted = main.indexOf('write_transaction_phase service-committed');
+  assert.ok(mirrorPreflight >= 0, 'mirror preflight is missing');
+  assert.ok(deployPreflight >= 0, 'deploy preflight is missing');
   assert.ok(topology >= 0 && topology < gate && gate < cronPausing);
   assert.ok(cronPausing < cronMutation && cronMutation < candidateStarting);
   assert.ok(cronMutation < mirrorPreflight && mirrorPreflight < deployPreflight);
