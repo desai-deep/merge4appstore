@@ -1,5 +1,6 @@
 # Environment
 .env
+.webhook.env*
 profiles/*.env
 !profiles/*.env.example
 

@@ -40,7 +40,7 @@ function createASC(overrides = {}) {
     checkVersionWithUnresolvedIssues: async () => ({ hasUnresolvedIssues: false }),
     getLiveProductionBuild: async () => ({ live: false, buildId: null }),
     getTestFlightReadyBuilds: async () => [],
-    getBuildCommitSHA: async () => ({
+    getBuildSource: async () => ({
       found: true,
       commitSha: 'abcdef1234567890',
       workflowId: 'workflow-1',
@@ -60,6 +60,7 @@ function createASC(overrides = {}) {
     submitForReview: async () => {},
     removeReviewSubmissionItem: async () => {},
     waitForVersionEditable: async () => 'PREPARE_FOR_SUBMISSION',
+    getWorkflowBranchReference: async () => ({ id: 'main-ref', name: 'main' }),
     ...overrides,
   };
 }
@@ -147,6 +148,28 @@ test('keeps a failed draft when the release PR cannot be notified', async () => 
   });
 });
 
+test('keeps a review item when submission may already have succeeded', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    const failure = new Error('PATCH response was lost');
+    failure.ambiguousResult = true;
+    failure.code = 'EAMBIGUOUSRESULT';
+    failure.reviewSubmissionId = 'submission-1';
+    failure.reviewSubmissionItemId = 'item-1';
+    let deleted = false;
+    const asc = createASC({
+      getTestFlightReadyBuilds: async () => ([
+        { buildNumber: '161', version: '1.2', buildId: 'build-161' },
+      ]),
+      getBuildByNumber: async () => ({ buildId: 'build-161', version: '1.2' }),
+      submitForReview: async () => { throw failure; },
+      removeReviewSubmissionItem: async () => { deleted = true; },
+    });
+
+    await assert.rejects(runDeployCheck(asc, createGitHub(), false), error => error === failure);
+    assert.equal(deleted, false);
+  });
+});
+
 test('syncs repository metadata from production head and honors managed release notes', async () => {
   await withWorkflowId('workflow-1', async () => {
     const events = [];
@@ -191,6 +214,81 @@ test('syncs repository metadata from production head and honors managed release 
       marker: '<!-- merge4appstore:release-issue:version-1.2 -->',
       comment: 'Build #161 was successfully submitted to App Store review. Fixing release PR: #123.',
     });
+  });
+});
+
+test('attributes and selects a candidate by its exact App Store build id', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    let selectedBuildId = null;
+    let attributedCommit = null;
+    const asc = createASC({
+      getTestFlightReadyBuilds: async () => ([
+        { buildNumber: '101', version: '1.2', buildId: 'build-target' },
+      ]),
+      getBuildSource: async (buildId, buildNumber) => {
+        assert.equal(buildId, 'build-target');
+        assert.equal(buildNumber, '101');
+        return {
+          found: true,
+          commitSha: 'target-commit-sha',
+          workflowId: 'workflow-1',
+          workflowName: 'Publish to App Store',
+        };
+      },
+      getBuildByNumber: async () => assert.fail('must not reselect a build by number'),
+      selectBuildForVersion: async (_versionId, buildId) => {
+        selectedBuildId = buildId;
+      },
+    });
+    const github = createGitHub({
+      findPRFromCommit: commitSha => {
+        attributedCommit = commitSha;
+        return 123;
+      },
+    });
+
+    await runDeployCheck(asc, github, false);
+
+    assert.equal(attributedCommit, 'target-commit-sha');
+    assert.equal(selectedBuildId, 'build-target');
+  });
+});
+
+test('retries issue cleanup from observed review state without repeating submission', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    let submissions = 0;
+    let passes = 0;
+    let cleanupAttempts = 0;
+    const asc = createASC({
+      checkBuildInReview: async () => {
+        passes += 1;
+        return passes === 1 ? { inReview: false } : {
+          inReview: true,
+          version: '1.2',
+          versionId: 'version-1.2',
+          buildNumber: '161',
+          state: 'WAITING_FOR_REVIEW',
+        };
+      },
+      getTestFlightReadyBuilds: async () => ([
+        { buildNumber: '161', version: '1.2', buildId: 'build-161' },
+      ]),
+      getBuildByNumber: async () => ({ buildId: 'build-161', version: '1.2' }),
+      submitForReview: async () => { submissions += 1; },
+    });
+    const github = createGitHub({
+      closeIssueByMarker: () => {
+        cleanupAttempts += 1;
+        if (cleanupAttempts === 1) throw new Error('GitHub unavailable');
+        return { number: 456 };
+      },
+    });
+
+    await runDeployCheck(asc, github, false);
+    await runDeployCheck(asc, github, false);
+
+    assert.equal(submissions, 1);
+    assert.equal(cleanupAttempts, 2);
   });
 });
 
@@ -329,7 +427,94 @@ test('does not trigger production for a direct push without a merged PR', async 
     const result = await recoverMissedProductionBuild(asc, github, false);
 
     assert.equal(queriedRuns, false);
-    assert.deepEqual(result, { waiting: false });
+    assert.deepEqual(result, { waiting: false, commitSha: 'abcdef1234567890' });
+  });
+});
+
+test('fails the deploy pass after an ambiguous recovered build start', async () => {
+  await withTriggerRecovery(async () => {
+    let inspectedCandidates = false;
+    const ambiguous = new Error('build start response was lost');
+    ambiguous.code = 'EAMBIGUOUSRESULT';
+    ambiguous.ambiguousResult = true;
+    const asc = createASC({
+      getWorkflowRunStatus: async () => ({ found: false, unknownActiveBranchRun: null }),
+      startWorkflowBuild: async () => { throw ambiguous; },
+      getTestFlightReadyBuilds: async () => {
+        inspectedCandidates = true;
+        return [{ buildNumber: '139', version: '1.1', buildId: 'build-139' }];
+      },
+    });
+    const github = createGitHub({
+      getProductionHead: () => 'abcdef1234567890',
+    });
+
+    await assert.rejects(runDeployCheck(asc, github, false), error => error === ambiguous);
+
+    assert.equal(inspectedCandidates, false);
+  });
+});
+
+test('fails the deploy pass after a retryable build-status lookup failure', async () => {
+  await withTriggerRecovery(async () => {
+    let inspectedCandidates = false;
+    const outage = new Error('Xcode Cloud unavailable');
+    outage.statusCode = 503;
+    outage.retryAfter = 5;
+    const asc = createASC({
+      getWorkflowRunStatus: async () => { throw outage; },
+      getTestFlightReadyBuilds: async () => {
+        inspectedCandidates = true;
+        return [{ buildNumber: '139', version: '1.1', buildId: 'build-139' }];
+      },
+    });
+    const github = createGitHub({
+      getProductionHead: () => 'abcdef1234567890',
+    });
+
+    await assert.rejects(runDeployCheck(asc, github, false), error => error === outage);
+
+    assert.equal(inspectedCandidates, false);
+  });
+});
+
+test('fails visibly when the production head cannot be resolved', async () => {
+  await withTriggerRecovery(async () => {
+    let inspectedCandidates = false;
+    const asc = createASC({
+      getTestFlightReadyBuilds: async () => {
+        inspectedCandidates = true;
+        return [];
+      },
+    });
+    const github = createGitHub({ getProductionHead: () => null });
+
+    await assert.rejects(
+      runDeployCheck(asc, github, false),
+      error => error.statusCode === 503 && /production branch head/.test(error.message),
+    );
+    assert.equal(inspectedCandidates, false);
+  });
+});
+
+test('fails visibly while Xcode Cloud has no production branch reference', async () => {
+  await withTriggerRecovery(async () => {
+    let inspectedCandidates = false;
+    const asc = createASC({
+      getWorkflowRunStatus: async () => ({ found: false }),
+      getWorkflowBranchReference: async () => null,
+      getTestFlightReadyBuilds: async () => {
+        inspectedCandidates = true;
+        return [];
+      },
+    });
+    const github = createGitHub({ getProductionHead: () => 'abcdef1234567890' });
+
+    await assert.rejects(
+      runDeployCheck(asc, github, false),
+      error => error.statusCode === 503 && /branch reference/.test(error.message),
+    );
+    assert.equal(inspectedCandidates, false);
   });
 });
 
@@ -368,7 +553,7 @@ test('does not submit an older production build while the current build is proce
       getTestFlightReadyBuilds: async () => ([
         { buildNumber: '139', version: '1.1', buildId: 'build-139' },
       ]),
-      getBuildCommitSHA: async () => ({
+      getBuildSource: async () => ({
         found: true,
         commitSha: 'older1234567890',
         workflowId: 'workflow-1',

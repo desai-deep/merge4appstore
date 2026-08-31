@@ -2,7 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { XcodeCloudBuildProvider } from '../lib/build-provider.js';
-import { buildIntentFromEnvironment, runManagedBuildTrigger, waitForBuildCompletion } from '../lib/trigger.js';
+import {
+  buildIntentFromEnvironment,
+  effectiveTriggerDryRun,
+  runManagedBuildTrigger,
+  waitForBuildCompletion,
+} from '../lib/trigger.js';
 
 function intent() {
   return {
@@ -14,6 +19,16 @@ function intent() {
     branch: 'codex/e2e-managed-trigger',
   };
 }
+
+test('enforces native, shadow, and managed trigger safety modes', () => {
+  assert.throws(() => effectiveTriggerDryRun('native', false), /trigger mode is native/);
+  assert.equal(effectiveTriggerDryRun('native', true), true);
+  assert.equal(effectiveTriggerDryRun('shadow', false), true);
+  assert.equal(effectiveTriggerDryRun('shadow', true), true);
+  assert.equal(effectiveTriggerDryRun('managed', false), false);
+  assert.equal(effectiveTriggerDryRun('managed', true), true);
+  assert.throws(() => effectiveTriggerDryRun('other', false), /Unsupported build trigger mode/);
+});
 
 test('starts an Xcode Cloud build for a provider-neutral intent', async () => {
   let started = null;
@@ -42,6 +57,7 @@ test('starts an Xcode Cloud build for a provider-neutral intent', async () => {
 test('reuses an existing run for the same workflow and commit', async () => {
   let started = false;
   const provider = new XcodeCloudBuildProvider({
+    getWorkflowBranchReference: async () => ({ id: 'branch-ref' }),
     getWorkflowRunStatus: async () => ({
       found: true,
       runId: 'run-existing',
@@ -61,6 +77,7 @@ test('reuses an existing run for the same workflow and commit', async () => {
 
 test('protects an active branch run whose commit is not available yet', async () => {
   const provider = new XcodeCloudBuildProvider({
+    getWorkflowBranchReference: async () => ({ id: 'branch-ref' }),
     getWorkflowRunStatus: async () => ({
       found: false,
       unknownActiveBranchRun: {
@@ -74,6 +91,146 @@ test('protects an active branch run whose commit is not available yet', async ()
   const result = await provider.trigger(intent());
   assert.equal(result.action, 'waiting');
   assert.equal(result.runId, 'run-pending');
+});
+
+test('passes the resolved branch relationship id before checking active runs', async () => {
+  let statusArguments = null;
+  const provider = new XcodeCloudBuildProvider({
+    getWorkflowBranchReference: async () => ({ id: 'main-ref' }),
+    getWorkflowRunStatus: async (...args) => {
+      statusArguments = args;
+      return {
+        found: false,
+        unknownActiveBranchRun: {
+          runId: 'run-main-pending',
+          number: 148,
+          executionProgress: 'PENDING',
+        },
+      };
+    },
+  });
+
+  const result = await provider.trigger({ ...intent(), branch: 'main' });
+
+  assert.deepEqual(statusArguments, [
+    'workflow-pr',
+    'abcdef1234567890',
+    'main',
+    undefined,
+    null,
+    'main-ref',
+  ]);
+  assert.equal(result.action, 'waiting');
+  assert.equal(result.runId, 'run-main-pending');
+});
+
+test('retries when an active branch run has no comparable identity', async () => {
+  let started = false;
+  const provider = new XcodeCloudBuildProvider({
+    getWorkflowBranchReference: async () => ({ id: 'main-ref' }),
+    getWorkflowRunStatus: async () => ({
+      found: false,
+      uncertainActiveBranchRun: {
+        runId: 'run-branch-unknown',
+        number: 147,
+        executionProgress: 'PENDING',
+      },
+    }),
+    startWorkflowBuild: async () => { started = true; },
+  });
+
+  await assert.rejects(
+    provider.trigger({ ...intent(), branch: 'main' }),
+    error => error.code === 'SOURCE_ACTIVE_RUN_UNCERTAIN'
+      && error.statusCode === 503
+      && error.retryAfter === 5,
+  );
+  assert.equal(started, false);
+});
+
+test('protects an active pull-request run whose commit is not available yet', async () => {
+  let statusArguments = null;
+  let starts = 0;
+  const provider = new XcodeCloudBuildProvider({
+    getWorkflowPullRequest: async () => ({ id: 'apple-pr-49', number: '49' }),
+    getWorkflowBranchReference: async () => ({ id: 'branch-ref' }),
+    getWorkflowRunStatus: async (...args) => {
+      statusArguments = args;
+      return {
+        found: false,
+        unknownActivePullRequestRun: {
+          runId: 'run-pr-pending',
+          number: 149,
+          executionProgress: 'PENDING',
+        },
+      };
+    },
+    startWorkflowBuild: async () => { starts += 1; },
+  });
+
+  const result = await provider.trigger({ ...intent(), pullRequest: '49' });
+
+  assert.deepEqual(statusArguments, [
+    'workflow-pr',
+    'abcdef1234567890',
+    'codex/e2e-managed-trigger',
+    '49',
+    'apple-pr-49',
+    'branch-ref',
+  ]);
+  assert.equal(result.action, 'waiting');
+  assert.equal(result.runId, 'run-pr-pending');
+  assert.equal(starts, 0);
+});
+
+test('starts for the requested PR when a different PR has a hidden active commit', async () => {
+  let started = null;
+  const provider = new XcodeCloudBuildProvider({
+    getWorkflowPullRequest: async () => ({ id: 'apple-pr-50', number: '50' }),
+    getWorkflowRunStatus: async (_workflow, _commit, _branch, _number, pullRequestId) => {
+      assert.equal(pullRequestId, 'apple-pr-50');
+      return { found: false, unknownActiveBranchRun: null };
+    },
+    getWorkflowBranchReference: async () => ({ id: 'branch-ref' }),
+    startWorkflowBuild: async (workflowId, sourceReferenceId, options) => {
+      started = { workflowId, sourceReferenceId, options };
+      return { runId: 'run-pr-50', number: 150, executionProgress: 'PENDING' };
+    },
+  });
+
+  const result = await provider.trigger({ ...intent(), pullRequest: '50' });
+
+  assert.deepEqual(started, {
+    workflowId: 'workflow-pr',
+    sourceReferenceId: null,
+    options: { pullRequestId: 'apple-pr-50' },
+  });
+  assert.equal(result.action, 'started');
+});
+
+test('retries when an active pull-request run has no comparable identity', async () => {
+  let started = false;
+  const provider = new XcodeCloudBuildProvider({
+    getWorkflowPullRequest: async () => ({ id: 'apple-pr-50', number: '50' }),
+    getWorkflowBranchReference: async () => ({ id: 'branch-ref' }),
+    getWorkflowRunStatus: async () => ({
+      found: false,
+      uncertainActivePullRequestRun: {
+        runId: 'run-unknown',
+        number: 149,
+        executionProgress: 'PENDING',
+      },
+    }),
+    startWorkflowBuild: async () => { started = true; },
+  });
+
+  await assert.rejects(
+    provider.trigger({ ...intent(), pullRequest: '50' }),
+    error => error.code === 'SOURCE_ACTIVE_RUN_UNCERTAIN'
+      && error.statusCode === 503
+      && error.retryAfter === 5,
+  );
+  assert.equal(started, false);
 });
 
 test('dry run resolves the branch without starting a build', async () => {

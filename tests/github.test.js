@@ -218,25 +218,46 @@ Bug fixes and review handling improvements
   );
 });
 
-test('selects the newest published ancestor and returns every comparison commit', () => {
-  const github = new GitHubAPI('example', 'ios');
-  github.exec = args => {
-    const endpoint = args.at(-1);
-    if (endpoint.includes('newest...head')) return JSON.stringify([{ status: 'diverged', commits: [] }]);
-    return JSON.stringify([{ status: 'ahead', commits: [
-      { commit: { message: 'First change\n\nDetails' } },
-      { commit: { message: 'Second change' } },
-    ] }]);
-  };
-  assert.deepEqual(github.getCommitSubjectsSince([
-    { commitSha: 'newest', buildNumber: '102', marketingVersion: '1.5' },
-    { commitSha: 'ancestor', buildNumber: '101', marketingVersion: '1.4' },
-  ], 'head'), {
+test('delegates published ancestry selection to the repository mirror', async () => {
+  let received;
+  const expected = {
     baseCommit: 'ancestor',
     baseBuildNumber: '101',
     baseMarketingVersion: '1.4',
     subjects: ['First change', 'Second change'],
+  };
+  const mirror = {
+    getCommitSubjectsSince: async (...args) => {
+      received = args;
+      return expected;
+    },
+  };
+  const github = new GitHubAPI('example', 'ios', 'main', { mirror });
+  const published = [
+    { commitSha: 'newest', buildNumber: '102', marketingVersion: '1.5' },
+    { commitSha: 'ancestor', buildNumber: '101', marketingVersion: '1.4' },
+  ];
+
+  assert.deepEqual(
+    await github.getCommitSubjectsSince(published, 'head', { branch: 'main' }),
+    expected,
+  );
+  assert.deepEqual(received, [published, 'head', { branch: 'main', signal: null }]);
+});
+
+test('preserves a retryable mirror failure when GitHub is also unavailable', async () => {
+  const unavailable = Object.assign(new Error('mirror fetch timed out'), {
+    statusCode: 503,
+    retryAfter: 5,
   });
+  const github = new GitHubAPI('example', 'ios', 'main', {
+    mirror: { getCommitSubject: async () => { throw unavailable; } },
+  });
+  github.execAsync = async () => { throw new Error('network unavailable'); };
+
+  await assert.rejects(github.getCommitSubjectAsync('a'.repeat(40)), error => (
+    error === unavailable && error.retryAfter === 5
+  ));
 });
 
 test('returns all pull-request commit subjects across paginated results', () => {
@@ -258,6 +279,38 @@ test('URL-encodes slash-containing branch names when resolving their head', () =
 
   assert.equal(github.getBranchHead('feature/player'), 'abc123');
   assert.equal(endpoint, 'repos/example/ios/commits/feature%2Fplayer');
+});
+
+test('strict production head lookup does not hide a GitHub outage', () => {
+  const github = new GitHubAPI('example', 'ios', 'release/main');
+  let args;
+  const outage = new Error('GitHub unavailable');
+  github.exec = received => {
+    args = received;
+    throw outage;
+  };
+
+  assert.throws(() => github.getProductionHead({ strict: true }), error => error === outage);
+  assert.deepEqual(args, [
+    'api', 'repos/example/ios/commits/release%2Fmain', '--jq', '.sha',
+  ]);
+});
+
+test('strict merged-PR lookup preserves an inconclusive GitHub failure', () => {
+  const github = new GitHubAPI('example', 'ios');
+  const outage = new Error('GitHub unavailable');
+  let calls = 0;
+  github.exec = () => {
+    calls += 1;
+    if (calls === 1) throw outage;
+    return 'Direct commit without a pull request';
+  };
+
+  assert.throws(
+    () => github.findPRFromCommit('a'.repeat(40), { strict: true }),
+    error => error === outage && error.statusCode === 503,
+  );
+  assert.equal(calls, 2);
 });
 
 test('reads paginated branch comparisons for release PR maintenance', () => {
