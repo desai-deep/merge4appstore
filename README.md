@@ -594,7 +594,7 @@ private rotation configuration is never installed under `/etc/logrotate.d`,
 where an application-writable file would otherwise be executed by root.
 
 Every rollout snapshots the exact crontab and removes all managed
-`merge4appstore` entries before starting or reloading the candidate. The first
+`merge4appstore` entries before starting the candidate. The first
 migration does not disturb the legacy app on port 8787; it starts and
 authenticates the new app on 8788 after cron is quiesced. A private, durable gate
 file lets the new listener acknowledge arrivals into its queue but prevents
@@ -608,7 +608,14 @@ deadline, the committed v2 service and transaction are preserved with delivery
 paused for a safe rerun; the legacy process is not killed. A crash leaves the
 gate closed and health
 degraded until journal recovery safely finishes or restores the legacy service.
-Later releases use a PM2 rolling reload on the permanent port.
+Later releases use a verified PM2 generation handoff on the permanent port.
+The deployer starts two candidate workers alongside the captured previous
+worker IDs, verifies their immutable paths, runtime contract, and individual
+health identities, and only then deletes the previous IDs. A partial start or
+failed health proof leaves the known-good generation in place and triggers the
+same convergent handoff back to the retained release. Older retained releases
+without worker identities remain recoverable through exact-SHA health plus a
+strict PM2 ready-timeout check.
 
 Before the release pointers are committed, any error or termination restores
 the prior PM2 release, nginx files, secret pointer, `current`/`previous` links,
@@ -717,7 +724,7 @@ requires `APP_BUNDLE_ID`, `APP_NAME`, `GITHUB_REPO_OWNER`, and
 | `MERGE4APPSTORE_MIRROR_RETRY_BACKOFF_MS` | Backoff before retrying an unavailable mirror (default `5000`) |
 | `MERGE4APPSTORE_MIRROR_CANDIDATE_LIMIT` | Maximum eligible local build ancestors to check in newest-first order, including branch-unknown candidates (default and maximum `20`) |
 | `MERGE4APPSTORE_PREPARE_TIMEOUT_MS` | Build-preparation HTTP deadline, kept below the proxy timeout (default `45000`) |
-| `MERGE4APPSTORE_DRAIN_TIMEOUT_MS` | Maximum graceful wait for acknowledged webhook work during PM2 reload/shutdown (default `600000`) |
+| `MERGE4APPSTORE_DRAIN_TIMEOUT_MS` | Maximum graceful wait for acknowledged webhook work during PM2 generation handoff/shutdown (default `600000`) |
 | `MERGE4APPSTORE_LEGACY_DRAIN_QUIET_SECONDS` | Continuous no-child/no-live-lock window required before deleting the first-generation webhook process (default `30`) |
 | `MERGE4APPSTORE_MIN_FREE_BYTES` | Absolute free-space floor enforced by VPS deployment (default and minimum `1073741824`, 1 GiB) |
 | `MERGE4APPSTORE_MIN_FREE_PERCENT` | Percentage free-space floor enforced in addition to the byte floor (default and minimum `10`) |

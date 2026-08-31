@@ -614,6 +614,7 @@ test('reports the running deployment identity from the health endpoint', async t
   const server = createTestWebhookServer({
     profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
     deploymentSha: 'deployed-commit',
+    workerId: 17,
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => server.close());
@@ -628,6 +629,7 @@ test('reports the running deployment identity from the health endpoint', async t
     degraded: false,
     profiles: ['example-ios'],
     deployment_sha: 'deployed-commit',
+    worker_id: 17,
     delivery_queue: {
       pending: 0, failed: 0, corrupt: 0, oldest_pending_age_ms: null,
     },

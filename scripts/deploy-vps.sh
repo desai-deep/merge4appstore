@@ -665,24 +665,270 @@ configure_process_environment() {
   export EXPECTED_PM2_SHA="$deployment_sha"
   export EXPECTED_PM2_OUT_LOG="$LOGS_DIR/webhook-out.log"
   export EXPECTED_PM2_ERROR_LOG="$LOGS_DIR/webhook-error.log"
+  unset EXPECTED_PM2_IDS
+}
+
+pm2_app_ids() {
+  local name="$1"
+  pm2 jlist | PM2_APP_NAME="$name" "$NODE_BINARY" -e '
+    let source = "";
+    process.stdin.on("data", chunk => { source += chunk; });
+    process.stdin.on("end", () => {
+      const ids = JSON.parse(source || "[]")
+        .filter(item => item.name === process.env.PM2_APP_NAME)
+        .map(item => item.pm_id)
+        .sort((left, right) => left - right);
+      if (ids.some(id => !Number.isSafeInteger(id) || id < 0) || new Set(ids).size !== ids.length) {
+        throw new Error(`Unsafe PM2 worker IDs for ${process.env.PM2_APP_NAME}`);
+      }
+      process.stdout.write(ids.join(","));
+    });
+  '
+}
+
+pm2_new_app_ids() {
+  local name="$1"
+  local existing_ids="$2"
+  pm2 jlist | PM2_APP_NAME="$name" PM2_EXISTING_IDS="$existing_ids" "$NODE_BINARY" -e '
+    let source = "";
+    process.stdin.on("data", chunk => { source += chunk; });
+    process.stdin.on("end", () => {
+      const existingSource = process.env.PM2_EXISTING_IDS || "";
+      if (existingSource && !/^\d+(?:,\d+)*$/.test(existingSource)) {
+        throw new Error("Unsafe existing PM2 worker IDs");
+      }
+      const existing = new Set(existingSource ? existingSource.split(",").map(Number) : []);
+      if ([...existing].some(id => !Number.isSafeInteger(id) || id < 0)
+        || existing.size !== (existingSource ? existingSource.split(",").length : 0)) {
+        throw new Error("Unsafe existing PM2 worker IDs");
+      }
+      const managedIds = JSON.parse(source || "[]")
+        .filter(item => item.name === process.env.PM2_APP_NAME)
+        .map(item => item.pm_id);
+      if (managedIds.some(id => !Number.isSafeInteger(id) || id < 0)
+        || new Set(managedIds).size !== managedIds.length) {
+        throw new Error(`Unsafe PM2 worker IDs for ${process.env.PM2_APP_NAME}`);
+      }
+      const missing = [...existing].filter(id => !managedIds.includes(id));
+      if (missing.length > 0) {
+        throw new Error(`Captured ${process.env.PM2_APP_NAME} workers disappeared: ${missing.join(",")}`);
+      }
+      const created = managedIds
+        .filter(id => !existing.has(id))
+        .sort((left, right) => left - right);
+      if (created.length !== 2
+        || created.some(id => !Number.isSafeInteger(id) || id < 0)
+        || new Set(created).size !== created.length) {
+        throw new Error(`Expected two new ${process.env.PM2_APP_NAME} workers, found ${created.length}`);
+      }
+      process.stdout.write(created.join(","));
+    });
+  '
+}
+
+pm2_unhealthy_target_ids() {
+  local name="$1"
+  local target_script="$2"
+  pm2 jlist | PM2_APP_NAME="$name" PM2_TARGET_SCRIPT="$target_script" "$NODE_BINARY" -e '
+    const path = require("path");
+    let source = "";
+    process.stdin.on("data", chunk => { source += chunk; });
+    process.stdin.on("end", () => {
+      const expectedScript = path.resolve(process.env.PM2_TARGET_SCRIPT);
+      const ids = JSON.parse(source || "[]")
+        .filter(item => item.name === process.env.PM2_APP_NAME
+          && item.pm2_env?.status !== "online"
+          && path.resolve(String(item.pm2_env?.pm_exec_path || "")) === expectedScript)
+        .map(item => item.pm_id)
+        .sort((left, right) => left - right);
+      if (ids.some(id => !Number.isSafeInteger(id) || id < 0) || new Set(ids).size !== ids.length) {
+        throw new Error(`Unsafe unhealthy PM2 worker IDs for ${process.env.PM2_APP_NAME}`);
+      }
+      process.stdout.write(ids.join(","));
+    });
+  '
+}
+
+pm2_id_belongs_to_app() {
+  local name="$1"
+  local id="$2"
+  pm2 jlist | PM2_APP_NAME="$name" PM2_APP_ID="$id" "$NODE_BINARY" -e '
+    let source = "";
+    process.stdin.on("data", chunk => { source += chunk; });
+    process.stdin.on("end", () => {
+      const id = Number(process.env.PM2_APP_ID);
+      if (!Number.isSafeInteger(id) || id < 0) process.exit(1);
+      const matches = JSON.parse(source || "[]").filter(item => item.pm_id === id);
+      if (matches.length !== 1 || matches[0].name !== process.env.PM2_APP_NAME) process.exit(1);
+    });
+  '
+}
+
+delete_pm2_ids() {
+  local name="$1"
+  local ids="$2"
+  local id
+  [ -n "$ids" ] || return 0
+  case "$ids" in *[!0-9,]*|,*|*,|*,,*) return 1 ;; esac
+  local parsed_ids=()
+  IFS=',' read -r -a parsed_ids <<< "$ids"
+  for id in "${parsed_ids[@]}"; do
+    pm2_id_belongs_to_app "$name" "$id" || return 1
+    pm2 delete "$id" >/dev/null || return 1
+  done
+}
+
+verify_pm2_worker_health() {
+  local ids="$1"
+  local expected_sha="$2"
+  local require_worker_ids="$3"
+  local seen_ids=""
+  local response updated_seen attempt
+  case "$ids" in ''|*[!0-9,]*|,*|*,|*,,*) return 1 ;; esac
+  case "$require_worker_ids" in true|false) ;; *) return 1 ;; esac
+  for attempt in {1..12}; do
+    if response="$(curl --fail-with-body --silent --show-error --connect-timeout 2 --max-time 5 \
+      "http://$SERVICE_HOST:$SERVICE_PORT/health?deployment=$expected_sha" 2>/dev/null)"; then
+      if updated_seen="$(HEALTH="$response" EXPECTED_SHA="$expected_sha" EXPECTED_PM2_IDS="$ids" \
+        REQUIRE_PM2_WORKER_IDS="$require_worker_ids" SEEN_PM2_IDS="$seen_ids" "$NODE_BINARY" -e '
+          const health = JSON.parse(process.env.HEALTH || "{}");
+          const expected = (process.env.EXPECTED_PM2_IDS || "").split(",").map(Number);
+          const seen = new Set((process.env.SEEN_PM2_IDS || "").split(",").filter(Boolean).map(Number));
+          if (health.ok && health.deployment_sha === process.env.EXPECTED_SHA) {
+            if (process.env.REQUIRE_PM2_WORKER_IDS === "false") {
+              for (const id of expected) seen.add(id);
+            } else if (Number.isSafeInteger(health.worker_id) && expected.includes(health.worker_id)) {
+              seen.add(health.worker_id);
+            }
+          }
+          process.stdout.write([...seen].sort((left, right) => left - right).join(","));
+        ' 2>/dev/null)"; then
+        seen_ids="$updated_seen"
+        [ "$seen_ids" = "$ids" ] && return 0
+      fi
+    fi
+    [ "$attempt" -eq 12 ] || sleep 1
+  done
+  echo "ERROR: Staged PM2 workers $ids did not both report deployment $expected_sha" >&2
+  return 1
+}
+
+run_timed_command() {
+  local result_name="$1"
+  shift
+  local timing_output command_status
+  case "$result_name" in ''|*[!A-Za-z0-9_]*) return 2 ;; esac
+  # Bash's SECONDS has one-second granularity and can round a sub-60-second
+  # command up at the boundary. The reserved-word timer reports milliseconds;
+  # preserve the command's normal stdout/stderr while capturing only its time.
+  exec 8>&1 9>&2
+  if timing_output="$({ TIMEFORMAT='%R'; time "$@" 1>&8 2>&9; } 2>&1)"; then
+    command_status=0
+  else
+    command_status=$?
+  fi
+  exec 8>&- 9>&-
+  case "$timing_output" in ''|*[!0-9.]*|.*|*.|*.*.*) return 2 ;; esac
+  printf -v "$result_name" '%s' "$timing_output"
+  return "$command_status"
 }
 
 start_release() {
   local release="$1"
   local secret_file="$2"
   local deployment_sha="$3"
+  local existing_ids created_ids unhealthy_target_ids worker_health_mode
+  local start_elapsed_seconds
+  local kill_timeout_ms=$((DRAIN_TIMEOUT_MS + 10000))
   configure_process_environment "$release" "$secret_file" "$deployment_sha"
-  (cd "$release" && pm2 startOrReload ecosystem.config.cjs --only "$SERVICE_NAME" --update-env)
+
+  worker_health_mode=false
+  if [ -e "$release/.merge4appstore-worker-health-v1" ] || [ -L "$release/.merge4appstore-worker-health-v1" ]; then
+    [ -f "$release/.merge4appstore-worker-health-v1" ] \
+      && [ ! -L "$release/.merge4appstore-worker-health-v1" ] \
+      && [ -O "$release/.merge4appstore-worker-health-v1" ] \
+      && [ "$(cat "$release/.merge4appstore-worker-health-v1")" = "merge4appstore-worker-health-v1" ] \
+      || return 1
+    worker_health_mode=true
+  elif [ "$release" = "${CANDIDATE_RELEASE:-}" ]; then
+    echo "ERROR: Candidate release lacks PM2 worker health capability" >&2
+    return 1
+  fi
+
+  # PM2 restarts every same-name process instead of creating fresh IDs when it
+  # finds a stopped same-path process, even with --force. Removing only those
+  # non-serving target entries keeps the generation handoff convergent.
+  unhealthy_target_ids="$(pm2_unhealthy_target_ids "$SERVICE_NAME" "$release/webhook-server.js")" || return 1
+  delete_pm2_ids "$SERVICE_NAME" "$unhealthy_target_ids" || return 1
+  existing_ids="$(pm2_app_ids "$SERVICE_NAME")" || return 1
+
+  # PM2 startOrReload retains pm_cwd and pm_exec_path from the old generation
+  # when an ecosystem file changes cwd. Start a complete target generation
+  # beside the old workers, verify it, and only then retire the captured IDs.
+  # Keep the script cwd-relative: PM2 rewrites absolute script paths containing
+  # spaces through `bash -c`, which loses argument boundaries.
+  run_timed_command start_elapsed_seconds pm2 start webhook-server.js \
+    --name "$SERVICE_NAME" \
+    --cwd "$release" \
+    --instances 2 \
+    --wait-ready \
+    --listen-timeout 60000 \
+    --kill-timeout "$kill_timeout_ms" \
+    --merge-logs \
+    --output "$LOGS_DIR/webhook-out.log" \
+    --error "$LOGS_DIR/webhook-error.log" \
+    --filter-env APP_STORE_CONNECT_API_ \
+    --filter-env BUILD_ \
+    --filter-env GH_TOKEN \
+    --filter-env GH_WEBHOOK_SECRET \
+    --filter-env XCODE_CLOUD_WEBHOOK_TOKEN \
+    --filter-env MERGE4APPSTORE_BUILD_TOKEN_ \
+    --force || return 1
+  if ! PM2_START_ELAPSED_SECONDS="$start_elapsed_seconds" "$NODE_BINARY" -e '
+    const elapsed = Number(process.env.PM2_START_ELAPSED_SECONDS);
+    process.exit(Number.isFinite(elapsed) && elapsed < 60 ? 0 : 1);
+  '; then
+    echo "ERROR: PM2 generation start reached the wait-ready timeout (${start_elapsed_seconds}s)" >&2
+    return 1
+  fi
+
+  created_ids="$(pm2_new_app_ids "$SERVICE_NAME" "$existing_ids")" || return 1
+  EXPECTED_PM2_IDS="$created_ids" validate_pm2_release || return 1
+  verify_pm2_worker_health "$created_ids" "$deployment_sha" "$worker_health_mode" || return 1
+  delete_pm2_ids "$SERVICE_NAME" "$existing_ids" || return 1
+  validate_pm2_release
 }
 
 validate_pm2_release() {
-  pm2 jlist | node -e '
+  pm2 jlist | "$NODE_BINARY" -e '
     const fs = require("fs");
     let source = "";
     process.stdin.on("data", chunk => { source += chunk; });
     process.stdin.on("end", () => {
-      const processes = JSON.parse(source || "[]").filter(item => item.name === process.env.MERGE4APPSTORE_PM2_NAME);
+      const allProcesses = JSON.parse(source || "[]").filter(
+        item => item.name === process.env.MERGE4APPSTORE_PM2_NAME
+      );
+      const expectedIdsSource = process.env.EXPECTED_PM2_IDS || "";
+      if (expectedIdsSource && !/^\d+(?:,\d+)*$/.test(expectedIdsSource)) {
+        throw new Error("Unsafe expected PM2 worker IDs");
+      }
+      const expectedIds = expectedIdsSource ? expectedIdsSource.split(",").map(Number) : [];
+      if (expectedIds.some(id => !Number.isSafeInteger(id) || id < 0)
+        || (expectedIds.length > 0 && (expectedIds.length !== 2 || new Set(expectedIds).size !== 2))) {
+        throw new Error(`Expected exactly two staged PM2 worker IDs, found ${expectedIds.length}`);
+      }
+      const expectedIdSet = new Set(expectedIds);
+      const processes = expectedIds.length > 0
+        ? allProcesses.filter(item => expectedIdSet.has(item.pm_id))
+        : allProcesses;
       if (processes.length !== 2) throw new Error(`Expected two ${process.env.MERGE4APPSTORE_PM2_NAME} workers, found ${processes.length}`);
+      const actualIds = processes.map(item => item.pm_id).sort((left, right) => left - right);
+      if (actualIds.some(id => !Number.isSafeInteger(id) || id < 0)
+        || new Set(actualIds).size !== actualIds.length
+        || (expectedIds.length > 0
+          && actualIds.join(",") !== [...expectedIds].sort((left, right) => left - right).join(","))) {
+        throw new Error("PM2 worker selection did not exactly match the expected IDs");
+      }
       const expectedCwd = fs.realpathSync(process.env.EXPECTED_PM2_CWD);
       const expectedScript = fs.realpathSync(process.env.EXPECTED_PM2_SCRIPT);
       const expectedOutLog = fs.realpathSync(process.env.EXPECTED_PM2_OUT_LOG);
@@ -713,6 +959,23 @@ validate_pm2_release() {
         if (pm2Environment.status !== "online" || pm2Environment.exec_mode !== "cluster_mode") {
           throw new Error(`PM2 worker ${processInfo.pm_id} is not an online cluster worker`);
         }
+        const expectedKillTimeout = Number(process.env.MERGE4APPSTORE_DRAIN_TIMEOUT_MS) + 10000;
+        const requiredFilters = [
+          "APP_STORE_CONNECT_API_",
+          "BUILD_",
+          "GH_TOKEN",
+          "GH_WEBHOOK_SECRET",
+          "XCODE_CLOUD_WEBHOOK_TOKEN",
+          "MERGE4APPSTORE_BUILD_TOKEN_",
+        ];
+        if (pm2Environment.wait_ready !== true
+          || pm2Environment.listen_timeout !== 60000
+          || pm2Environment.kill_timeout !== expectedKillTimeout
+          || pm2Environment.autorestart !== true
+          || !Array.isArray(pm2Environment.filter_env)
+          || requiredFilters.some(filter => !pm2Environment.filter_env.includes(filter))) {
+          throw new Error(`PM2 worker ${processInfo.pm_id} has an invalid runtime configuration`);
+        }
         const workerNodeMajor = Number(String(pm2Environment.node_version || "").split(".")[0]);
         if (!Number.isSafeInteger(workerNodeMajor) || workerNodeMajor < 20) {
           throw new Error(`PM2 worker ${processInfo.pm_id} uses unsupported Node.js ${pm2Environment.node_version || "unknown"}`);
@@ -730,9 +993,15 @@ validate_pm2_release() {
           || value("MERGE4APPSTORE_ENV") !== process.env.MERGE4APPSTORE_ENV
           || value("MERGE4APPSTORE_WEBHOOK_ENV") !== process.env.EXPECTED_PM2_SECRET_FILE
           || value("MERGE4APPSTORE_DEPLOY_SHA") !== process.env.EXPECTED_PM2_SHA
+          || value("MERGE4APPSTORE_DRAIN_TIMEOUT_MS") !== process.env.MERGE4APPSTORE_DRAIN_TIMEOUT_MS
           || value("MERGE4APPSTORE_DELIVERY_PAUSE_FILE") !== process.env.MERGE4APPSTORE_DELIVERY_PAUSE_FILE
+          || value("MERGE4APPSTORE_PM2_NAME") !== process.env.MERGE4APPSTORE_PM2_NAME
+          || value("MERGE4APPSTORE_PREPARE_TIMEOUT_MS") !== process.env.MERGE4APPSTORE_PREPARE_TIMEOUT_MS
           || value("DRY_RUN") !== "false"
+          || value("NODE_ENV") !== "production"
           || value("RECONCILE_METADATA") !== "false"
+          || value("WEBHOOK_AUTOSTART") !== "true"
+          || value("WEBHOOK_HOST") !== "127.0.0.1"
           || value("WEBHOOK_PORT") !== "8788") {
           throw new Error(`PM2 worker ${processInfo.pm_id} has an invalid deployment contract`);
         }
@@ -2089,11 +2358,11 @@ write_transaction_phase topology-snapshotted
 topology_snapshotted=1
 
 # Every candidate starts on the live v2 port. Gate durable execution before a
-# first start or rolling reload so an uncommitted release can accept and persist
+# first start or generation handoff so an uncommitted release can accept and persist
 # webhook deliveries, but cannot perform repository or App Store mutations.
 activate_delivery_pause "$transaction_dir" || fail "Could not create durable delivery pause gate"
 
-# Quiesce every managed cron generation before starting or reloading the
+# Quiesce every managed cron generation before starting the
 # candidate. The journal phase names are retained for compatibility with
 # already-written first-migration transactions. A pre-commit rollback restores
 # the exact crontab snapshot captured above.
