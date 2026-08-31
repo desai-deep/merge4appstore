@@ -151,6 +151,30 @@ test('reopens and updates a marked release issue', () => {
     { number: 45, url: 'https://github.test/issues/45', action: 'reopened' },
   );
   assert.ok(calls[1].includes('state=open'));
+  assert.match(calls[2].join(' '), /issues\/45\/assignees/);
+  assert.ok(calls[2].includes('assignees[]=example'));
+});
+
+test('keeps a newly published issue when owner assignment is unavailable', () => {
+  const github = new GitHubAPI('example', 'ios');
+  const calls = [];
+  github.exec = args => {
+    calls.push(args);
+    if (args[0] === 'issue') return '[]';
+    if (args.includes('repos/example/ios/issues/45/assignees')) {
+      throw new Error('fixture assignment failure');
+    }
+    return JSON.stringify({
+      number: 45,
+      html_url: 'https://github.test/issues/45',
+    });
+  };
+
+  assert.deepEqual(
+    github.upsertIssue('<!-- release:1 -->', 'Release blocked', 'New failure'),
+    { number: 45, url: 'https://github.test/issues/45', action: 'created' },
+  );
+  assert.match(calls.at(-1).join(' '), /issues\/45\/assignees/);
 });
 
 test('closes an open marked release issue with a resolution comment', () => {

@@ -1885,6 +1885,11 @@ rollback() {
     echo "  transaction: $transaction_dir" >&2
   else
     rollback_preserve=0
+    if [ "$topology_snapshotted" -eq 1 ]; then
+      echo "Deployment rollback completed; the previous service topology was verified and candidate artifacts were cleaned." >&2
+    else
+      echo "Deployment cleanup completed before service cutover; candidate artifacts were removed." >&2
+    fi
   fi
   [ "$rollback_ok" -eq 1 ]
 }
@@ -1980,7 +1985,17 @@ cmp -s -- "$CONTROL_WEBHOOK_ENV" "$candidate_secret" \
   || fail "Candidate webhook environment does not match the server-side control file"
 
 echo "Installing and verifying immutable release $DEPLOY_SHA..."
-(cd "$CANDIDATE_RELEASE" && timeout 10m npm ci --omit=dev && npm test && npm run validate:profiles)
+# The required Actions test job already runs the complete suite and profile
+# validation on this exact DEPLOY_SHA with Node 20. Re-running source-layout
+# tests from a git archive on the production host is both redundant and unsafe:
+# the archive has no .git directory, the deployer intentionally uses umask 077,
+# and the live transaction state must never become a unit-test fixture. Keep
+# host verification bounded to installing the lockfile and validating the
+# packaged profiles; the dry runs, candidate health, and authenticated prepare
+# smokes below exercise the installed release before cutover.
+(cd "$CANDIDATE_RELEASE" \
+  && timeout --kill-after=30s 10m npm ci --omit=dev \
+  && timeout --kill-after=10s 1m npm run validate:profiles)
 
 read_env_value() {
   local environment_file="$1"

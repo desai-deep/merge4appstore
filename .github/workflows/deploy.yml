@@ -519,9 +519,22 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
           DEPLOY_RESULT: ${{ needs.deploy.result }}
           DEPLOY_OUTCOME: ${{ needs.deploy.outputs.outcome }}
+          HEALTH_URL: ${{ vars.MERGE4APPSTORE_HEALTH_URL || 'https://api.runningorder.app/merge4appstore/health' }}
         with:
           script: |
             const marker = '<!-- merge4appstore:deployment-failure -->';
+            const assignOwner = async issueNumber => {
+              try {
+                await github.rest.issues.addAssignees({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  assignees: [context.repo.owner],
+                });
+              } catch (error) {
+                core.warning(`Could not assign deployment alert to repository owner: ${error instanceof Error ? error.message : String(error)}`);
+              }
+            };
             if (process.env.DEPLOY_OUTCOME === 'superseded') {
               core.info('A newer main-branch commit superseded this run; leaving the deployment alert unchanged.');
               return;
@@ -539,6 +552,45 @@ jobs:
             }
             const failed = process.env.TEST_RESULT !== 'success' || process.env.DEPLOY_RESULT !== 'success';
             const title = 'merge4appstore VPS deployment failed';
+            let healthSummary = null;
+            if (failed) {
+              healthSummary = await (async () => {
+                try {
+                  const healthUrl = new URL(process.env.HEALTH_URL);
+                  if (healthUrl.protocol !== 'https:') throw new TypeError('Health URL must use HTTPS');
+                  const response = await fetch(healthUrl, {
+                    headers: { accept: 'application/json' },
+                    redirect: 'error',
+                    signal: AbortSignal.timeout(15_000),
+                  });
+                  let health = null;
+                  try {
+                    const value = await response.json();
+                    if (value && typeof value === 'object' && !Array.isArray(value)) health = value;
+                  } catch {}
+                  const boolean = value => typeof value === 'boolean' ? String(value) : 'unknown';
+                  const deploymentSha = /^[0-9a-f]{40}$/i.test(health?.deployment_sha || '')
+                    ? health.deployment_sha
+                    : 'unknown';
+                  return `HTTP ${response.status}; ok=${boolean(health?.ok)}; degraded=${boolean(health?.degraded)}; deployment SHA=${deploymentSha}`;
+                } catch (error) {
+                  const name = error instanceof Error ? error.name : 'Error';
+                  core.warning(`Could not read post-failure public health: ${name}`);
+                  return `unavailable (${name})`;
+                }
+              })();
+            }
+            if (failed && (context.eventName === 'push' || context.eventName === 'workflow_dispatch')) {
+              const { data: branch } = await github.rest.repos.getBranch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                branch: 'main',
+              });
+              if (branch.commit.sha !== context.sha) {
+                core.info('Main advanced while collecting failure health; leaving the deployment alert unchanged.');
+                return;
+              }
+            }
             const { data: recentIssues } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -555,7 +607,8 @@ jobs:
             }
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             if (failed) {
-              const body = `${marker}\n\nThe merge4appstore VPS deployment did not complete.\n\n- Test job: **${process.env.TEST_RESULT}**\n- Deploy job: **${process.env.DEPLOY_RESULT}**\n- Run: ${runUrl}\n\n## Recovery\n\nInspect the failed step. If deployment was interrupted during finalization, correct the reported external or transient cause and rerun failed jobs from the Actions run; the transaction journal resumes finalization safely. If the deployed main commit itself is bad, revert that commit on main and let the resulting main push deploy the revert. Do not switch release pointers manually: PM2, nginx, credentials, cron, and pointers move as one transaction.`;
+              const body = `${marker}\n\nThe merge4appstore VPS deployment did not complete.\n\n- Test job: **${process.env.TEST_RESULT}**\n- Deploy job: **${process.env.DEPLOY_RESULT}**\n- Run: ${runUrl}\n- Post-failure public health: ${healthSummary}\n\n## Recovery\n\nInspect the failed step. If deployment was interrupted during finalization, correct the reported external or transient cause and rerun failed jobs from the Actions run; the transaction journal resumes finalization safely. If the deployed main commit itself is bad, revert that commit on main and let the resulting main push deploy the revert. Do not switch release pointers manually: PM2, nginx, credentials, cron, and pointers move as one transaction.`;
+              let alertIssueNumber;
               if (issue) {
                 await github.rest.issues.update({
                   owner: context.repo.owner,
@@ -565,14 +618,17 @@ jobs:
                   title,
                   body,
                 });
+                alertIssueNumber = issue.number;
               } else {
-                await github.rest.issues.create({
+                const { data: createdIssue } = await github.rest.issues.create({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   title,
                   body,
                 });
+                alertIssueNumber = createdIssue.number;
               }
+              await assignOwner(alertIssueNumber);
             } else if (issue?.state === 'open') {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
@@ -713,6 +769,18 @@ jobs:
           script: |
             const marker = '<!-- merge4appstore:public-health-failure -->';
             const title = 'merge4appstore service health alert';
+            const assignOwner = async issueNumber => {
+              try {
+                await github.rest.issues.addAssignees({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  assignees: [context.repo.owner],
+                });
+              } catch (error) {
+                core.warning(`Could not assign service health alert to repository owner: ${error instanceof Error ? error.message : String(error)}`);
+              }
+            };
             const { data: recentIssues } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -729,11 +797,15 @@ jobs:
             }
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const body = `${marker}\n\nThe external monitor could not verify the merge4appstore public health endpoint, or its durable delivery queue is degraded.\n\n- Monitor run: ${runUrl}\n- Endpoint: ${process.env.HEALTH_URL}\n\n## Recovery\n\nInspect VPS/PM2 logs and the durable queue. Restore service or requeue failed receipts, then rerun this monitor; the alert closes after a healthy check.`;
+            let alertIssueNumber;
             if (issue) {
               await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, state: 'open', title, body });
+              alertIssueNumber = issue.number;
             } else {
-              await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo, title, body });
+              const { data: createdIssue } = await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo, title, body });
+              alertIssueNumber = createdIssue.number;
             }
+            await assignOwner(alertIssueNumber);
 
       - name: Resolve service health alert
         if: success()
@@ -770,6 +842,18 @@ jobs:
           script: |
             const marker = '<!-- merge4appstore:deployment-failure -->';
             const title = 'merge4appstore VPS deployment failed';
+            const assignOwner = async issueNumber => {
+              try {
+                await github.rest.issues.addAssignees({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  assignees: [context.repo.owner],
+                });
+              } catch (error) {
+                core.warning(`Could not assign deployment alert to repository owner: ${error instanceof Error ? error.message : String(error)}`);
+              }
+            };
             const { data: branch } = await github.rest.repos.getBranch({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -815,6 +899,34 @@ jobs:
             }
             if (!deployment) return;
             const failed = deployment.conclusion !== 'success';
+            let healthSummary = null;
+            if (failed) {
+              healthSummary = await (async () => {
+                try {
+                  const healthUrl = new URL(process.env.HEALTH_URL);
+                  if (healthUrl.protocol !== 'https:') throw new TypeError('Health URL must use HTTPS');
+                  const response = await fetch(healthUrl, {
+                    headers: { accept: 'application/json' },
+                    redirect: 'error',
+                    signal: AbortSignal.timeout(15_000),
+                  });
+                  let health = null;
+                  try {
+                    const value = await response.json();
+                    if (value && typeof value === 'object' && !Array.isArray(value)) health = value;
+                  } catch {}
+                  const boolean = value => typeof value === 'boolean' ? String(value) : 'unknown';
+                  const deploymentSha = /^[0-9a-f]{40}$/i.test(health?.deployment_sha || '')
+                    ? health.deployment_sha
+                    : 'unknown';
+                  return `HTTP ${response.status}; ok=${boolean(health?.ok)}; degraded=${boolean(health?.degraded)}; deployment SHA=${deploymentSha}`;
+                } catch (error) {
+                  const name = error instanceof Error ? error.name : 'Error';
+                  core.warning(`Could not read post-failure public health: ${name}`);
+                  return `unavailable (${name})`;
+                }
+              })();
+            }
             const { data: recentIssues } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -830,12 +942,16 @@ jobs:
               issue = search.items.find(candidate => candidate.body?.includes(marker));
             }
             if (failed) {
-              const body = `${marker}\n\nThe latest completed main-branch deployment did not succeed.\n\n- Conclusion: **${deployment.conclusion}**\n- Run: ${deployment.html_url}\n\n## Recovery\n\nIf deployment was interrupted during finalization, correct the reported external or transient cause and rerun the failed jobs; the transaction journal resumes finalization safely. If the deployed main commit itself is bad, revert that commit on main and let the resulting main push deploy the revert. Do not switch release pointers manually: PM2, nginx, credentials, cron, and pointers move as one transaction. This scheduled reconciliation keeps the alert visible even if GitHub was temporarily unavailable when the deployment first failed.`;
+              const body = `${marker}\n\nThe latest completed main-branch deployment did not succeed.\n\n- Conclusion: **${deployment.conclusion}**\n- Run: ${deployment.html_url}\n- Post-failure public health: ${healthSummary}\n\n## Recovery\n\nIf deployment was interrupted during finalization, correct the reported external or transient cause and rerun the failed jobs; the transaction journal resumes finalization safely. If the deployed main commit itself is bad, revert that commit on main and let the resulting main push deploy the revert. Do not switch release pointers manually: PM2, nginx, credentials, cron, and pointers move as one transaction. This scheduled reconciliation keeps the alert visible even if GitHub was temporarily unavailable when the deployment first failed.`;
+              let alertIssueNumber;
               if (issue) {
                 await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, state: 'open', title, body });
+                alertIssueNumber = issue.number;
               } else {
-                await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo, title, body });
+                const { data: createdIssue } = await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo, title, body });
+                alertIssueNumber = createdIssue.number;
               }
+              await assignOwner(alertIssueNumber);
             } else if (issue?.state === 'open') {
               await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, body: `The latest main-branch deployment recovered in ${deployment.html_url}.` });
               await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, state: 'closed' });
