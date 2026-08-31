@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   mergedPullRequestsInComparison,
   reconcileReleasePullRequest,
+  RELEASE_PULL_REQUEST_LABEL,
   releasePullRequestBody,
 } from '../lib/release-pr.js';
 import { DEFAULT_RELEASE_PR_TITLE } from '../lib/profile.js';
@@ -67,6 +68,7 @@ function githubFixture(overrides = {}) {
     findOpenPullRequest: () => null,
     createPullRequest: () => ({ number: 70, url: 'https://github.com/example/ios/pull/70' }),
     updatePullRequest: () => ({ number: 69, url: 'https://github.com/example/ios/pull/69' }),
+    labelPullRequest: () => {},
     closePullRequest: () => ({ number: 69, url: 'https://github.com/example/ios/pull/69' }),
     ...overrides,
   };
@@ -132,30 +134,56 @@ test('does not create a release PR when the release branch has no commits ahead'
 
 test('creates a release PR with the default title', () => {
   let created;
+  let labeled;
   const github = githubFixture({
     createPullRequest: (...args) => {
       created = args;
       return { number: 70, url: 'https://github.com/example/ios/pull/70' };
     },
+    labelPullRequest: (...args) => { labeled = args; },
   });
 
   const result = reconcileReleasePullRequest(github, policy);
   assert.equal(result.action, 'created');
   assert.deepEqual(created.slice(0, 3), ['main', 'develop', 'Bug fixes and performance improvements']);
   assert.match(created[3], /- #61 Feature/);
+  assert.deepEqual(labeled, [70, RELEASE_PULL_REQUEST_LABEL]);
 });
 
 test('updates the exact open release PR', () => {
   let updated;
+  let labeled;
   const github = githubFixture({
     findOpenPullRequest: () => ({ number: 69 }),
     updatePullRequest: (...args) => {
       updated = args;
       return { number: 69, url: 'https://github.com/example/ios/pull/69' };
     },
+    labelPullRequest: (...args) => { labeled = args; },
   });
 
   assert.equal(reconcileReleasePullRequest(github, policy).action, 'updated');
   assert.equal(updated[0], 69);
   assert.equal(updated[1], DEFAULT_RELEASE_PR_TITLE);
+  assert.deepEqual(labeled, [69, RELEASE_PULL_REQUEST_LABEL]);
+});
+
+test('keeps release PR reconciliation successful when labeling fails', () => {
+  const failure = new Error('Command failed');
+  failure.stderr = 'gh: Issues permission denied\n';
+  const messages = [];
+  const originalLog = console.log;
+  const github = githubFixture({
+    labelPullRequest: () => { throw failure; },
+  });
+
+  console.log = message => messages.push(message);
+  try {
+    assert.equal(reconcileReleasePullRequest(github, policy).action, 'created');
+  } finally {
+    console.log = originalLog;
+  }
+  assert.ok(messages.some(message => (
+    message.includes('Could not label release PR #70: gh: Issues permission denied')
+  )));
 });

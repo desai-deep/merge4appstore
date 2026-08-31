@@ -47,6 +47,33 @@ test('rebases a pull request with an optimistic head check', () => {
   assert.match(args.find(argument => argument.startsWith('query=')), /updateMethod: REBASE/);
 });
 
+test('creates the automation label and adds it to a pull request', () => {
+  const github = new GitHubAPI('example', 'ios');
+  const calls = [];
+  github.exec = args => {
+    calls.push(args);
+    return '[]';
+  };
+
+  github.labelPullRequest(42, {
+    name: 'automated release',
+    color: '1D76DB',
+    description: 'Maintained automatically from the development branch',
+  });
+
+  assert.deepEqual(calls, [
+    [
+      'label', 'create', 'automated release', '--repo', 'example/ios',
+      '--color', '1D76DB', '--description',
+      'Maintained automatically from the development branch', '--force',
+    ],
+    [
+      'api', '--method', 'POST', 'repos/example/ios/issues/42/labels',
+      '-f', 'labels[]=automated release',
+    ],
+  ]);
+});
+
 test('surfaces GraphQL details when a pull request cannot be rebased', () => {
   const github = new GitHubAPI('example', 'ios');
   github.exec = () => JSON.stringify({
