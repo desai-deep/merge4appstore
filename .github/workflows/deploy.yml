@@ -302,6 +302,9 @@ jobs:
               [ "$jams_mirrors" -eq 1 ] && [ "$runningorder_mirrors" -eq 1 ] \
                 || { echo "Expected exactly one ready mirror for each configured repository"; exit 1; }
             }
+            # Keep this as a simple command under errexit. Wrapping the call in
+            # `!` or `||` would disable errexit inside the function and could
+            # let a bare Git validation failure continue.
             inspect_git_mirrors
             node_binary="$(readlink -f -- "$(command -v node)")"
             pm2_home="${PM2_HOME:-$HOME/.pm2}"

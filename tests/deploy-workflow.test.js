@@ -332,30 +332,36 @@ test('inspection fails closed for corrupt current release pointers and markers',
   fs.mkdirSync(control, { mode: 0o700 });
   fs.chmodSync(state, 0o700);
   fs.chmodSync(releases, 0o700);
+  const sentinel = path.join(root, 'inspection-continued');
 
   const runInspection = () => runBash([
-    'set -u',
+    'set -Eeuo pipefail',
     portableStatShim,
     portableReadlinkShim,
     'state_dir="$TEST_STATE"',
     'DEPLOY_DIR="$TEST_CONTROL"',
     extractMirrorInspection(),
     'inspect_git_mirrors',
+    ': > "$TEST_SENTINEL"',
   ].join('\n'), {
     TEST_CONTROL: control,
     TEST_NODE_BINARY: process.execPath,
+    TEST_SENTINEL: sentinel,
     TEST_STATE: state,
   });
 
   const absent = runInspection();
   assert.equal(absent.status, 0, absent.stderr || absent.stdout);
   assert.match(absent.stdout, /git_mirrors=not-yet-installed/);
+  assert.equal(fs.existsSync(sentinel), true);
+  fs.unlinkSync(sentinel);
 
   const current = path.join(state, 'current');
   fs.symlinkSync(path.join(releases, 'missing'), current);
   const dangling = runInspection();
   assert.notEqual(dangling.status, 0);
   assert.match(dangling.stdout, /Current release pointer is dangling/);
+  assert.equal(fs.existsSync(sentinel), false);
 
   fs.unlinkSync(current);
   const outside = path.join(root, 'outside');
@@ -364,6 +370,7 @@ test('inspection fails closed for corrupt current release pointers and markers',
   const escaping = runInspection();
   assert.notEqual(escaping.status, 0);
   assert.match(escaping.stdout, /escapes the private releases directory/);
+  assert.equal(fs.existsSync(sentinel), false);
 
   fs.unlinkSync(current);
   const unmarked = path.join(releases, `${'a'.repeat(40)}-fixture`);
@@ -372,6 +379,7 @@ test('inspection fails closed for corrupt current release pointers and markers',
   const missingMarker = runInspection();
   assert.notEqual(missingMarker.status, 0);
   assert.match(missingMarker.stdout, /Current release marker is missing or unsafe/);
+  assert.equal(fs.existsSync(sentinel), false);
 });
 
 test('inspection ignores replace refs and detects mirror tree lookup failures', t => {
