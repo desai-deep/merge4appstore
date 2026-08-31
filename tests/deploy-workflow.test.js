@@ -1459,6 +1459,7 @@ test('hands PM2 releases over only after the new immutable generation validates'
     'SERVICE_PORT=8788',
     'CANDIDATE_RELEASE="$TEST_CANDIDATE_RELEASE"',
     'DRAIN_TIMEOUT_MS=600000',
+    'PM2_START_TIMEOUT_SECONDS=75',
     'LOGS_DIR="$TEST_LOGS"',
     'configure_process_environment() { printf "configure:%s:%s:%s\\n" "$1" "$2" "$3" >> "$TEST_EVENTS"; }',
     'pm2_reusable_target_ids() { printf "%s" "${REUSABLE_IDS:-}"; }',
@@ -1474,6 +1475,13 @@ test('hands PM2 releases over only after the new immutable generation validates'
     '  local result_name="$1"',
     '  shift',
     '  printf -v "$result_name" "%s" "${START_ELAPSED_SECONDS:-0.001}"',
+    '  "$@"',
+    '}',
+    'timeout() {',
+    '  [ "$1" = "--kill-after=10s" ] || exit 80',
+    '  [ "$2" = "75s" ] || exit 81',
+    '  [ "${TIMEOUT_FAIL:-0}" -eq 0 ] || return 124',
+    '  shift 2',
     '  "$@"',
     '}',
     'verify_pm2_worker_health() {',
@@ -1505,6 +1513,8 @@ test('hands PM2 releases over only after the new immutable generation validates'
   const events = result.stdout.trim().split('\n');
   const start = events.find(event => event.startsWith('pm2:<start>'));
   assert.ok(start, result.stdout);
+  assert.match(deployScript, /PM2_START_TIMEOUT_SECONDS=75/);
+  assert.match(deployScript, /timeout --kill-after=10s/);
   for (const expectedArgument of [
     'webhook-server.js',
     '--name',
@@ -1600,6 +1610,15 @@ test('hands PM2 releases over only after the new immutable generation validates'
   ].join('\n'), environment);
   assert.equal(nearTimeout.status, 0, nearTimeout.stderr || nearTimeout.stdout);
   assert.match(nearTimeout.stdout, /delete:v2:7,8/);
+
+  fs.rmSync(eventLog);
+  const externallyTimedOut = runBash([
+    'TIMEOUT_FAIL=1',
+    source,
+  ].join('\n'), environment);
+  assert.notEqual(externallyTimedOut.status, 0, 'an externally timed-out PM2 start was accepted');
+  assert.match(externallyTimedOut.stderr, /PM2 generation start failed or exceeded 75s/);
+  assert.doesNotMatch(fs.readFileSync(eventLog, 'utf8'), /pm2:<start>|validate:9,10|delete:v2:7,8/);
 
   fs.rmSync(eventLog);
   fs.rmSync(path.join(release, '.merge4appstore-worker-health-v1'));
