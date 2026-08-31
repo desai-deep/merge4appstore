@@ -563,9 +563,7 @@ test('builds immutable marked releases without mutating the control checkout', (
   assert.match(deployScript, /timeout --kill-after=30s 10m npm ci --omit=dev/);
   assert.match(deployScript, /timeout --kill-after=10s 1m npm run validate:profiles/);
   assert.doesNotMatch(deployScript, /npm test/);
-  assert.match(deployScript, /if ! \(cd \"\$CANDIDATE_RELEASE\" && timeout --kill-after=30s 20m npm run prepare:mirrors\); then/);
-  assert.match(deployScript, /fail \"Git mirror prewarming failed before cutover\"/);
-  assert.doesNotMatch(deployScript, /Git mirror prewarming failed; authenticated preparation smoke/);
+  assert.doesNotMatch(deployScript, /npm run prepare:mirrors/);
 });
 
 test('journals every mutating boundary and commits before legacy teardown', () => {
@@ -574,9 +572,6 @@ test('journals every mutating boundary and commits before legacy teardown', () =
   const gate = main.indexOf('activate_delivery_pause "$transaction_dir"');
   const cronPausing = main.indexOf('write_transaction_phase legacy-cron-pausing');
   const cronMutation = main.indexOf('pause_managed_cron "$transaction_dir/crontab.before"');
-  const mirrorPreflight = main.indexOf('npm run prepare:mirrors');
-  const deployPreflight = main.indexOf('timeout --kill-after=30s 25m node index.js deploy --profile');
-  const expirePreflight = main.indexOf('timeout --kill-after=30s 25m node index.js expire --profile');
   const candidateStarting = main.indexOf('write_transaction_phase candidate-starting');
   const candidateStart = main.indexOf('start_release "$CANDIDATE_RELEASE"');
   const nginxSwitching = main.indexOf('write_transaction_phase nginx-switching');
@@ -584,14 +579,13 @@ test('journals every mutating boundary and commits before legacy teardown', () =
   const pointerSwitching = main.indexOf('write_transaction_phase pointers-switching');
   const pointerMutation = main.indexOf('replace_link "$CANDIDATE_RELEASE" "$STATE_DIR/current"');
   const serviceCommitted = main.indexOf('write_transaction_phase service-committed');
-  assert.ok(mirrorPreflight >= 0, 'mirror preflight is missing');
-  assert.ok(deployPreflight >= 0, 'deploy preflight is missing');
-  assert.ok(expirePreflight >= 0, 'expire preflight is missing');
   assert.ok(topology >= 0 && topology < gate && gate < cronPausing);
   assert.ok(cronPausing < cronMutation && cronMutation < candidateStarting);
-  assert.ok(cronMutation < mirrorPreflight && mirrorPreflight < deployPreflight);
-  assert.ok(deployPreflight < expirePreflight && expirePreflight < candidateStarting);
   assert.doesNotMatch(main.slice(gate, cronPausing), /if \[ "\$had_v2" -eq 0 \]/);
+  assert.doesNotMatch(
+    main.slice(cronMutation, candidateStarting),
+    /prepare:mirrors|node index\.js (?:deploy|expire)/,
+  );
   assert.ok(candidateStarting < candidateStart);
   assert.ok(nginxSwitching < nginxMutation);
   assert.ok(pointerSwitching < pointerMutation && pointerMutation < serviceCommitted);
@@ -1872,20 +1866,15 @@ test('keeps proxy and PM2 drain deadlines aligned', () => {
   assert.match(ecosystem, /kill_timeout: drainTimeout \+ 10000/);
 });
 
-test('lets gated deployment preflight outlive one in-flight webhook job', () => {
-  const jobTimeout = /jobTimeoutMs = (\d+) \* 60_000/.exec(webhookServer);
-  const lockWait = /PREFLIGHT_LOCK_WAIT_MS=(\d+)/.exec(deployScript);
-  const deployOuter = /timeout --kill-after=30s (\d+)m node index\.js deploy --profile/.exec(deployScript);
-  const expireOuter = /timeout --kill-after=30s (\d+)m node index\.js expire --profile/.exec(deployScript);
-  assert.ok(jobTimeout && lockWait && deployOuter && expireOuter);
-  const jobTimeoutMs = Number(jobTimeout[1]) * 60_000;
-  const lockWaitMs = Number(lockWait[1]);
-  assert.ok(lockWaitMs >= jobTimeoutMs + 60_000);
-  assert.ok(Number(deployOuter[1]) * 60_000 > lockWaitMs);
-  assert.ok(Number(expireOuter[1]) * 60_000 > lockWaitMs);
-  assert.equal(
-    [...deployScript.matchAll(/MERGE4APPSTORE_LOCK_WAIT_MS="\$PREFLIGHT_LOCK_WAIT_MS" DRY_RUN=true/g)].length,
-    2,
+test('does not couple candidate deployment to release-provider preflight', () => {
+  assert.doesNotMatch(deployScript, /PREFLIGHT_LOCK_WAIT_MS|npm run prepare:mirrors/);
+  const gate = deployScript.indexOf('activate_delivery_pause "$transaction_dir"');
+  const candidate = deployScript.indexOf('start_release "$CANDIDATE_RELEASE"');
+  const versionSmoke = deployScript.indexOf('authenticated version smoke');
+  assert.ok(gate >= 0 && gate < candidate && candidate < versionSmoke);
+  assert.doesNotMatch(
+    deployScript.slice(gate, candidate),
+    /node index\.js (?:deploy|expire) --profile/,
   );
 });
 
@@ -2002,13 +1991,10 @@ test('retries transient deployment probes with bounded diagnostics', () => {
   assert.match(deployScript, /GitHub hook update[\s\S]* 4[\s\S]*timeout 30s/);
   assert.match(deployScript, /GitHub hook creation[\s\S]* 4[\s\S]*timeout 30s/);
   assert.match(deployScript, /timeout --kill-after=30s 10m npm ci/);
-  assert.match(deployScript, /timeout --kill-after=30s 20m npm run prepare:mirrors/);
-  assert.match(deployScript, /fail "Git mirror prewarming failed before cutover"/);
   assert.match(deployScript, /attempt \$attempt\/\$max_attempts/);
 });
 
-test('aggregate mirror caps bound repositories and reserve network retry headroom', () => {
-  const outer = /timeout --kill-after=30s (\d+)m npm run prepare:mirrors/.exec(deployScript);
+test('standalone mirror preparation bounds each repository and reserves retry headroom', () => {
   const clone = /defaultPrewarmCloneTimeoutMs = ([\d_]+)/.exec(prepareMirrorsScript);
   const command = /defaultPrewarmCommandTimeoutMs = ([\d_]+)/.exec(prepareMirrorsScript);
   const fetch = /defaultPrewarmFetchTimeoutMs = ([\d_]+)/.exec(prepareMirrorsScript);
@@ -2017,16 +2003,9 @@ test('aggregate mirror caps bound repositories and reserve network retry headroo
   const retryDelay = /defaultPrewarmRetryDelayMs = ([\d_]+)/.exec(prepareMirrorsScript);
   const repositoryDeadline = /defaultRepositoryTimeoutMs = (\d+) \* 60_000/.exec(prepareMirrorsScript);
   assert.ok(
-    outer && clone && command && fetch && prewarmLock
+    clone && command && fetch && prewarmLock
       && attempts && retryDelay && repositoryDeadline,
   );
-  const configuredRepositories = new Set(
-    fs.readdirSync(path.join(repositoryRoot, 'profiles'))
-      .filter(name => /\.ya?ml$/.test(name))
-      .map(name => YAML.parse(fs.readFileSync(path.join(repositoryRoot, 'profiles', name), 'utf8')))
-      .map(profile => `${profile.repository.owner.toLowerCase()}/${profile.repository.name.toLowerCase()}`),
-  ).size;
-  const outerTimeoutMs = Number(outer[1]) * 60_000;
   const cloneTimeoutMs = Number(clone[1].replaceAll('_', ''));
   const fetchTimeoutMs = Number(fetch[1].replaceAll('_', ''));
   const commandTimeoutMs = Number(command[1].replaceAll('_', ''));
@@ -2034,12 +2013,6 @@ test('aggregate mirror caps bound repositories and reserve network retry headroo
   const maximumAttempts = Number(attempts[1]);
   const retryDelayMs = Number(retryDelay[1].replaceAll('_', ''));
   const repositoryTimeoutMs = Number(repositoryDeadline[1]) * 60_000;
-  const perRepositoryLockAndVerificationAllowanceMs = 3 * 60_000;
-  assert.ok(
-    outerTimeoutMs > configuredRepositories
-      * (cloneTimeoutMs + perRepositoryLockAndVerificationAllowanceMs),
-  );
-  assert.ok(outerTimeoutMs > configuredRepositories * repositoryTimeoutMs);
   assert.ok(repositoryTimeoutMs > commandTimeoutMs);
   // This reserves headroom for the dominant network operation and lock on
   // each attempt. Local validation, fsck, and maintenance remain sequentially
