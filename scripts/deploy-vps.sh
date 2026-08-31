@@ -20,6 +20,7 @@ NGINX_SNIPPET="/etc/nginx/snippets/merge4appstore-webhooks.conf"
 NGINX_OBSERVABILITY_CONFIG="/etc/nginx/conf.d/merge4appstore-observability.conf"
 MIN_FREE_BYTES="${MERGE4APPSTORE_MIN_FREE_BYTES:-1073741824}"
 MIN_FREE_PERCENT="${MERGE4APPSTORE_MIN_FREE_PERCENT:-10}"
+PREFLIGHT_LOCK_WAIT_MS=1260000
 
 fail() {
   echo "ERROR: $*" >&2
@@ -2441,16 +2442,19 @@ if ! (cd "$CANDIDATE_RELEASE" && timeout --kill-after=30s 20m npm run prepare:mi
   fail "Git mirror prewarming failed before cutover"
 fi
 for profile_file in "${repository_profiles[@]}"; do
-  # The CLI may spend up to 600 seconds waiting for the repository lock. Keep
-  # the outer deployment bound above that contract so the durable pause has
-  # time to quiesce workers before preflight itself is terminated.
+  # Webhook jobs may run for 20 minutes. Once the durable pause is active no
+  # new job can acquire the repository lock, so let the current owner reach its
+  # bounded deadline and settle its receipt before preflight takes over. Keep
+  # the outer process above that deployment-only lock contract.
   (cd "$CANDIDATE_RELEASE" && env \
-    MERGE4APPSTORE_ENV="$CONTROL_ENV" MERGE4APPSTORE_STATE_DIR="$STATE_DIR" DRY_RUN=true \
-    timeout --kill-after=30s 15m node index.js deploy --profile "$profile_file") \
+    MERGE4APPSTORE_ENV="$CONTROL_ENV" MERGE4APPSTORE_STATE_DIR="$STATE_DIR" \
+    MERGE4APPSTORE_LOCK_WAIT_MS="$PREFLIGHT_LOCK_WAIT_MS" DRY_RUN=true \
+    timeout --kill-after=30s 25m node index.js deploy --profile "$profile_file") \
     || fail "Deploy dry-run failed for profile: $profile_file"
   (cd "$CANDIDATE_RELEASE" && env \
-    MERGE4APPSTORE_ENV="$CONTROL_ENV" MERGE4APPSTORE_STATE_DIR="$STATE_DIR" DRY_RUN=true \
-    timeout --kill-after=30s 15m node index.js expire --profile "$profile_file") \
+    MERGE4APPSTORE_ENV="$CONTROL_ENV" MERGE4APPSTORE_STATE_DIR="$STATE_DIR" \
+    MERGE4APPSTORE_LOCK_WAIT_MS="$PREFLIGHT_LOCK_WAIT_MS" DRY_RUN=true \
+    timeout --kill-after=30s 25m node index.js expire --profile "$profile_file") \
     || fail "Expire dry-run failed for profile: $profile_file"
 done
 
