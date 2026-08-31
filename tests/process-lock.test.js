@@ -197,6 +197,31 @@ test('does not retry permanent process-lock helper failures', {
   assert.equal(attempts, 1);
 });
 
+test('rejects malformed holder argv before spawning a process-lock helper', {
+  skip: process.platform === 'win32' ? 'Windows uses socket locks' : false,
+}, async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge4appstore-process-lock-config-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sparseHolderCommand = ['/bin/sh'];
+  sparseHolderCommand[2] = '-c';
+
+  for (const fileLockHolderCommand of [
+    [],
+    '',
+    [42],
+    sparseHolderCommand,
+    ['/bin/sh', 'invalid\0argument'],
+  ]) {
+    await assert.rejects(
+      tryAcquireProcessLock(root, 'invalid-holder-command', {
+        helperStartupAttempts: 1,
+        fileLockHolderCommand,
+      }),
+      error => error.code === 'ELOCKCONFIG',
+    );
+  }
+});
+
 test('bounds helper startup recovery by the overall lock deadline', {
   skip: process.platform === 'win32' ? 'Windows uses socket locks' : false,
 }, async t => {
