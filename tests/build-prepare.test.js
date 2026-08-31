@@ -132,7 +132,7 @@ test('keeps the pull request description before commits for its first build', as
 test('recovers pull request notes for an exact branch-fallback build', async () => {
   const profile = { repository: { owner: 'example', name: 'ios', beta_branch: 'develop' } };
   const build = { purpose: 'pull_request', appRole: 'uat', appId: '1', workflowId: 'wf-pr', includeCommits: true };
-  const payload = { repository: 'example/ios', commit: COMMIT, branch: 'feature', target_branch: null, pull_request: null };
+  const payload = { repository: 'example/ios', commit: COMMIT, branch: 'feature', target_branch: 'preview', pull_request: null };
   const lookups = [];
   const github = {
     getCommitSubject: () => 'Fallback subject',
@@ -159,7 +159,7 @@ test('recovers pull request notes for an exact branch-fallback build', async () 
     github,
   });
 
-  assert.deepEqual(lookups, [{ commit: COMMIT, base: 'develop', head: 'feature' }]);
+  assert.deepEqual(lookups, [{ commit: COMMIT, base: 'preview', head: 'feature' }]);
   assert.equal(result.text, 'Verify the pinned controls.\n\nCommits in this pull request:\n\n• Pin playback controls\n• Polish player spacing');
   assert.deepEqual(result.warnings, ['No ancestor published build found; using all pull-request commits']);
 });
