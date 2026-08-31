@@ -190,6 +190,30 @@ validate_owned_regular_file() {
   [ -O "$file" ]
 }
 
+secure_migratable_private_file() {
+  local file="$1"
+  local permissions numeric_permissions
+  validate_owned_regular_file "$file" \
+    || { echo "ERROR: Private control file is missing, linked, or not owned: $file" >&2; return 1; }
+  permissions="$(stat -c '%a' "$file")" || return 1
+  case "$permissions" in
+    ''|*[!0-7]*) echo "ERROR: Private control file has invalid permissions: $file" >&2; return 1 ;;
+  esac
+  numeric_permissions=$((8#$permissions))
+  if [ "$numeric_permissions" -gt $((8#777)) ] \
+    || [ $((numeric_permissions & 8#400)) -eq 0 ] \
+    || [ $((numeric_permissions & 8#133)) -ne 0 ]; then
+    echo "ERROR: Private control file is writable by another user, executable, or unreadable by its owner: $file" >&2
+    return 1
+  fi
+  if [ "$permissions" != "600" ]; then
+    echo "Tightening legacy private control file to mode 0600: $file"
+    chmod 600 "$file" || return 1
+    sync -f "$file" || return 1
+  fi
+  validate_private_file "$file"
+}
+
 ensure_private_log_file() {
   local file="$1"
   if [ -e "$file" ] || [ -L "$file" ]; then
@@ -387,7 +411,7 @@ validate_private_file "$STATE_DIR/.merge4appstore-state"
   || fail "Candidate release marker is invalid"
 [ "$(cat "$CANDIDATE_RELEASE/.merge4appstore-deployment-sha" 2>/dev/null || true)" = "$DEPLOY_SHA" ] \
   || fail "Candidate release SHA is invalid"
-validate_private_file "$CONTROL_ENV"
+secure_migratable_private_file "$CONTROL_ENV"
 if [ -L "$CONTROL_WEBHOOK_ENV" ]; then
   resolved_control_secret="$(readlink -f -- "$CONTROL_WEBHOOK_ENV")" \
     || fail "Control webhook environment link is dangling"
@@ -395,9 +419,9 @@ if [ -L "$CONTROL_WEBHOOK_ENV" ]; then
     "$SECRETS_DIR"/*) ;;
     *) fail "Control webhook environment link escapes the private secrets directory" ;;
   esac
-  validate_private_file "$resolved_control_secret"
+  secure_migratable_private_file "$resolved_control_secret"
 else
-  validate_private_file "$CONTROL_WEBHOOK_ENV"
+  secure_migratable_private_file "$CONTROL_WEBHOOK_ENV"
 fi
 
 transaction_dir="$(mktemp -d "$TRANSACTIONS_DIR/$DEPLOY_RUN_ID.XXXXXX")"

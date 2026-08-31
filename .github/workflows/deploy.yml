@@ -150,8 +150,17 @@ jobs:
                 || { echo "$private_file is missing or not owned"; exit 1; }
               resolved="$(readlink -f -- "$private_file")"
               [ -f "$resolved" ] && [ ! -L "$resolved" ] && [ -O "$resolved" ] \
-                && [ "$(stat -c '%a' "$resolved")" = "600" ] \
-                || { echo "$private_file does not resolve to an owned mode-0600 file"; exit 1; }
+                || { echo "$private_file does not resolve to an owned regular file"; exit 1; }
+              permissions="$(stat -c '%a' "$resolved")"
+              case "$permissions" in ''|*[!0-7]*) echo "$private_file has invalid permissions"; exit 1 ;; esac
+              numeric_permissions=$((8#$permissions))
+              [ "$numeric_permissions" -le $((8#777)) ] \
+                && [ $((numeric_permissions & 8#400)) -ne 0 ] \
+                && [ $((numeric_permissions & 8#133)) -eq 0 ] \
+                || { echo "$private_file is writable by another user, executable, or unreadable by its owner"; exit 1; }
+              if [ "$permissions" != "600" ]; then
+                echo "$private_file is an owned non-writable legacy file; deployment will tighten it to mode 0600"
+              fi
             done
             [ ! -L "$DEPLOY_DIR/.env" ] || { echo "Control .env cannot be a symlink"; exit 1; }
             if [ -L "$DEPLOY_DIR/.webhook.env" ]; then

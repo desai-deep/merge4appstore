@@ -276,11 +276,53 @@ test('serializes deployments and keeps webhook credentials on the server', () =>
   assert.match(workflow, /concurrency:\s*\n\s+group: merge4appstore-vps\s*\n\s+cancel-in-progress: false/);
   assert.match(workflow, /DEPLOY_RUN_ID: \$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
   assert.match(workflow, /for private_file in "\$DEPLOY_DIR\/\.env" "\$DEPLOY_DIR\/\.webhook\.env"/);
+  assert.match(inspectRun, /numeric_permissions & 8#133/);
+  assert.match(inspectRun, /deployment will tighten it to mode 0600/);
   assert.match(workflow, /Control \.webhook\.env points outside the private secrets directory/);
   assert.match(deployScript, /CONTROL_WEBHOOK_ENV="\$DEPLOY_DIR\/\.webhook\.env"/);
+  assert.match(deployScript, /secure_migratable_private_file "\$CONTROL_ENV"/);
   assert.doesNotMatch(workflow, /write-webhook-env|STAGED_WEBHOOK_ENV|scp[\s\S]*webhook/i);
   assert.doesNotMatch(deployScript, /STAGED_WEBHOOK_ENV/);
   assert.match(workflow, /flock --exclusive --wait 900/);
+});
+
+test('tightens safe legacy control files and rejects writable or linked ones', t => {
+  const directory = temporaryDirectory(t, 'merge4appstore-control-permissions-');
+  const safe = path.join(directory, 'safe.env');
+  const writable = path.join(directory, 'writable.env');
+  const linked = path.join(directory, 'linked.env');
+  fs.writeFileSync(safe, 'SAFE=value\n', { mode: 0o644 });
+  fs.writeFileSync(writable, 'UNSAFE=value\n', { mode: 0o666 });
+  fs.symlinkSync(safe, linked);
+  fs.chmodSync(safe, 0o644);
+  fs.chmodSync(writable, 0o666);
+
+  const privateFileFunctions = shellSection(
+    'validate_private_file() {',
+    'ensure_private_log_file() {',
+  );
+  const run = file => runBash([
+    'set -u',
+    portableStatShim,
+    'sync() { :; }',
+    privateFileFunctions,
+    'secure_migratable_private_file "$TEST_CONTROL_FILE"',
+  ].join('\n'), {
+    TEST_CONTROL_FILE: file,
+    TEST_NODE_BINARY: process.execPath,
+  });
+
+  const safeResult = run(safe);
+  assert.equal(safeResult.status, 0, safeResult.stderr || safeResult.stdout);
+  assert.equal(fs.statSync(safe).mode & 0o777, 0o600);
+  assert.equal(fs.readFileSync(safe, 'utf8'), 'SAFE=value\n');
+
+  const writableResult = run(writable);
+  assert.notEqual(writableResult.status, 0, 'group/world-writable control file was accepted');
+  assert.equal(fs.statSync(writable).mode & 0o777, 0o666);
+
+  const linkedResult = run(linked);
+  assert.notEqual(linkedResult.status, 0, 'linked control file was accepted');
 });
 
 test('validates state without following a pre-existing symlink before opening the deploy lock', () => {

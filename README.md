@@ -553,10 +553,11 @@ The state root must be a real, deployment-user-owned directory with mode
 `0700`, under a non-writable real parent. The workflow creates it only when the
 exact path is absent and empty, then installs a private ownership marker before
 opening its deployment lock. It refuses symlinks, foreign ownership, permissive
-modes, an unmarked nonempty directory, and a control `.env` that is not a real
-owned `0600` file. The existing control `.webhook.env` must likewise be an
-owned `0600` regular file for the first migration; after migration it is a
-validated symlink to the active private release credential.
+modes, and an unmarked nonempty directory. A first deployment may migrate owned
+regular `.env` and `.webhook.env` control files that are owner-readable and
+neither writable by another user nor executable; it tightens them to `0600`
+before reading any secret. Unsafe legacy modes fail closed. After migration,
+`.webhook.env` is a validated symlink to the active private release credential.
 
 PM2 runs the permanent `merge4appstore-webhooks-v2` app as two cluster workers
 on loopback port 8788. Workers receive only non-secret settings and paths to the
