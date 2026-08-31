@@ -10,6 +10,7 @@ import YAML from 'yaml';
 const workflow = fs.readFileSync(new URL('../.github/workflows/deploy.yml', import.meta.url), 'utf8');
 const dependabot = fs.readFileSync(new URL('../.github/dependabot.yml', import.meta.url), 'utf8');
 const deployScript = fs.readFileSync(new URL('../scripts/deploy-vps.sh', import.meta.url), 'utf8');
+const prepareMirrorsScript = fs.readFileSync(new URL('../scripts/prepare-git-mirrors.js', import.meta.url), 'utf8');
 const ecosystemUrl = new URL('../ecosystem.config.cjs', import.meta.url);
 const ecosystem = fs.readFileSync(ecosystemUrl, 'utf8');
 const webhookServer = fs.readFileSync(new URL('../webhook-server.js', import.meta.url), 'utf8');
@@ -43,6 +44,13 @@ function extractPublicHealthValidator() {
   return match[1];
 }
 
+function extractMirrorInspection() {
+  const start = inspectRun.indexOf('inspect_git_mirrors() {');
+  const call = inspectRun.indexOf('\n  inspect_git_mirrors\n', start);
+  assert.ok(start >= 0 && call > start, 'mirror inspection must be an extractable shell function');
+  return inspectRun.slice(start, call);
+}
+
 function shellSection(start, end) {
   const startIndex = deployScript.indexOf(start);
   const endIndex = deployScript.indexOf(end, startIndex + start.length);
@@ -72,6 +80,17 @@ const portableStatShim = String.raw`stat() {
     };
     if (!(process.env.TEST_STAT_FORMAT in values)) process.exit(2);
     process.stdout.write(values[process.env.TEST_STAT_FORMAT]);
+  '
+}`;
+
+const portableReadlinkShim = String.raw`readlink() {
+  if [ "$1" != "-f" ]; then command readlink "$@"; return; fi
+  shift
+  if [ "$1" = "--" ]; then shift; fi
+  TEST_READLINK_PATH="$1" "$TEST_NODE_BINARY" -e '
+    const fs = require("fs");
+    try { process.stdout.write(fs.realpathSync(process.env.TEST_READLINK_PATH)); }
+    catch { process.exit(1); }
   '
 }`;
 
@@ -286,6 +305,150 @@ test('deployment and inspection require Git versions with GIT_NO_LAZY_FETCH supp
   assert.match(inspectRun, /minor >= 46/);
 });
 
+test('inspection verifies both private blobless mirrors without lazy fetching', () => {
+  assert.match(inspectRun, /\[ -L "\$current_pointer" \]/);
+  assert.match(inspectRun, /"\$state_root\/releases\/"\*/);
+  assert.match(inspectRun, /\.merge4appstore-deployment-sha/);
+  assert.match(inspectRun, /GIT_NO_REPLACE_OBJECTS=1 git -C "\$DEPLOY_DIR" cat-file/);
+  assert.match(inspectRun, /GIT_NO_REPLACE_OBJECTS=1 git -C "\$DEPLOY_DIR"[\s\S]*ls-tree --name-only/);
+  assert.match(inspectRun, /Current release tree could not be inspected/);
+  assert.match(inspectRun, /temporary_mirrors=\("\$mirrors_dir"\/\*\.tmp-\*\)/);
+  assert.match(inspectRun, /desai-deep\/jamsontoast\\\|https:\/\/github\.com\/desai-deep\/JamsOnToast\.git/);
+  assert.match(inspectRun, /desai-deep\/runningorder-ios\\\|https:\/\/github\.com\/desai-deep\/runningorder-ios\.git/);
+  assert.match(inspectRun, /remote\.origin\.promisor/);
+  assert.match(inspectRun, /remote\.origin\.partialclonefilter/);
+  assert.match(inspectRun, /\.merge4appstore-refresh/);
+  assert.match(inspectRun, /GIT_NO_LAZY_FETCH=1 GIT_NO_REPLACE_OBJECTS=1 GIT_TERMINAL_PROMPT=0/);
+  assert.match(inspectRun, /fsck --connectivity-only --no-dangling/);
+  assert.match(inspectRun, /Expected exactly one ready mirror for each configured repository/);
+});
+
+test('inspection fails closed for corrupt current release pointers and markers', t => {
+  const root = temporaryDirectory(t, 'merge4appstore-mirror-inspection-');
+  const state = path.join(root, 'state');
+  const releases = path.join(state, 'releases');
+  const control = path.join(root, 'control');
+  fs.mkdirSync(releases, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(control, { mode: 0o700 });
+  fs.chmodSync(state, 0o700);
+  fs.chmodSync(releases, 0o700);
+  const sentinel = path.join(root, 'inspection-continued');
+
+  const runInspection = () => runBash([
+    'set -Eeuo pipefail',
+    portableStatShim,
+    portableReadlinkShim,
+    'state_dir="$TEST_STATE"',
+    'DEPLOY_DIR="$TEST_CONTROL"',
+    extractMirrorInspection(),
+    'inspect_git_mirrors',
+    ': > "$TEST_SENTINEL"',
+  ].join('\n'), {
+    TEST_CONTROL: control,
+    TEST_NODE_BINARY: process.execPath,
+    TEST_SENTINEL: sentinel,
+    TEST_STATE: state,
+  });
+
+  const absent = runInspection();
+  assert.equal(absent.status, 0, absent.stderr || absent.stdout);
+  assert.match(absent.stdout, /git_mirrors=not-yet-installed/);
+  assert.equal(fs.existsSync(sentinel), true);
+  fs.unlinkSync(sentinel);
+
+  const current = path.join(state, 'current');
+  fs.symlinkSync(path.join(releases, 'missing'), current);
+  const dangling = runInspection();
+  assert.notEqual(dangling.status, 0);
+  assert.match(dangling.stdout, /Current release pointer is dangling/);
+  assert.equal(fs.existsSync(sentinel), false);
+
+  fs.unlinkSync(current);
+  const outside = path.join(root, 'outside');
+  fs.mkdirSync(outside, { mode: 0o700 });
+  fs.symlinkSync(outside, current);
+  const escaping = runInspection();
+  assert.notEqual(escaping.status, 0);
+  assert.match(escaping.stdout, /escapes the private releases directory/);
+  assert.equal(fs.existsSync(sentinel), false);
+
+  fs.unlinkSync(current);
+  const unmarked = path.join(releases, `${'a'.repeat(40)}-fixture`);
+  fs.mkdirSync(unmarked, { mode: 0o700 });
+  fs.symlinkSync(unmarked, current);
+  const missingMarker = runInspection();
+  assert.notEqual(missingMarker.status, 0);
+  assert.match(missingMarker.stdout, /Current release marker is missing or unsafe/);
+  assert.equal(fs.existsSync(sentinel), false);
+});
+
+test('inspection ignores replace refs and detects mirror tree lookup failures', t => {
+  const root = temporaryDirectory(t, 'merge4appstore-mirror-release-damage-');
+  const state = path.join(root, 'state');
+  const releases = path.join(state, 'releases');
+  const control = path.join(root, 'control');
+  fs.mkdirSync(releases, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.join(control, 'scripts'), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(control, 'scripts', 'prepare-git-mirrors.js'), 'export {};\n');
+  for (const args of [
+    ['init', '--initial-branch=main'],
+    ['config', 'user.name', 'Inspection Test'],
+    ['config', 'user.email', 'inspection@example.test'],
+    ['commit', '--allow-empty', '-m', 'Legacy release'],
+    ['add', 'scripts/prepare-git-mirrors.js'],
+    ['commit', '-m', 'Add mirror preparation'],
+  ]) {
+    const result = spawnSync('git', ['-C', control, ...args], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+  }
+  const sha = spawnSync('git', ['-C', control, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+  const legacySha = spawnSync(
+    'git', ['-C', control, 'rev-list', '--max-parents=0', 'HEAD'], { encoding: 'utf8' },
+  ).stdout.trim();
+  const replacement = spawnSync('git', ['-C', control, 'replace', sha, legacySha], { encoding: 'utf8' });
+  assert.equal(replacement.status, 0, replacement.stderr);
+  const release = path.join(releases, `${sha}-fixture`);
+  fs.mkdirSync(release, { mode: 0o700 });
+  fs.writeFileSync(path.join(release, '.merge4appstore-release'), 'merge4appstore-release-v1\n', { mode: 0o600 });
+  fs.writeFileSync(path.join(release, '.merge4appstore-deployment-sha'), `${sha}\n`, { mode: 0o600 });
+  fs.chmodSync(state, 0o700);
+  fs.chmodSync(releases, 0o700);
+  fs.symlinkSync(release, path.join(state, 'current'));
+
+  const result = runBash([
+    'set -u',
+    portableStatShim,
+    portableReadlinkShim,
+    'state_dir="$TEST_STATE"',
+    'DEPLOY_DIR="$TEST_CONTROL"',
+    extractMirrorInspection(),
+    'inspect_git_mirrors',
+  ].join('\n'), {
+    TEST_CONTROL: control,
+    TEST_NODE_BINARY: process.execPath,
+    TEST_STATE: state,
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /Current mirror preparation script is unsafe/);
+
+  const treeFailure = runBash([
+    'set -u',
+    portableStatShim,
+    portableReadlinkShim,
+    'git() { case " $* " in *" ls-tree "*) return 42 ;; *) command git "$@" ;; esac; }',
+    'state_dir="$TEST_STATE"',
+    'DEPLOY_DIR="$TEST_CONTROL"',
+    extractMirrorInspection(),
+    'inspect_git_mirrors',
+  ].join('\n'), {
+    TEST_CONTROL: control,
+    TEST_NODE_BINARY: process.execPath,
+    TEST_STATE: state,
+  });
+  assert.notEqual(treeFailure.status, 0);
+  assert.match(treeFailure.stdout, /Current release tree could not be inspected/);
+});
+
 test('serializes deployments and keeps webhook credentials on the server', () => {
   assert.match(workflow, /concurrency:\s*\n\s+group: merge4appstore-vps\s*\n\s+cancel-in-progress: false/);
   assert.match(workflow, /DEPLOY_RUN_ID: \$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
@@ -395,7 +558,9 @@ test('builds immutable marked releases without mutating the control checkout', (
   assert.match(deployScript, /timeout --kill-after=30s 10m npm ci --omit=dev/);
   assert.match(deployScript, /timeout --kill-after=10s 1m npm run validate:profiles/);
   assert.doesNotMatch(deployScript, /npm test/);
-  assert.match(deployScript, /if ! \(cd \"\$CANDIDATE_RELEASE\" && timeout 2m npm run prepare:mirrors\); then/);
+  assert.match(deployScript, /if ! \(cd \"\$CANDIDATE_RELEASE\" && timeout --kill-after=30s 15m npm run prepare:mirrors\); then/);
+  assert.match(deployScript, /fail \"Git mirror prewarming failed before cutover\"/);
+  assert.doesNotMatch(deployScript, /Git mirror prewarming failed; authenticated preparation smoke/);
 });
 
 test('journals every mutating boundary and commits before legacy teardown', () => {
@@ -1364,8 +1529,28 @@ test('retries transient deployment probes with bounded diagnostics', () => {
   assert.match(deployScript, /GitHub hook update[\s\S]* 4[\s\S]*timeout 30s/);
   assert.match(deployScript, /GitHub hook creation[\s\S]* 4[\s\S]*timeout 30s/);
   assert.match(deployScript, /timeout --kill-after=30s 10m npm ci/);
-  assert.match(deployScript, /WARNING: Git mirror prewarming failed/);
+  assert.match(deployScript, /timeout --kill-after=30s 15m npm run prepare:mirrors/);
+  assert.match(deployScript, /fail "Git mirror prewarming failed before cutover"/);
   assert.match(deployScript, /attempt \$attempt\/\$max_attempts/);
+});
+
+test('aggregate mirror prewarm budget exceeds sequential clone and recovery budgets', () => {
+  const outer = /timeout --kill-after=30s (\d+)m npm run prepare:mirrors/.exec(deployScript);
+  const clone = /MERGE4APPSTORE_MIRROR_CLONE_TIMEOUT_MS,\s*([\d_]+)/.exec(prepareMirrorsScript);
+  assert.ok(outer && clone);
+  const configuredRepositories = new Set(
+    fs.readdirSync(path.join(repositoryRoot, 'profiles'))
+      .filter(name => /\.ya?ml$/.test(name))
+      .map(name => YAML.parse(fs.readFileSync(path.join(repositoryRoot, 'profiles', name), 'utf8')))
+      .map(profile => `${profile.repository.owner.toLowerCase()}/${profile.repository.name.toLowerCase()}`),
+  ).size;
+  const outerTimeoutMs = Number(outer[1]) * 60_000;
+  const cloneTimeoutMs = Number(clone[1].replaceAll('_', ''));
+  const perRepositoryLockAndVerificationAllowanceMs = 3 * 60_000;
+  assert.ok(
+    outerTimeoutMs > configuredRepositories
+      * (cloneTimeoutMs + perRepositoryLockAndVerificationAllowanceMs),
+  );
 });
 
 test('publishes deploy failures and monitors public health out of band', () => {
