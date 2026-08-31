@@ -2364,11 +2364,11 @@ fi
 for profile_file in "${repository_profiles[@]}"; do
   (cd "$CANDIDATE_RELEASE" && env \
     MERGE4APPSTORE_ENV="$CONTROL_ENV" MERGE4APPSTORE_STATE_DIR="$STATE_DIR" DRY_RUN=true \
-    timeout 5m node index.js deploy --profile "$profile_file") \
+    timeout --kill-after=30s 5m node index.js deploy --profile "$profile_file") \
     || fail "Deploy dry-run failed for profile: $profile_file"
   (cd "$CANDIDATE_RELEASE" && env \
     MERGE4APPSTORE_ENV="$CONTROL_ENV" MERGE4APPSTORE_STATE_DIR="$STATE_DIR" DRY_RUN=true \
-    timeout 5m node index.js expire --profile "$profile_file") \
+    timeout --kill-after=30s 5m node index.js expire --profile "$profile_file") \
     || fail "Expire dry-run failed for profile: $profile_file"
 done
 

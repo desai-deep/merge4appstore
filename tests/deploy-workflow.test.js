@@ -575,7 +575,8 @@ test('journals every mutating boundary and commits before legacy teardown', () =
   const cronPausing = main.indexOf('write_transaction_phase legacy-cron-pausing');
   const cronMutation = main.indexOf('pause_managed_cron "$transaction_dir/crontab.before"');
   const mirrorPreflight = main.indexOf('npm run prepare:mirrors');
-  const deployPreflight = main.indexOf('timeout 5m node index.js deploy --profile');
+  const deployPreflight = main.indexOf('timeout --kill-after=30s 5m node index.js deploy --profile');
+  const expirePreflight = main.indexOf('timeout --kill-after=30s 5m node index.js expire --profile');
   const candidateStarting = main.indexOf('write_transaction_phase candidate-starting');
   const candidateStart = main.indexOf('start_release "$CANDIDATE_RELEASE"');
   const nginxSwitching = main.indexOf('write_transaction_phase nginx-switching');
@@ -585,10 +586,11 @@ test('journals every mutating boundary and commits before legacy teardown', () =
   const serviceCommitted = main.indexOf('write_transaction_phase service-committed');
   assert.ok(mirrorPreflight >= 0, 'mirror preflight is missing');
   assert.ok(deployPreflight >= 0, 'deploy preflight is missing');
+  assert.ok(expirePreflight >= 0, 'expire preflight is missing');
   assert.ok(topology >= 0 && topology < gate && gate < cronPausing);
   assert.ok(cronPausing < cronMutation && cronMutation < candidateStarting);
   assert.ok(cronMutation < mirrorPreflight && mirrorPreflight < deployPreflight);
-  assert.ok(deployPreflight < candidateStarting);
+  assert.ok(deployPreflight < expirePreflight && expirePreflight < candidateStarting);
   assert.doesNotMatch(main.slice(gate, cronPausing), /if \[ "\$had_v2" -eq 0 \]/);
   assert.ok(candidateStarting < candidateStart);
   assert.ok(nginxSwitching < nginxMutation);
