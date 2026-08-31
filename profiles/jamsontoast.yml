@@ -9,7 +9,7 @@ repository:
   ios_repo_path: ""
 
 versioning:
-  initial_version: "1.1"
+  initial_version: "1.4"
 
 release_pull_request: true
 auto_rebase_pull_requests: true

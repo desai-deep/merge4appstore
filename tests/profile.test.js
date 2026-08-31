@@ -5,12 +5,25 @@ import {
   applyAutomationProfile,
   applyBuildPurposeProfile,
   applyRepositoryProfile,
+  loadRepositoryProfile,
   resolveAutoRebasePullRequests,
   resolveAutomation,
   resolveBuildPurpose,
   resolveReleasePullRequest,
   validateRepositoryProfile,
 } from '../lib/profile.js';
+
+test('tracked profiles seed the next marketing-version trains', () => {
+  const jamsOnToast = loadRepositoryProfile(
+    new URL('../profiles/jamsontoast.yml', import.meta.url),
+  );
+  const runningOrder = loadRepositoryProfile(
+    new URL('../profiles/runningorder.yml', import.meta.url),
+  );
+
+  assert.equal(jamsOnToast.versioning.initial_version, '1.4');
+  assert.equal(runningOrder.versioning.initial_version, '1.11');
+});
 
 function profileFixture() {
   return {
