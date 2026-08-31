@@ -393,7 +393,11 @@ The scheduled GitHub Actions health monitor opens or updates a marked issue if
 the public endpoint is unreachable, reports `ok: false`, or has a degraded
 delivery queue. Xcode Cloud failures for pull-request, beta, and production
 workflows also open marked issues; an older completion can never overwrite a
-newer status, and a newer successful build closes the alert. To inspect and
+newer status, and a newer successful build closes the alert. Deployment,
+service-health, and Xcode Cloud failure issues are best-effort assigned to the
+repository owner so GitHub can deliver an assignment notification. A failed
+deployment's issue also records a bounded, sanitized public-health snapshot, which confirms
+whether the previous release remained available after recovery. To inspect and
 requeue durable failures on the VPS:
 
 ```bash
@@ -543,11 +547,15 @@ Required GitHub Actions secrets:
 The checkout at `SERVER_DIR` is a control repository: deployments fetch into
 its Git object database but never reset its working tree. A deployment extracts
 the requested commit with `git archive` into the private sibling state root at
-`${SERVER_DIR}.state/releases/<sha>-<run>`, installs dependencies and runs tests
-there, dry-runs each profile, and warms the shared bare mirrors. Only a fully
-verified immutable release is started by PM2. `current` and `previous` symlinks
-identify the retained releases; cron always runs `current` and writes locks and
-logs below the state root.
+`${SERVER_DIR}.state/releases/<sha>-<run>`. The required Node 20 Actions job runs
+the complete test suite and validates every profile on that exact commit before
+the deployment job can start. The VPS then installs the lockfile with a bounded
+deadline, validates the packaged profiles, dry-runs each profile, and warms the
+shared bare mirrors. It does not rerun source-layout unit tests inside the live
+production state or from the `.git`-free archive. Only a fully verified immutable
+release is started by PM2. `current` and `previous` symlinks identify the retained
+releases; cron always runs `current` and writes locks and logs below the state
+root.
 
 The state root must be a real, deployment-user-owned directory with mode
 `0700`, under a non-writable real parent. The workflow creates it only when the

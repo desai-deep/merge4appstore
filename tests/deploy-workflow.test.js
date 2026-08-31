@@ -18,10 +18,13 @@ const parsedWorkflow = YAML.parse(workflow);
 const deployRun = parsedWorkflow.jobs.deploy.steps.find(step => step.name === 'Deploy to VPS').run;
 const setupSshRun = parsedWorkflow.jobs.deploy.steps.find(step => step.name === 'Setup SSH').run;
 const inspectRun = parsedWorkflow.jobs.deploy.steps.find(step => step.name === 'Inspect process and HTTPS support').run;
-const deploymentAlertScript = parsedWorkflow.jobs['deployment-alert'].steps
-  .find(step => step.name === 'Open or resolve the deployment alert').with.script;
+const deploymentAlertStep = parsedWorkflow.jobs['deployment-alert'].steps
+  .find(step => step.name === 'Open or resolve the deployment alert');
+const deploymentAlertScript = deploymentAlertStep.with.script;
 const reconciliationScript = parsedWorkflow.jobs['public-health-monitor'].steps
   .find(step => step.name === 'Reconcile the latest main-branch deployment alert').with.script;
+const publicHealthAlertScript = parsedWorkflow.jobs['public-health-monitor'].steps
+  .find(step => step.name === 'Open service health alert').with.script;
 const expectedDeploymentScript = parsedWorkflow.jobs['public-health-monitor'].steps
   .find(step => step.name === 'Resolve expected main deployment').with.script;
 const publicHealthRun = parsedWorkflow.jobs['public-health-monitor'].steps
@@ -132,14 +135,25 @@ cat "$fixture"
   return { result, home, fixtures };
 }
 
-async function runGithubScript(script, { github, context, core, environment = {} }) {
+async function runGithubScript(script, {
+  github,
+  context,
+  core,
+  environment = {},
+  fetchImpl = globalThis.fetch,
+}) {
   const previous = new Map();
   for (const [name, value] of Object.entries(environment)) {
     previous.set(name, process.env[name]);
     process.env[name] = value;
   }
   try {
-    return await new AsyncFunction('github', 'context', 'core', script)(github, context, core);
+    return await new AsyncFunction('github', 'context', 'core', 'fetch', script)(
+      github,
+      context,
+      core,
+      fetchImpl,
+    );
   } finally {
     for (const [name, value] of previous) {
       if (value === undefined) delete process.env[name];
@@ -374,7 +388,13 @@ test('builds immutable marked releases without mutating the control checkout', (
   assert.match(workflow, /merge4appstore-release-v1/);
   assert.match(workflow, /bash \"\$candidate_release\/scripts\/deploy-vps\.sh\"/);
   assert.doesNotMatch(workflow, /git reset --hard|git checkout --force/);
-  assert.match(deployScript, /timeout 10m npm ci --omit=dev && npm test && npm run validate:profiles/);
+  assert.equal(parsedWorkflow.jobs.deploy.needs, 'test');
+  const ciCommands = parsedWorkflow.jobs.test.steps.map(step => step.run).filter(Boolean);
+  assert.ok(ciCommands.includes('npm test'));
+  assert.ok(ciCommands.includes('npm run validate:profiles'));
+  assert.match(deployScript, /timeout --kill-after=30s 10m npm ci --omit=dev/);
+  assert.match(deployScript, /timeout --kill-after=10s 1m npm run validate:profiles/);
+  assert.doesNotMatch(deployScript, /npm test/);
   assert.match(deployScript, /if ! \(cd \"\$CANDIDATE_RELEASE\" && timeout 2m npm run prepare:mirrors\); then/);
 });
 
@@ -922,7 +942,7 @@ test('enforces disk headroom only after transaction recovery and again before cu
   const main = deployScript.slice(deployScript.indexOf('# A new release is already staged'));
   const recovery = main.indexOf('recover_interrupted_transactions "$transaction_dir"');
   const firstGate = main.indexOf('ensure_disk_headroom "$STATE_DIR"');
-  const install = main.indexOf('timeout 10m npm ci');
+  const install = main.indexOf('npm ci --omit=dev');
   const secondGate = main.indexOf('ensure_disk_headroom "$STATE_DIR"', firstGate + 1);
   const nginxSwitch = main.indexOf('write_transaction_phase nginx-switching');
   assert.ok(recovery >= 0 && recovery < firstGate && firstGate < install);
@@ -1343,7 +1363,7 @@ test('retries transient deployment probes with bounded diagnostics', () => {
   assert.match(deployScript, /GitHub hook listing[\s\S]* 4[\s\S]*timeout 30s[\s\S]*gh api --paginate --slurp/);
   assert.match(deployScript, /GitHub hook update[\s\S]* 4[\s\S]*timeout 30s/);
   assert.match(deployScript, /GitHub hook creation[\s\S]* 4[\s\S]*timeout 30s/);
-  assert.match(deployScript, /timeout 10m npm ci/);
+  assert.match(deployScript, /timeout --kill-after=30s 10m npm ci/);
   assert.match(deployScript, /WARNING: Git mirror prewarming failed/);
   assert.match(deployScript, /attempt \$attempt\/\$max_attempts/);
 });
@@ -1368,6 +1388,7 @@ test('publishes deploy failures and monitors public health out of band', () => {
   }
   assert.ok(parsedWorkflow.jobs['deployment-alert']);
   assert.ok(parsedWorkflow.jobs['public-health-monitor']);
+  assert.match(deploymentAlertStep.env.HEALTH_URL, /MERGE4APPSTORE_HEALTH_URL/);
   assert.match(workflow, /merge4appstore:deployment-failure/);
   assert.match(workflow, /merge4appstore:public-health-failure/);
   assert.match(workflow, /deployed !== expected/);
@@ -1381,8 +1402,18 @@ test('publishes deploy failures and monitors public health out of band', () => {
   assert.match(workflow, /rerun failed jobs from the Actions run/);
   assert.match(deploymentAlertScript, /transaction journal resumes finalization safely/);
   assert.match(deploymentAlertScript, /revert that commit on main/);
+  assert.match(deploymentAlertScript, /AbortSignal\.timeout\(15_000\)/);
+  assert.match(deploymentAlertScript, /Post-failure public health/);
+  assert.ok(deploymentAlertScript.indexOf('healthSummary = await') < deploymentAlertScript.indexOf('issues.listForRepo'));
   assert.match(reconciliationScript, /transaction journal resumes finalization safely/);
   assert.match(reconciliationScript, /revert that commit on main/);
+  assert.match(reconciliationScript, /AbortSignal\.timeout\(15_000\)/);
+  assert.match(reconciliationScript, /Post-failure public health/);
+  assert.ok(reconciliationScript.indexOf('healthSummary = await') < reconciliationScript.indexOf('issues.listForRepo'));
+  for (const script of [deploymentAlertScript, publicHealthAlertScript, reconciliationScript]) {
+    assert.match(script, /issues\.addAssignees/);
+    assert.match(script, /Could not assign .* to repository owner/);
+  }
   assert.doesNotMatch(deploymentAlertScript, /available for rollback/);
   assert.match(workflow, /--proto '=https' --proto-redir '=https'/);
   assert.match(workflow, /origin_main="\$\(git -C "\$DEPLOY_DIR" rev-parse origin\/main\)"/);
@@ -1391,6 +1422,8 @@ test('publishes deploy failures and monitors public health out of band', () => {
   assert.match(workflow, /dispatchWindow\.length === 100/);
   assert.match(workflow, /Number\(deployment\.run_number\) < oldestVisibleDispatch/);
   assert.match(workflow, /Persistent state parent must be writable for the first deployment/);
+  assert.match(deployScript, /Deployment rollback completed; the previous service topology was verified/);
+  assert.match(deployScript, /Deployment cleanup completed before service cutover/);
 });
 
 test('requires public health to report the exact current main deployment and schema', async t => {
@@ -1527,8 +1560,123 @@ test('does not let a stale direct run mutate the deployment alert', async () => 
   assert.ok(calls.some(value => /not for the current main commit/.test(value)));
 });
 
+test('does not let main advance during failure-health collection before alert mutation', async () => {
+  let branchLookups = 0;
+  const calls = [];
+  await runGithubScript(deploymentAlertScript, {
+    github: {
+      rest: {
+        repos: {
+          getBranch: async () => {
+            branchLookups += 1;
+            return { data: { commit: { sha: branchLookups === 1 ? 'current-main' : 'new-main' } } };
+          },
+        },
+        issues: {
+          listForRepo: async () => { calls.push('issue-list'); throw new Error('must not list issues'); },
+        },
+      },
+    },
+    context: {
+      eventName: 'push',
+      sha: 'current-main',
+      repo: { owner: 'owner', repo: 'repo' },
+      serverUrl: 'https://github.example',
+      runId: 2,
+    },
+    core: {
+      info: message => calls.push(message),
+      warning: message => calls.push(message),
+    },
+    environment: {
+      DEPLOY_OUTCOME: '',
+      TEST_RESULT: 'success',
+      DEPLOY_RESULT: 'failure',
+      HEALTH_URL: 'https://health.example.test/status',
+    },
+    fetchImpl: async () => ({
+      status: 200,
+      json: async () => ({ ok: true, degraded: false, deployment_sha: 'a'.repeat(40) }),
+    }),
+  });
+
+  assert.equal(branchLookups, 2);
+  assert.equal(calls.includes('issue-list'), false);
+  assert.ok(calls.some(value => /Main advanced while collecting failure health/.test(value)));
+});
+
+test('deployment failure alert records rollback health and assigns the owner without coupling publication', async () => {
+  const created = [];
+  const assignments = [];
+  const warnings = [];
+  const deploymentSha = 'a'.repeat(40);
+  await runGithubScript(deploymentAlertScript, {
+    github: {
+      rest: {
+        repos: {
+          getBranch: async () => ({ data: { commit: { sha: 'current-main' } } }),
+        },
+        issues: {
+          listForRepo: async () => ({ data: [] }),
+          create: async request => {
+            created.push(request);
+            return { data: { number: 46 } };
+          },
+          addAssignees: async request => {
+            assignments.push(request);
+            throw new Error('fixture assignment failure');
+          },
+        },
+        search: {
+          issuesAndPullRequests: async () => ({ data: { items: [] } }),
+        },
+      },
+    },
+    context: {
+      eventName: 'push',
+      sha: 'current-main',
+      repo: { owner: 'owner', repo: 'repo' },
+      serverUrl: 'https://github.example',
+      runId: 123,
+    },
+    core: {
+      info() {},
+      warning: message => warnings.push(message),
+    },
+    environment: {
+      DEPLOY_OUTCOME: '',
+      TEST_RESULT: 'success',
+      DEPLOY_RESULT: 'failure',
+      HEALTH_URL: 'https://health.example.test/status',
+    },
+    fetchImpl: async (url, options) => {
+      assert.equal(String(url), 'https://health.example.test/status');
+      assert.equal(options.redirect, 'error');
+      assert.ok(options.signal instanceof AbortSignal);
+      return {
+        status: 200,
+        json: async () => ({ ok: true, degraded: false, deployment_sha: deploymentSha }),
+      };
+    },
+  });
+
+  assert.equal(created.length, 1);
+  assert.match(
+    created[0].body,
+    new RegExp(`Post-failure public health: HTTP 200; ok=true; degraded=false; deployment SHA=${deploymentSha}`),
+  );
+  assert.deepEqual(assignments, [{
+    owner: 'owner',
+    repo: 'repo',
+    issue_number: 46,
+    assignees: ['owner'],
+  }]);
+  assert.ok(warnings.some(message => /Could not assign deployment alert/.test(message)));
+});
+
 test('reconciles manual recovery, excludes inspections, and fails closed on saturated history', async t => {
   const marker = '<!-- merge4appstore:deployment-failure -->';
+  const deploymentSha = 'b'.repeat(40);
   const runCase = async ({ pushes, dispatches }) => {
     const actions = [];
     const github = {
@@ -1551,6 +1699,7 @@ test('reconciles manual recovery, excludes inspections, and fails closed on satu
           createComment: async request => { actions.push(['comment', request]); },
           update: async request => { actions.push(['update', request]); },
           create: async request => { actions.push(['create', request]); },
+          addAssignees: async request => { actions.push(['assign', request]); },
         },
         search: {
           issuesAndPullRequests: async () => ({ data: { items: [] } }),
@@ -1562,6 +1711,14 @@ test('reconciles manual recovery, excludes inspections, and fails closed on satu
       github,
       context: { repo: { owner: 'owner', repo: 'repo' } },
       core: { warning: message => warnings.push(message) },
+      environment: { HEALTH_URL: 'https://health.example.test/status' },
+      fetchImpl: async url => {
+        assert.equal(String(url), 'https://health.example.test/status');
+        return {
+          status: 200,
+          json: async () => ({ ok: true, degraded: false, deployment_sha: deploymentSha }),
+        };
+      },
     });
     return { actions, warnings };
   };
@@ -1592,6 +1749,11 @@ test('reconciles manual recovery, excludes inspections, and fails closed on satu
       }],
     });
     assert.ok(actions.some(([action, request]) => action === 'update' && request.state === 'open'));
+    assert.ok(actions.some(([action, request]) => action === 'assign' && request.issue_number === 9));
+    assert.ok(actions.some(([action, request]) => (
+      action === 'update'
+      && request.body.includes(`Post-failure public health: HTTP 200; ok=true; degraded=false; deployment SHA=${deploymentSha}`)
+    )));
   });
 
   await t.test('a later rerun wins even though it keeps its original run number', async () => {
