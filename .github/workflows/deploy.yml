@@ -204,6 +204,105 @@ jobs:
               console.log(`disk_available_bytes=${available} disk_total_bytes=${total} disk_required_bytes=${required}`);
               if (available < required) throw new Error("Insufficient disk headroom for deployment");
             '
+            inspect_git_mirrors() {
+              current_pointer="$state_dir/current"
+              if [ ! -e "$current_pointer" ] && [ ! -L "$current_pointer" ]; then
+                echo "git_mirrors=not-yet-installed"
+                return
+              fi
+              state_root="$(readlink -f -- "$state_dir")" \
+                || { echo "Persistent state directory cannot be resolved"; return 1; }
+              current_pointer="$state_root/current"
+              [ -L "$current_pointer" ] \
+                || { echo "Current release pointer is not a symlink"; return 1; }
+              current_release="$(readlink -f -- "$current_pointer")" \
+                || { echo "Current release pointer is dangling"; return 1; }
+              case "$current_release" in
+                "$state_root/releases/"*) ;;
+                *) echo "Current release pointer escapes the private releases directory"; return 1 ;;
+              esac
+              [ -d "$current_release" ] && [ ! -L "$current_release" ] && [ -O "$current_release" ] \
+                && [ "$(stat -c '%a' "$current_release")" = 700 ] \
+                || { echo "Current release directory is missing or unsafe"; return 1; }
+              release_marker="$current_release/.merge4appstore-release"
+              deployment_sha_file="$current_release/.merge4appstore-deployment-sha"
+              for release_file in "$release_marker" "$deployment_sha_file"; do
+                [ -f "$release_file" ] && [ ! -L "$release_file" ] && [ -O "$release_file" ] \
+                  && [ "$(stat -c '%a' "$release_file")" = 600 ] \
+                  || { echo "Current release marker is missing or unsafe"; return 1; }
+              done
+              [ "$(cat "$release_marker")" = merge4appstore-release-v1 ] \
+                || { echo "Current release marker is invalid"; return 1; }
+              current_sha="$(cat "$deployment_sha_file")"
+              case "$current_sha" in
+                *[!0-9a-fA-F]*|'') echo "Current release deployment SHA is invalid"; return 1 ;;
+              esac
+              [ "${#current_sha}" -eq 40 ] \
+                || { echo "Current release deployment SHA is invalid"; return 1; }
+              case "$(basename -- "$current_release")" in
+                "$current_sha-"*) ;;
+                *) echo "Current release directory does not match its deployment SHA"; return 1 ;;
+              esac
+              GIT_NO_REPLACE_OBJECTS=1 git -C "$DEPLOY_DIR" cat-file -e "$current_sha^{commit}" \
+                || { echo "Current release deployment commit is unavailable"; return 1; }
+              if ! tracked_mirror_script="$(GIT_NO_REPLACE_OBJECTS=1 git -C "$DEPLOY_DIR" \
+                ls-tree --name-only "$current_sha" -- scripts/prepare-git-mirrors.js)"; then
+                echo "Current release tree could not be inspected"
+                return 1
+              fi
+              case "$tracked_mirror_script" in
+                '') echo "git_mirrors=legacy-release"; return ;;
+                scripts/prepare-git-mirrors.js) ;;
+                *) echo "Current release tree returned an unexpected mirror script path"; return 1 ;;
+              esac
+              [ -f "$current_release/scripts/prepare-git-mirrors.js" ] \
+                && [ ! -L "$current_release/scripts/prepare-git-mirrors.js" ] \
+                && [ -O "$current_release/scripts/prepare-git-mirrors.js" ] \
+                || { echo "Current mirror preparation script is unsafe"; return 1; }
+              mirrors_dir="$state_root/mirrors"
+              [ -d "$mirrors_dir" ] && [ ! -L "$mirrors_dir" ] && [ -O "$mirrors_dir" ] \
+                && [ "$(stat -c '%a' "$mirrors_dir")" = 700 ] \
+                || { echo "Git mirror directory is missing or unsafe"; exit 1; }
+              shopt -s nullglob
+              temporary_mirrors=("$mirrors_dir"/*.tmp-*)
+              [ "${#temporary_mirrors[@]}" -eq 0 ] \
+                || { echo "Abandoned Git mirror initialization is present"; exit 1; }
+              mirrors=("$mirrors_dir"/*.git)
+              [ "${#mirrors[@]}" -gt 0 ] || { echo "No Git mirrors are initialized"; exit 1; }
+              jams_mirrors=0
+              runningorder_mirrors=0
+              for mirror in "${mirrors[@]}"; do
+                [ -d "$mirror" ] && [ ! -L "$mirror" ] && [ -O "$mirror" ] \
+                  && [ "$(stat -c '%a' "$mirror")" = 700 ] \
+                  || { echo "Git mirror is not an owned private directory"; exit 1; }
+                [ "$(git -C "$mirror" rev-parse --is-bare-repository)" = true ] \
+                  || { echo "Git mirror is not bare"; exit 1; }
+                identity="$(git -C "$mirror" config --get merge4appstore.repository)"
+                origin="$(git -C "$mirror" remote get-url origin)"
+                case "$identity|$origin" in
+                  desai-deep/jamsontoast\|https://github.com/desai-deep/JamsOnToast.git)
+                    jams_mirrors="$((jams_mirrors + 1))"
+                    ;;
+                  desai-deep/runningorder-ios\|https://github.com/desai-deep/runningorder-ios.git)
+                    runningorder_mirrors="$((runningorder_mirrors + 1))"
+                    ;;
+                  *) echo "Git mirror identity or credential-free origin is unexpected"; exit 1 ;;
+                esac
+                [ "$(git -C "$mirror" config --get remote.origin.promisor)" = true ] \
+                  && [ "$(git -C "$mirror" config --get remote.origin.partialclonefilter)" = blob:none ] \
+                  || { echo "Git mirror is not a blobless partial clone"; exit 1; }
+                refresh_stamp="$mirror/.merge4appstore-refresh"
+                [ -f "$refresh_stamp" ] && [ ! -L "$refresh_stamp" ] && [ -O "$refresh_stamp" ] \
+                  && [ "$(stat -c '%a' "$refresh_stamp")" = 600 ] \
+                  || { echo "Git mirror refresh stamp is missing or unsafe"; exit 1; }
+                GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0 \
+                  timeout --kill-after=5s 30s git -C "$mirror" fsck --connectivity-only --no-dangling
+                echo "git_mirror=$identity:ready"
+              done
+              [ "$jams_mirrors" -eq 1 ] && [ "$runningorder_mirrors" -eq 1 ] \
+                || { echo "Expected exactly one ready mirror for each configured repository"; exit 1; }
+            }
+            inspect_git_mirrors
             node_binary="$(readlink -f -- "$(command -v node)")"
             pm2_home="${PM2_HOME:-$HOME/.pm2}"
             pm2_unit="${MERGE4APPSTORE_PM2_STARTUP_UNIT:-pm2-$(id -un).service}"

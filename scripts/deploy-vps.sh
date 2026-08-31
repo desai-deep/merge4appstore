@@ -2030,8 +2030,8 @@ fi
 
 export MERGE4APPSTORE_ENV="$CONTROL_ENV"
 export MERGE4APPSTORE_STATE_DIR="$STATE_DIR"
-if ! (cd "$CANDIDATE_RELEASE" && timeout 2m npm run prepare:mirrors); then
-  echo "WARNING: Git mirror prewarming failed; authenticated preparation smoke will verify stale-mirror or provider fallback" >&2
+if ! (cd "$CANDIDATE_RELEASE" && timeout --kill-after=30s 15m npm run prepare:mirrors); then
+  fail "Git mirror prewarming failed before cutover"
 fi
 
 shopt -s nullglob

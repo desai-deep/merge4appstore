@@ -14,9 +14,71 @@ import {
   GitMirror,
   resolveStateDirectory,
 } from '../lib/git-mirror.js';
+import { prewarmGitMirrors } from '../scripts/prepare-git-mirrors.js';
 
 const execFileAsync = promisify(execFile);
 const stateDirectoryWorker = fileURLToPath(new URL('./fixtures/state-directory-worker.js', import.meta.url));
+
+test('keeps request-time mirror initialization within the steady-state command budget', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge4appstore-mirror-budget-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const mirror = new GitMirror('example', 'runtime', {
+    stateDirectory: path.join(root, 'state'),
+    commandTimeoutMs: 12_345,
+  });
+
+  assert.equal(mirror.commandTimeoutMs, 12_345);
+  assert.equal(mirror.cloneTimeoutMs, 12_345);
+});
+
+test('prewarms every repository sequentially and aggregates per-repository failures', async () => {
+  const events = [];
+  const messages = [];
+  const repositories = new Map([
+    ['example/first', { owner: 'example', name: 'first' }],
+    ['example/second', { owner: 'example', name: 'second' }],
+    ['example/third', { owner: 'example', name: 'third' }],
+  ]);
+  const failures = new Map([
+    ['first', new Error('first clone timed out')],
+    ['third', new Error('third fetch failed')],
+  ]);
+
+  await assert.rejects(
+    prewarmGitMirrors(repositories, {
+      mirrorFor: (owner, repository) => ({
+        refresh: async options => {
+          events.push(`${owner}/${repository}:start`);
+          assert.deepEqual(options, { force: true });
+          if (failures.has(repository)) throw failures.get(repository);
+          events.push(`${owner}/${repository}:ready`);
+        },
+      }),
+      logger: {
+        log: message => messages.push(message),
+        error: message => messages.push(message),
+      },
+    }),
+    error => {
+      assert.equal(error instanceof AggregateError, true);
+      assert.equal(error.message, 'Could not prepare 2 Git mirror(s): example/first, example/third');
+      assert.deepEqual(error.errors, [...failures.values()]);
+      return true;
+    },
+  );
+
+  assert.deepEqual(events, [
+    'example/first:start',
+    'example/second:start',
+    'example/second:ready',
+    'example/third:start',
+  ]);
+  assert.deepEqual(messages, [
+    'Git mirror failed: example/first: first clone timed out',
+    'Git mirror ready: example/second',
+    'Git mirror failed: example/third: third fetch failed',
+  ]);
+});
 
 test('accepts only Git releases that enforce GIT_NO_LAZY_FETCH', () => {
   for (const version of [
@@ -174,6 +236,8 @@ test('initializes one atomic, private, blobless bare mirror for concurrent calle
   let cloneCalls = 0;
   let connectivityChecks = 0;
   let cloneArgs;
+  let cloneTimeoutMs;
+  const steadyStateTimeouts = [];
   let cloneFinished;
   let releaseClone;
   const cloneReady = new Promise(resolve => { cloneFinished = resolve; });
@@ -184,14 +248,19 @@ test('initializes one atomic, private, blobless bare mirror for concurrent calle
     if (args[0] === 'clone') {
       cloneCalls += 1;
       cloneArgs = args;
+      cloneTimeoutMs = options.timeoutMs;
       cloneFinished();
       await cloneGate;
+    } else {
+      steadyStateTimeouts.push(options.timeoutMs);
     }
     return result;
   };
   const options = {
     stateDirectory: fixture.stateDirectory,
     remoteUrl: fixture.remoteUrl,
+    commandTimeoutMs: 23_456,
+    cloneTimeoutMs: 78_901,
     run,
   };
   const first = new GitMirror('example', 'ios', options);
@@ -211,6 +280,9 @@ test('initializes one atomic, private, blobless bare mirror for concurrent calle
   const initializationConnectivityChecks = connectivityChecks;
   assert.ok(initializationConnectivityChecks >= 1);
   assert.deepEqual(cloneArgs.slice(0, 3), ['clone', '--mirror', '--filter=blob:none']);
+  assert.equal(cloneTimeoutMs, 78_901);
+  assert.ok(steadyStateTimeouts.length > 0);
+  assert.deepEqual(new Set(steadyStateTimeouts), new Set([23_456]));
   assert.equal(await output(['-C', first.mirrorPath, 'rev-parse', '--is-bare-repository']), 'true');
   assert.equal(await output(['-C', first.mirrorPath, 'remote', 'get-url', 'origin']), fixture.remoteUrl);
   assert.equal(await output([

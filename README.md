@@ -637,14 +637,17 @@ room for the journal, mirrors, delivery receipts, dependencies, and bounded
 logs instead of discovering a full disk during cutover.
 
 The workflow retries idempotent GitHub, authenticated preparation, and public
-health probes with bounded exponential backoff. Mirror prewarming is best effort:
-an authenticated preparation smoke test still verifies the safe API fallback
-when a transient fetch cannot refresh a valid stale mirror. A persistent
-test/deploy failure opens a marked GitHub issue containing the Actions run and
-rerun instructions, without masking the failed job; a later successful
-deployment closes it. A separate five-minute workflow checks public health and
-reconciles the latest completed main-branch deployment result even when no
-deployment is running. Set repository variable
+health probes with bounded exponential backoff. Before cutover, it prewarms
+every configured Git mirror sequentially with the longer clone budget. Any
+mirror failure rejects the candidate while the previous production release
+remains selected, so the deployment-alert issue makes the degraded optimization
+visible; rerun the failed workflow after the transient cause clears. Runtime
+requests retain the shorter mirror-command budget and safe provider fallback.
+A persistent test/deploy failure opens a marked GitHub issue containing the
+Actions run and rerun instructions, without masking the failed job; a later
+successful deployment closes it. A separate five-minute workflow checks public
+health and reconciles the latest completed main-branch deployment result even
+when no deployment is running. Set repository variable
 `MERGE4APPSTORE_HEALTH_URL` only when the public endpoint differs from the
 documented default.
 
@@ -694,7 +697,8 @@ requires `APP_BUNDLE_ID`, `APP_NAME`, `GITHUB_REPO_OWNER`, and
 | `MERGE4APPSTORE_LOCK_WAIT_MS` | Maximum time to wait for another job for the same repository (default `600000`) |
 | `MERGE4APPSTORE_STATE_DIR` | Absolute private directory for persistent Git mirrors and deployment coordination (default `~/.local/state/merge4appstore`) |
 | `MERGE4APPSTORE_MIRROR_TTL_MS` | Minimum interval between successful mirror refreshes (default `60000`) |
-| `MERGE4APPSTORE_MIRROR_TIMEOUT_MS` | Timeout for each mirror Git command (default `15000`) |
+| `MERGE4APPSTORE_MIRROR_TIMEOUT_MS` | Timeout for each steady-state mirror Git command (default `15000`) |
+| `MERGE4APPSTORE_MIRROR_CLONE_TIMEOUT_MS` | Timeout used by `prepare:mirrors` for each first-time blobless clone (default `120000`); request-time initialization retains the shorter command timeout so provider fallback fits inside the request deadline |
 | `MERGE4APPSTORE_MIRROR_LOCK_TIMEOUT_MS` | Maximum wait for a concurrent mirror mutation (default `60000`) |
 | `MERGE4APPSTORE_MIRROR_RETRY_BACKOFF_MS` | Backoff before retrying an unavailable mirror (default `5000`) |
 | `MERGE4APPSTORE_MIRROR_CANDIDATE_LIMIT` | Maximum eligible local build ancestors to check in newest-first order, including branch-unknown candidates (default and maximum `20`) |
