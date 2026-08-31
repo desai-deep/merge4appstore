@@ -700,6 +700,83 @@ test('normalizes one Xcode Cloud build run', async () => {
   });
 });
 
+test('resolves the source and exact uploaded builds for post-build notes', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.request = async endpoint => {
+    if (endpoint.startsWith('/ciBuildRuns/run-141?')) {
+      return {
+        data: {
+          id: 'run-141',
+          attributes: {
+            number: 141,
+            completionStatus: 'SUCCEEDED',
+            sourceCommit: { commitSha: 'abcdef1234567890' },
+          },
+          relationships: {
+            workflow: { data: { id: 'workflow-pr' } },
+            sourceBranchOrTag: { data: { id: 'source-ref' } },
+            pullRequest: { data: { id: 'pull-request' } },
+          },
+        },
+        included: [{
+          type: 'scmGitReferences',
+          id: 'source-ref',
+          attributes: { canonicalName: 'refs/heads/feature/player' },
+        }, {
+          type: 'scmPullRequests',
+          id: 'pull-request',
+          attributes: {
+            number: 42,
+            sourceBranchName: 'feature/player',
+            destinationBranchName: 'develop',
+          },
+        }],
+      };
+    }
+    assert.match(endpoint, /^\/ciBuildRuns\/run-141\/builds\?/);
+    return {
+      data: [{
+        id: 'build-141',
+        attributes: { version: '141', processingState: 'VALID' },
+      }],
+    };
+  };
+
+  assert.deepEqual(await asc.getBuildRunNotesContext('run-141'), {
+    runId: 'run-141',
+    workflowId: 'workflow-pr',
+    number: 141,
+    completionStatus: 'SUCCEEDED',
+    commitSha: 'abcdef1234567890',
+    branch: 'feature/player',
+    targetBranch: 'develop',
+    pullRequest: '42',
+    builds: [{
+      buildId: 'build-141',
+      buildNumber: '141',
+      processingState: 'VALID',
+    }],
+  });
+});
+
+test('normalizes alternate Xcode Cloud source commit representations for notes', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  let sourceCommit = 'abcdef1234567890';
+  asc.request = async endpoint => endpoint.includes('/builds?')
+    ? { data: [] }
+    : {
+      data: {
+        id: 'run-142',
+        attributes: { completionStatus: 'SUCCEEDED', sourceCommit },
+        relationships: { workflow: { data: { id: 'workflow-pr' } } },
+      },
+    };
+
+  assert.equal((await asc.getBuildRunNotesContext('run-142')).commitSha, 'abcdef1234567890');
+  sourceCommit = { canonicalHash: 'fedcba0987654321' };
+  assert.equal((await asc.getBuildRunNotesContext('run-142')).commitSha, 'fedcba0987654321');
+});
+
 test('reuses an empty review draft instead of creating another submission', async () => {
   const asc = createASCWithVersions({ data: [] });
   asc.getReviewSubmissionIdForVersion = async () => null;

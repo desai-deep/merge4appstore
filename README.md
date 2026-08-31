@@ -98,6 +98,13 @@ repository:
   production_branch: main
   beta_branch: develop
 
+versioning:
+  initial_version: "1.1"
+
+ci:
+  version:
+    token_env: MERGE4APPSTORE_BUILD_TOKEN_EXAMPLE_IOS
+
 release_pull_request: true # optional; maintained centrally after branch pushes
 auto_rebase_pull_requests: true # optional; defaults to false
 
@@ -450,78 +457,60 @@ release_pull_request:
 This policy and its GitHub writes live in merge4appstore; app repositories do
 not need a release-PR workflow or checkout script.
 
-### Thin Xcode Cloud preparation
+### Pull-only Xcode versions
 
-App repositories no longer need App Store Connect or GitHub credentials in
-Xcode Cloud. Their post-clone hook sends build context and the committed
-marketing version to:
+merge4appstore keeps the current marketing versions as small, durable state
+under `MERGE4APPSTORE_STATE_DIR`. `versioning.initial_version` seeds a new
+profile. A successful or subsequently observed App Review submission preserves
+that version for production builds and advances pull-request and beta builds to
+the next minor version. When the release is observed live, production advances
+to the same next version. Repeated and out-of-order lifecycle observations are
+idempotent and cannot move either version backwards.
 
-```http
-POST /v1/builds/prepare/:instance
-Authorization: Bearer <repository-scoped token>
+Xcode Cloud fetches one plain-text value from the authenticated endpoint:
+
+```text
+GET /v1/builds/version/:instance?workflow_id=<xcode-workflow-id>
+Authorization: Bearer <profile-version-token>
+
+1.5
 ```
 
-The app client sends repository, commit, branch, and pull-request context. The
-service infers the build purpose from the repository profile, verifies that
-context and any optional purpose or workflow supplied by older clients, and
-returns the centrally selected marketing version, app role, and TestFlight
-notes as a versioned, provider-neutral response:
+The workflow identifier is matched to the profile's configured build purpose,
+so callers do not choose whether they receive the production or development
+version. The request reads only local durable state: it performs no GitHub,
+repository, or App Store Connect request and has no dependency on a source-code
+checkout. The service returns `503` rather than guessing if its state cannot be
+read safely.
 
-```json
-{
-  "schema_version": 1,
-  "role": "internal",
-  "purpose": "pull_request",
-  "marketing_version": "1.5",
-  "testflight_notes": "Verify playback controls\n\n• Fix lock-screen state",
-  "warnings": []
-}
-```
+Each app repository owns a small post-clone adapter that fetches and validates
+this value, then applies it to its own Xcode project, xcconfig, Tuist definition,
+or other project format. merge4appstore never writes the version into the app
+repository and does not need source-content access for this flow. The adapter
+does not create or populate `TestFlight/WhatToTest`; TestFlight notes are
+published after upload through the App Store Connect API.
 
-Preparation uses a persistent, blobless bare Git mirror for commit ancestry and
-subjects. The mirror has no working tree and does not check out repository
-source files. It downloads refs, commit objects, and tree metadata, but its
-initial and refresh fetches omit file-content blobs. A request performs at most
-one bounded mirror refresh instead of up to 20 sequential GitHub compare API
-calls, then evaluates eligible local ancestor candidates in newest-first order,
-hard-capped at 20 total. Identical preparations across both PM2 workers share a
-kernel lock and a private 60-second result cache; published-build history also
-has a 60-second cache, and a failed refresh is surfaced instead of serving a
-stale result. File-lock startup avoids a second Node.js cold start, waits for a
-timed-out helper to exit before retrying, and retries only helper-readiness
-timeouts; lock contention and permanent helper failures retain their distinct
-outcomes.
+The adapter needs only `MERGE4APPSTORE_URL` and the secret
+`MERGE4APPSTORE_BUILD_TOKEN`. Xcode Cloud supplies `CI_WORKFLOW_ID`; no branch,
+commit, pull-request, repository, GitHub, or App Store Connect credential is
+sent by the app script.
 
-The service returns dependency timeouts as `503 Service Unavailable` with a
-`Retry-After` header before the reverse proxy's deadline. Repository adapters
-should retry transient HTTP and transport failures with a bounded backoff,
-re-sending the same preparation payload. A completed 4xx response is not
-transient. If all retries fail, the Xcode Cloud build remains failed and can be
-rerun safely after service recovery; preparation does not make repository or
-App Store mutations.
+TestFlight commit history uses a persistent, blobless bare Git mirror. The
+mirror has no working tree and does not check out repository source files. It
+downloads refs, commit objects, and tree metadata, while initial and refresh
+fetches omit file-content blobs.
 
-The checked-out repository owns adapters that read its current marketing
-version and consume this response. That adapter may update an Xcode project,
-an xcconfig, a Tuist definition, or another project format; merge4appstore does
-not assume a project-generation tool. It should validate `schema_version` and
-`marketing_version` before applying the non-secret values, then run whatever
-project preparation command the app needs. The only
-Xcode Cloud secrets/configuration required for this adapter are:
-
-- `MERGE4APPSTORE_BUILD_TOKEN`: repository-scoped preparation credential;
-- `MERGE4APPSTORE_URL`: HTTPS service base URL.
-
-Profiles select the runtime secret name without storing its value:
-
-```yaml
-ci:
-  prepare:
-    token_env: MERGE4APPSTORE_BUILD_TOKEN_MY_REPOSITORY
-```
+After every successful Xcode Cloud completion, the durable webhook delivery
+resolves the exact uploaded build or builds from the completed run. It polls
+for up to 15 minutes until Apple reports each upload as valid, generates the
+notes centrally, and
+creates or updates the English `betaBuildLocalization` through the App Store
+Connect API. The just-uploaded build is excluded from published history so it
+cannot become its own comparison baseline.
 
 For pull-request builds, TestFlight notes contain every commit since the newest
-uploaded build from the same workflow whose commit is an ancestor of the
-current head, followed by the current PR body. The commit heading identifies
+earlier uploaded build from the same workflow whose commit is an ancestor of
+the current head, followed by the current PR body. The commit heading identifies
 that ancestor by marketing version and build number. The first build of a PR
 keeps the PR body first, labels the commits as belonging to the pull request,
 and falls back to all commits in that PR.
@@ -598,7 +587,7 @@ Every rollout snapshots the exact crontab and removes all managed
 migration does not disturb the legacy app on port 8787; it starts and
 authenticates the new app on 8788 after cron is quiesced. A private, durable gate
 file lets the new listener acknowledge arrivals into its queue but prevents
-their execution regardless of how long preparation takes.
+their execution throughout the candidate startup and validation window.
 The deployment persists both PM2 apps for reboot safety, switches nginx
 transactionally, verifies public health, commits the release pointers, and
 verifies that the legacy PM2 process has no descendant jobs or live legacy lock
@@ -646,15 +635,14 @@ least 1 GiB and 10% of the state filesystem to remain available. This leaves
 room for the journal, mirrors, delivery receipts, dependencies, and bounded
 logs instead of discovering a full disk during cutover.
 
-The workflow retries idempotent GitHub, authenticated preparation, and public
+The workflow retries idempotent GitHub, authenticated version, and public
 health probes with bounded exponential backoff. Before cutover, it prewarms
 every configured Git mirror sequentially with longer Git-command, fetch, and
 clone budgets. Each repository has a seven-minute deadline and one retry after
 a mirror reports a transient `503`; request-time mirror initialization is never
 retried.
-Runtime lock contention falls back after five seconds rather than consuming the
-45-second request deadline, while prewarming can wait up to 60 seconds for an
-active mutation to finish. An
+Runtime mirror lock contention falls back after five seconds, while prewarming
+can wait up to 60 seconds for an active mutation to finish. An
 exhausted or permanent mirror failure rejects the candidate while the previous
 production release remains selected, so the deployment-alert issue makes the
 degraded optimization visible; rerun the failed workflow after the reported
@@ -723,7 +711,6 @@ requires `APP_BUNDLE_ID`, `APP_NAME`, `GITHUB_REPO_OWNER`, and
 | `MERGE4APPSTORE_MIRROR_PREWARM_LOCK_TIMEOUT_MS` | Maximum deployment-prewarm wait for a concurrent mirror mutation (default `60000`) |
 | `MERGE4APPSTORE_MIRROR_RETRY_BACKOFF_MS` | Backoff before retrying an unavailable mirror (default `5000`) |
 | `MERGE4APPSTORE_MIRROR_CANDIDATE_LIMIT` | Maximum eligible local build ancestors to check in newest-first order, including branch-unknown candidates (default and maximum `20`) |
-| `MERGE4APPSTORE_PREPARE_TIMEOUT_MS` | Build-preparation HTTP deadline, kept below the proxy timeout (default `45000`) |
 | `MERGE4APPSTORE_DRAIN_TIMEOUT_MS` | Maximum graceful wait for acknowledged webhook work during PM2 generation handoff/shutdown (default `600000`) |
 | `MERGE4APPSTORE_LEGACY_DRAIN_QUIET_SECONDS` | Continuous no-child/no-live-lock window required before deleting the first-generation webhook process (default `30`) |
 | `MERGE4APPSTORE_MIN_FREE_BYTES` | Absolute free-space floor enforced by VPS deployment (default and minimum `1073741824`, 1 GiB) |

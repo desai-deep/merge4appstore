@@ -5,12 +5,25 @@ import {
   applyAutomationProfile,
   applyBuildPurposeProfile,
   applyRepositoryProfile,
+  loadRepositoryProfile,
   resolveAutoRebasePullRequests,
   resolveAutomation,
   resolveBuildPurpose,
   resolveReleasePullRequest,
   validateRepositoryProfile,
 } from '../lib/profile.js';
+
+test('tracked profiles seed the next marketing-version trains', () => {
+  const jamsOnToast = loadRepositoryProfile(
+    new URL('../profiles/jamsontoast.yml', import.meta.url),
+  );
+  const runningOrder = loadRepositoryProfile(
+    new URL('../profiles/runningorder.yml', import.meta.url),
+  );
+
+  assert.equal(jamsOnToast.versioning.initial_version, '1.4');
+  assert.equal(runningOrder.versioning.initial_version, '1.11');
+});
 
 function profileFixture() {
   return {
@@ -22,6 +35,7 @@ function profileFixture() {
       production_branch: 'main',
       beta_branch: 'develop',
     },
+    versioning: { initial_version: '1.1' },
     apps: {
       prod: {
         app_id: 'prod-id',
@@ -280,6 +294,30 @@ test('rejects unsupported profile versions', () => {
   const profile = profileFixture();
   profile.version = 2;
   assert.throws(() => validateRepositoryProfile(profile), /version must be 1/);
+});
+
+test('requires a valid initial marketing version', () => {
+  const missing = profileFixture();
+  delete missing.versioning;
+  assert.throws(() => validateRepositoryProfile(missing), /versioning must be a mapping/);
+
+  for (const version of ['', '1', '1.x', '1.2.3.4']) {
+    const profile = profileFixture();
+    profile.versioning.initial_version = version;
+    assert.throws(() => validateRepositoryProfile(profile), /versioning\.initial_version/);
+  }
+});
+
+test('accepts only the version-token CI configuration', () => {
+  const profile = profileFixture();
+  profile.ci = { version: { token_env: 'APP_VERSION_TOKEN' } };
+  assert.equal(validateRepositoryProfile(profile).ci.version.token_env, 'APP_VERSION_TOKEN');
+
+  profile.ci = { prepare: { token_env: 'OLD_TOKEN' } };
+  assert.throws(() => validateRepositoryProfile(profile), /ci\.prepare is not supported/);
+
+  profile.ci = { version: { response_file: 'version.txt' } };
+  assert.throws(() => validateRepositoryProfile(profile), /ci\.version\.response_file is not supported/);
 });
 
 test('rejects webhook keys unsupported by their provider', () => {
