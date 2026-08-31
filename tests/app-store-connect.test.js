@@ -49,6 +49,185 @@ function createASCWithVersions(versions) {
   return asc;
 }
 
+test('keeps a final non-JSON proxy failure retryable', async t => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.generateToken = () => 'token';
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('<html>bad gateway</html>', { status: 502 });
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  await assert.rejects(
+    asc.request('/apps', {}, { maxRetries: 0 }),
+    error => error.statusCode === 502
+      && error.retryAfter === 5
+      && /bad gateway/.test(error.message),
+  );
+});
+
+test('keeps a final empty rate-limit response retryable', async t => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.generateToken = () => 'token';
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('', {
+    status: 429,
+    headers: { 'retry-after': '3600' },
+  });
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  await assert.rejects(
+    asc.request('/apps', {}, { maxRetries: 0, maxDelayMs: 1 }),
+    error => error.statusCode === 429 && error.retryAfter === 5,
+  );
+});
+
+test('retries malformed successful responses instead of accepting empty App Store data', async t => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.generateToken = () => 'token';
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return calls === 1
+      ? new Response('<html>proxy success page</html>', { status: 200 })
+      : Response.json({ data: [{ id: 'app-1' }] });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  assert.deepEqual(
+    await asc.request('/apps', {}, { maxRetries: 1, initialDelayMs: 0, maxDelayMs: 0 }),
+    { data: [{ id: 'app-1' }] },
+  );
+  assert.equal(calls, 2);
+});
+
+test('keeps a final malformed successful response retryable by the caller', async t => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.generateToken = () => 'token';
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('not-json', { status: 200 });
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  await assert.rejects(
+    asc.request('/apps', {}, { maxRetries: 0 }),
+    error => error.statusCode === 503
+      && error.retryAfter === 5
+      && /malformed JSON/.test(error.message),
+  );
+});
+
+test('does not repeat a non-idempotent POST after an ambiguous successful response', async t => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.generateToken = () => 'token';
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response('truncated-json', { status: 201 });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  await assert.rejects(
+    asc.request('/ciBuildRuns', { method: 'POST', body: '{}' }, {
+      maxRetries: 2,
+      initialDelayMs: 0,
+      maxDelayMs: 0,
+    }),
+    error => error.statusCode === 503
+      && error.code === 'EAMBIGUOUSRESULT'
+      && error.ambiguousResult === true
+      && /must be reconciled/.test(error.message),
+  );
+  assert.equal(calls, 1);
+});
+
+test('treats a body-less successful POST as ambiguous instead of repeating the create', async t => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.generateToken = () => 'token';
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(null, { status: 204 });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  await assert.rejects(
+    asc.request('/ciBuildRuns', { method: 'POST', body: '{}' }, { maxRetries: 2 }),
+    error => error.code === 'EAMBIGUOUSRESULT'
+      && error.ambiguousResult === true
+      && /HTTP 204/.test(error.message),
+  );
+  assert.equal(calls, 1);
+});
+
+test('accepts HTTP 204 for response-less update and delete endpoints', async t => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.generateToken = () => 'token';
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(null, { status: 204 });
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  assert.equal(await asc.request('/appStoreVersions/version-1', { method: 'PATCH' }), null);
+  assert.equal(await asc.request('/appScreenshots/screenshot-1', { method: 'DELETE' }), null);
+});
+
+test('does not accept HTTP 204 as a successful GET representation', async t => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.generateToken = () => 'token';
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(null, { status: 204 });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  await assert.rejects(
+    asc.request('/apps', {}, { maxRetries: 1, initialDelayMs: 0, maxDelayMs: 0 }),
+    error => error.statusCode === 503 && /malformed JSON/.test(error.message),
+  );
+  assert.equal(calls, 2);
+});
+
+test('does not generically retry non-idempotent network, timeout, or 5xx outcomes', async t => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.generateToken = () => 'token';
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  for (const [name, fetchImplementation] of [
+    ['network', async () => { throw new TypeError('fetch failed'); }],
+    ['timeout', async (_url, { signal }) => new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    })],
+    ['server error', async () => Response.json({ errors: [{ detail: 'upstream unavailable' }] }, { status: 503 })],
+    ['rate limit', async () => Response.json({ errors: [{ detail: 'rate limited' }] }, { status: 429 })],
+  ]) {
+    await t.test(name, async () => {
+      let calls = 0;
+      globalThis.fetch = async (...args) => {
+        calls += 1;
+        return fetchImplementation(...args);
+      };
+      await assert.rejects(
+        asc.request('/reviewSubmissions/submission-1', {
+          method: 'PATCH',
+          body: '{}',
+        }, {
+          maxRetries: 2,
+          initialDelayMs: 0,
+          maxDelayMs: 0,
+          requestTimeoutMs: 5,
+        }),
+        error => error.code === 'EAMBIGUOUSRESULT'
+          && error.ambiguousResult === true
+          && /must be reconciled/.test(error.message),
+      );
+      assert.equal(calls, 1);
+    });
+  }
+});
+
 test('uses App Store Connect resources for release-editable text metadata', async () => {
   const asc = createASCWithVersions({ data: [] });
   asc.appId = 'app-1';
@@ -198,6 +377,210 @@ test('protects an active branch run before Xcode Cloud exposes its commit', asyn
         runId: 'run-140',
         number: 140,
         executionProgress: 'PENDING',
+      },
+    },
+  );
+});
+
+test('matches a hidden-commit branch run by relationship id without included data', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.getBuildRuns = async () => ({
+    data: [{
+      id: 'run-main',
+      attributes: {
+        number: 140,
+        sourceCommit: null,
+        isPullRequestBuild: false,
+        executionProgress: 'PENDING',
+      },
+      relationships: {
+        sourceBranchOrTag: { data: { type: 'scmGitReferences', id: 'main-ref' } },
+      },
+    }],
+    included: [],
+  });
+
+  assert.deepEqual(
+    await asc.getWorkflowRunStatus(
+      'workflow-1', 'abcdef1234567890', 'main', null, null, 'main-ref',
+    ),
+    {
+      found: false,
+      unknownActiveBranchRun: {
+        runId: 'run-main',
+        number: 140,
+        executionProgress: 'PENDING',
+      },
+    },
+  );
+});
+
+test('does not confuse a different hidden-commit branch run with the requested branch', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.getBuildRuns = async () => ({
+    data: [{
+      id: 'run-develop',
+      attributes: {
+        number: 139,
+        sourceCommit: null,
+        isPullRequestBuild: false,
+        executionProgress: 'RUNNING',
+      },
+      relationships: {
+        sourceBranchOrTag: { data: { type: 'scmGitReferences', id: 'develop-ref' } },
+      },
+    }],
+    included: [],
+  });
+
+  assert.deepEqual(
+    await asc.getWorkflowRunStatus(
+      'workflow-1', 'abcdef1234567890', 'main', null, null, 'main-ref',
+    ),
+    { found: false, unknownActiveBranchRun: null },
+  );
+});
+
+test('surfaces an active branch run when Apple omits every source identity', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.getBuildRuns = async () => ({
+    data: [{
+      id: 'run-branch-unknown',
+      attributes: {
+        number: 138,
+        sourceCommit: null,
+        isPullRequestBuild: false,
+        executionProgress: 'PENDING',
+      },
+      relationships: {},
+    }],
+    included: [],
+  });
+
+  assert.deepEqual(
+    await asc.getWorkflowRunStatus(
+      'workflow-1', 'abcdef1234567890', 'main', null, null, 'main-ref',
+    ),
+    {
+      found: false,
+      unknownActiveBranchRun: null,
+      uncertainActiveBranchRun: {
+        runId: 'run-branch-unknown',
+        number: 138,
+        executionProgress: 'PENDING',
+      },
+    },
+  );
+});
+
+test('protects the requested active pull-request run before Xcode Cloud exposes its commit', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.getBuildRuns = async () => ({
+    data: [
+      {
+        id: 'run-pr-49',
+        attributes: {
+          number: 141,
+          sourceCommit: null,
+          isPullRequestBuild: true,
+          executionProgress: 'PENDING',
+          completionStatus: null,
+        },
+        relationships: {
+          pullRequest: { data: { type: 'scmPullRequests', id: 'apple-pr-49' } },
+        },
+      },
+    ],
+    included: [
+      {
+        id: 'apple-pr-49',
+        type: 'scmPullRequests',
+        attributes: { number: '49', sourceBranchName: 'feature/pr-49' },
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    await asc.getWorkflowRunStatus(
+      'workflow-1',
+      'abcdef1234567890',
+      'feature/pr-49',
+      '49',
+      'apple-pr-49',
+    ),
+    {
+      found: false,
+      unknownActiveBranchRun: null,
+      unknownActivePullRequestRun: {
+        runId: 'run-pr-49',
+        number: 141,
+        executionProgress: 'PENDING',
+      },
+    },
+  );
+});
+
+test('does not confuse a different hidden-commit pull-request run with the requested PR', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.getBuildRuns = async () => ({
+    data: [{
+      id: 'run-pr-49',
+      attributes: {
+        number: 141,
+        sourceCommit: { commitSha: '' },
+        isPullRequestBuild: true,
+        executionProgress: 'PENDING',
+      },
+      relationships: {
+        pullRequest: { data: { type: 'scmPullRequests', id: 'apple-pr-49' } },
+      },
+    }],
+    included: [],
+  });
+
+  assert.deepEqual(
+    await asc.getWorkflowRunStatus(
+      'workflow-1',
+      'abcdef1234567890',
+      'feature/pr-50',
+      '50',
+      'apple-pr-50',
+    ),
+    { found: false, unknownActiveBranchRun: null },
+  );
+});
+
+test('surfaces an active pull-request run when Apple omits every source identity', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  asc.getBuildRuns = async () => ({
+    data: [{
+      id: 'run-pr-unknown',
+      attributes: {
+        number: 142,
+        sourceCommit: null,
+        isPullRequestBuild: true,
+        executionProgress: 'RUNNING',
+      },
+      relationships: {},
+    }],
+    included: [],
+  });
+
+  assert.deepEqual(
+    await asc.getWorkflowRunStatus(
+      'workflow-1',
+      'abcdef1234567890',
+      'feature/pr-50',
+      '50',
+      'apple-pr-50',
+    ),
+    {
+      found: false,
+      unknownActiveBranchRun: null,
+      uncertainActivePullRequestRun: {
+        runId: 'run-pr-unknown',
+        number: 142,
+        executionProgress: 'RUNNING',
       },
     },
   );
@@ -504,6 +887,36 @@ test('finds an empty ready-for-review draft', async () => {
   assert.equal(await asc.getReusableDraftReviewSubmissionId(), 'empty-draft');
 });
 
+test('checkBuildInReview returns the selected App Store build ID', async () => {
+  const asc = createASCWithVersions({
+    data: [{
+      id: 'version-in-review',
+      type: 'appStoreVersions',
+      attributes: {
+        versionString: '1.2.3',
+        appStoreState: 'WAITING_FOR_REVIEW',
+      },
+      relationships: {
+        build: { data: { id: 'build-100' } },
+      },
+    }],
+    included: [{
+      id: 'build-100',
+      type: 'builds',
+      attributes: { version: '100' },
+    }],
+  });
+
+  assert.deepEqual(await asc.checkBuildInReview(), {
+    inReview: true,
+    version: '1.2.3',
+    state: 'WAITING_FOR_REVIEW',
+    buildNumber: '100',
+    buildId: 'build-100',
+    versionId: 'version-in-review',
+  });
+});
+
 test('checkRejectedVersion returns the highest rejected build number', async () => {
   const asc = createASCWithVersions({
     data: [
@@ -556,6 +969,7 @@ test('checkRejectedVersion returns the highest rejected build number', async () 
     version: '1.2.4',
     state: 'DEVELOPER_REJECTED',
     buildNumber: '101',
+    buildId: 'build-101',
     versionId: 'version-latest',
   });
 });
@@ -655,6 +1069,7 @@ test('checkVersionWithUnresolvedIssues returns the highest build tied to unresol
     version: '1.2.4',
     state: 'PREPARE_FOR_SUBMISSION',
     buildNumber: '101',
+    buildId: 'build-101',
     versionId: 'version-latest',
   });
 });
@@ -751,6 +1166,7 @@ test('checkVersionWithUnresolvedIssues ignores non-unresolved items in the same 
     version: '1.2.3',
     state: 'PREPARE_FOR_SUBMISSION',
     buildNumber: '100',
+    buildId: 'build-100',
     versionId: 'version-unresolved',
   });
 });
@@ -869,6 +1285,39 @@ test('maps an App Store build ID to its Xcode Cloud commit and branch', async ()
   });
 });
 
+test('prefers an exact build relationship when duplicate run numbers arrive in either order', async () => {
+  const asc = createASCWithVersions({ data: [], included: [] });
+  const target = {
+    workflowId: 'target-workflow',
+    workflowName: 'Production',
+    sourceBranch: 'main',
+    run: {
+      attributes: { number: 101, sourceCommit: { commitSha: 'target-commit' } },
+      relationships: { builds: { data: [{ id: 'build-target' }] } },
+    },
+  };
+  const other = {
+    workflowId: 'other-workflow',
+    workflowName: 'Internal',
+    sourceBranch: 'internal',
+    run: {
+      attributes: { number: 101, sourceCommit: { commitSha: 'other-commit' } },
+      relationships: { builds: { data: [{ id: 'build-other' }] } },
+    },
+  };
+
+  for (const runs of [[other, target], [target, other]]) {
+    asc.loadCIBuildRuns = async () => runs;
+    assert.deepEqual(await asc.getBuildSource('build-target', '101'), {
+      found: true,
+      commitSha: 'target-commit',
+      sourceBranch: 'main',
+      workflowId: 'target-workflow',
+      workflowName: 'Production',
+    });
+  }
+});
+
 test('falls back to a unique Xcode Cloud build number when Apple omits build linkage', async () => {
   const asc = createASCWithVersions({ data: [], included: [] });
   asc.loadCIBuildRuns = async () => ([{
@@ -892,12 +1341,25 @@ test('falls back to a unique Xcode Cloud build number when Apple omits build lin
 
 test('does not use an ambiguous Xcode Cloud build-number fallback', async () => {
   const asc = createASCWithVersions({ data: [], included: [] });
-  asc.loadCIBuildRuns = async () => ([
-    { run: { attributes: { number: 101 }, relationships: { builds: { data: [] } } } },
-    { run: { attributes: { number: 101 }, relationships: { builds: { data: [] } } } },
-  ]);
+  const first = {
+    workflowId: 'first-workflow',
+    run: {
+      attributes: { number: 101, sourceCommit: { commitSha: 'first-commit' } },
+      relationships: { builds: { data: [] } },
+    },
+  };
+  const second = {
+    workflowId: 'second-workflow',
+    run: {
+      attributes: { number: 101, sourceCommit: { commitSha: 'second-commit' } },
+      relationships: { builds: { data: [] } },
+    },
+  };
 
-  assert.deepEqual(await asc.getBuildSource('build-101', '101'), { found: false });
+  for (const runs of [[first, second], [second, first]]) {
+    asc.loadCIBuildRuns = async () => runs;
+    assert.deepEqual(await asc.getBuildSource('build-101', '101'), { found: false });
+  }
 });
 
 test('finds uploaded commits for one configured workflow', async () => {
@@ -930,9 +1392,100 @@ test('finds uploaded commits for one configured workflow', async () => {
     }];
   };
   assert.deepEqual(await asc.getPublishedWorkflowCommits('workflow-1'), [{
-    commitSha: 'ancestor', buildId: 'build-1', buildNumber: '1', marketingVersion: '1.4', uploadedDate: '2026-08-27T01:00:00Z',
+    commitSha: 'ancestor', sourceBranch: null, buildId: 'build-1', buildNumber: '1', marketingVersion: '1.4', uploadedDate: '2026-08-27T01:00:00Z',
   }]);
   assert.equal(scopedLoads, 1);
+});
+
+test('does not attribute an unrelated App Store build by workflow-local number alone', async () => {
+  const asc = createASCWithVersions({ data: [], included: [] });
+  asc.getAppId = async () => 'app-1';
+  asc.request = async endpoint => {
+    assert.match(endpoint, /filter\[processingState\]=VALID/);
+    return { data: [{
+      id: 'other-workflow-build',
+      attributes: { version: '101', processingState: 'VALID' },
+    }] };
+  };
+  asc.loadCIBuildRunsForWorkflow = async workflowId => [{
+    workflowId,
+    sourceBranch: 'develop',
+    run: {
+      attributes: { number: 101, sourceCommit: { commitSha: 'wrong-ancestor' } },
+      relationships: { builds: { data: [] } },
+    },
+  }];
+
+  assert.deepEqual(await asc.getPublishedWorkflowCommits('workflow-1'), []);
+});
+
+test('derives source branches from Xcode Cloud pull-request relationships', async () => {
+  const runsData = {
+    data: [{
+      id: 'run-1',
+      relationships: { pullRequest: { data: { type: 'scmPullRequests', id: 'pr-1' } } },
+    }],
+    included: [{
+      id: 'pr-1',
+      type: 'scmPullRequests',
+      attributes: { sourceBranchName: 'feature/player' },
+    }],
+  };
+  const asc = createASCWithVersions({ data: [], included: [] });
+  asc.getBuildRuns = async () => runsData;
+  asc.getConfiguredCIProducts = async () => [{ id: 'product-1' }];
+  asc.getWorkflows = async () => [{ id: 'workflow-1', attributes: { name: 'Pull requests' } }];
+
+  assert.equal(
+    (await asc.loadCIBuildRunsForWorkflow('workflow-1'))[0].sourceBranch,
+    'feature/player',
+  );
+  assert.equal((await asc.loadCIBuildRuns())[0].sourceBranch, 'feature/player');
+});
+
+test('excludes non-valid uploads from published release-note history', async () => {
+  const asc = createASCWithVersions({ data: [], included: [] });
+  asc.getAppId = async () => 'app-1';
+  asc.request = async () => ({ data: [
+    { id: 'invalid-build', attributes: { version: '2', processingState: 'INVALID' } },
+    { id: 'valid-build', attributes: { version: '1', processingState: 'VALID' } },
+  ] });
+  asc.loadCIBuildRunsForWorkflow = async workflowId => [{
+    workflowId,
+    sourceBranch: 'develop',
+    run: {
+      attributes: { sourceCommit: { commitSha: 'published-commit' } },
+      relationships: { builds: { data: [{ id: 'valid-build' }] } },
+    },
+  }];
+
+  assert.deepEqual(
+    (await asc.getPublishedWorkflowCommits('workflow-1')).map(commit => commit.buildId),
+    ['valid-build'],
+  );
+});
+
+test('preserves branch identity when the same commit was uploaded from two branches', async () => {
+  const asc = createASCWithVersions({ data: [], included: [] });
+  asc.getAppId = async () => 'app-1';
+  asc.request = async () => ({ data: [
+    { id: 'feature-build', attributes: { version: '2', uploadedDate: '2026-08-27T02:00:00Z' } },
+    { id: 'develop-build', attributes: { version: '1', uploadedDate: '2026-08-27T01:00:00Z' } },
+  ] });
+  asc.loadCIBuildRunsForWorkflow = async () => [];
+  asc.getBuildSource = async buildId => ({
+    found: true,
+    workflowId: 'workflow-1',
+    commitSha: 'shared-commit',
+    sourceBranch: buildId === 'feature-build' ? 'refs/heads/feature/player' : 'develop',
+  });
+
+  const commits = await asc.getPublishedWorkflowCommits('workflow-1');
+
+  assert.deepEqual(commits.map(commit => [commit.commitSha, commit.sourceBranch]), [
+    ['shared-commit', 'feature/player'],
+    ['shared-commit', 'develop'],
+  ]);
 });
 
 test('finds builds for a commit without enumerating unrelated workflows', async () => {
@@ -1090,6 +1643,36 @@ test('uploads and commits screenshot bytes using Apple upload operations', async
   assert.deepEqual(commit.data.attributes, { uploaded: true, sourceFileChecksum: 'checksum' });
 });
 
+test('aborts a stalled screenshot upload and removes its reservation', async t => {
+  const asc = createASCWithVersions({ data: [] });
+  const requests = [];
+  asc.request = async (endpoint, options = {}) => {
+    requests.push({ endpoint, options });
+    if (endpoint === '/appScreenshots' && options.method === 'POST') {
+      return { data: { id: 'stalled-screenshot', attributes: { uploadOperations: [{
+        url: 'https://upload.example/stalled-image', method: 'PUT', offset: 0,
+      }] } } };
+    }
+    return { data: {} };
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, { signal }) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  await assert.rejects(
+    asc.uploadScreenshot('set-1', {
+      fileName: 'stalled.png', bytes: Buffer.from('image'), checksum: 'checksum',
+    }, { uploadTimeoutMs: 5 }),
+    /timed out after 5ms/,
+  );
+  assert.ok(requests.some(call => (
+    call.endpoint === '/appScreenshots/stalled-screenshot'
+    && call.options.method === 'DELETE'
+  )));
+});
+
 test('makes a declared app preview set match repository order', async () => {
   const asc = createASCWithVersions({ data: [] });
   asc.getPreviewSets = async () => ([
@@ -1155,4 +1738,34 @@ test('uploads and commits app preview video bytes', async t => {
   assert.deepEqual(uploads, [Buffer.from('video')]);
   const commit = JSON.parse(requests.find(call => call.options.method === 'PATCH').options.body);
   assert.deepEqual(commit.data.attributes, { uploaded: true, sourceFileChecksum: 'checksum' });
+});
+
+test('aborts a stalled preview upload and removes its reservation', async t => {
+  const asc = createASCWithVersions({ data: [] });
+  const requests = [];
+  asc.request = async (endpoint, options = {}) => {
+    requests.push({ endpoint, options });
+    if (endpoint === '/appPreviews' && options.method === 'POST') {
+      return { data: { id: 'stalled-preview', attributes: { uploadOperations: [{
+        url: 'https://upload.example/stalled-video', method: 'PUT', offset: 0,
+      }] } } };
+    }
+    return { data: {} };
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, { signal }) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  await assert.rejects(
+    asc.uploadPreview('set-1', {
+      fileName: 'stalled.mov', bytes: Buffer.from('video'), checksum: 'checksum',
+    }, { uploadTimeoutMs: 5 }),
+    /timed out after 5ms/,
+  );
+  assert.ok(requests.some(call => (
+    call.endpoint === '/appPreviews/stalled-preview'
+    && call.options.method === 'DELETE'
+  )));
 });

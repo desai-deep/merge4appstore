@@ -18,6 +18,8 @@
     "trigger": "node index.js trigger",
     "trigger:dry": "DRY_RUN=true node index.js trigger",
     "webhooks": "node webhook-server.js",
+    "prepare:mirrors": "node scripts/prepare-git-mirrors.js",
+    "retry:deliveries": "node scripts/retry-webhook-deliveries.js",
     "test": "node --test tests/*.test.js",
     "validate:profiles": "node scripts/validate-profiles.js"
   },
@@ -36,6 +38,6 @@
     "yaml": "^2.9.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   }
 }

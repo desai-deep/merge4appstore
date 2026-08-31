@@ -1,10 +1,18 @@
 name: Deploy to VPS
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch' && inputs.inspect_only && 'Inspect VPS webhook readiness'
+      || github.event_name == 'workflow_dispatch' && 'Deploy merge4appstore to VPS'
+      || github.event.pull_request.title
+      || github.event.head_commit.message
+      || github.workflow }}
 
 on:
   pull_request:
   push:
     branches:
       - main
+  schedule:
+    - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:
       inspect_only:
@@ -24,289 +32,811 @@ on:
           - jamsontoast
           - runningorder
 
+permissions: {}
+
 jobs:
   test:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
-
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 20
           cache: npm
-
       - name: Install dependencies
         run: npm ci
-
       - name: Run tests
         run: npm test
-
       - name: Validate repository profiles
         run: npm run validate:profiles
 
   deploy:
-    if: (github.ref == 'refs/heads/main' && github.event_name != 'pull_request') || github.event_name == 'workflow_dispatch'
+    if: (github.ref == 'refs/heads/main' && github.event_name == 'push') || github.event_name == 'workflow_dispatch'
     needs: test
     runs-on: ubuntu-latest
-
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      outcome: ${{ steps.deploy_vps.outputs.outcome }}
+    concurrency:
+      group: merge4appstore-vps
+      cancel-in-progress: false
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
-
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - name: Setup SSH
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_SSH_HOST_ED25519_SHA256: ${{ secrets.VPS_SSH_HOST_ED25519_SHA256 }}
         run: |
-          mkdir -m 700 -p ~/.ssh
+          set -Eeuo pipefail
           umask 077
-          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
-          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+          mkdir -m 700 -p ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          [[ "$VPS_SSH_HOST_ED25519_SHA256" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] \
+            || { echo 'VPS_SSH_HOST_ED25519_SHA256 must contain one SHA-256 ed25519 fingerprint'; exit 1; }
+
+          scan_file="$(mktemp)"
+          trap 'rm -f -- "$scan_file"' EXIT
+          scan_complete=0
+          for attempt in 1 2 3; do
+            : > "$scan_file"
+            if timeout 15s ssh-keyscan -T 10 -H -t ed25519 "$VPS_HOST" > "$scan_file" 2>/dev/null \
+              && [ -s "$scan_file" ]; then
+              scan_complete=1
+              break
+            fi
+            [ "$attempt" -eq 3 ] || sleep "$((attempt * 2))"
+          done
+          [ "$scan_complete" -eq 1 ] || { echo 'Could not obtain the VPS ed25519 host key'; exit 1; }
+          awk 'NF != 3 || $2 != "ssh-ed25519" { bad=1 } { seen=1 } END { exit bad || !seen }' "$scan_file" \
+            || { echo 'VPS host-key scan returned malformed or non-ed25519 data'; exit 1; }
+          ssh-keygen -E sha256 -lf "$scan_file" \
+            | awk -v expected="$VPS_SSH_HOST_ED25519_SHA256" '$2 != expected { bad=1 } { seen=1 } END { exit bad || !seen }' \
+            || { echo 'VPS ed25519 host-key fingerprint did not match the pinned value'; exit 1; }
+          install -m 600 -- "$scan_file" ~/.ssh/known_hosts
 
       - name: Inspect process and HTTPS support
         if: inputs.inspect_only
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
+          DEPLOY_DIR: ${{ secrets.SERVER_DIR }}
         run: |
-          ssh -i ~/.ssh/deploy_key "$VPS_USER@$VPS_HOST" 'bash -s' <<'ENDSSH'
-            set -eu
-            echo "user=$(id -un) uid=$(id -u) init=$(ps -p 1 -o comm=)"
-            echo "hostname=$(hostname -f 2>/dev/null || hostname)"
-            for command in nginx caddy apache2 systemctl pm2 node; do
-              if command -v "$command" >/dev/null 2>&1; then
-                echo "$command=$(command -v "$command")"
-              else
-                echo "$command=missing"
+          set -Eeuo pipefail
+          case "$DEPLOY_DIR" in /|''|*[\$\`\"\'\!\;\&\|\<\>\(\)\{\}%]*) echo "Unsafe SERVER_DIR"; exit 1 ;; /*) ;; *) echo "SERVER_DIR must be absolute"; exit 1 ;; esac
+          deploy_dir_b64="$(printf '%s' "$DEPLOY_DIR" | base64 -w 0)"
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -o GlobalKnownHostsFile=/dev/null \
+            -o HostKeyAlgorithms=ssh-ed25519 -o UpdateHostKeys=no -o IdentitiesOnly=yes \
+            -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+            -i ~/.ssh/deploy_key "$VPS_USER@$VPS_HOST" "DEPLOY_DIR_B64='$deploy_dir_b64' bash -s" <<'ENDSSH'
+            set -Eeuo pipefail
+            umask 077
+            DEPLOY_DIR="$(printf '%s' "$DEPLOY_DIR_B64" | base64 --decode)"
+            while [ "${DEPLOY_DIR%/}" != "$DEPLOY_DIR" ]; do DEPLOY_DIR="${DEPLOY_DIR%/}"; done
+            [ -d "$DEPLOY_DIR" ] && [ ! -L "$DEPLOY_DIR" ] && [ -O "$DEPLOY_DIR" ] \
+              || { echo "SERVER_DIR must be an owned real directory"; exit 1; }
+            state_dir="${DEPLOY_DIR}.state"
+            state_parent="$(dirname -- "$state_dir")"
+            [ -d "$state_parent" ] && [ ! -L "$state_parent" ] \
+              || { echo "Persistent state parent must be a real directory"; exit 1; }
+            parent_mode="$(stat -c '%a' "$state_parent")"
+            [ $((8#$parent_mode & 8#22)) -eq 0 ] \
+              || { echo "Persistent state parent is writable by another user"; exit 1; }
+            if [ -e "$state_dir" ] || [ -L "$state_dir" ]; then
+              [ -d "$state_dir" ] && [ ! -L "$state_dir" ] && [ -O "$state_dir" ] \
+                && [ "$(stat -c '%a' "$state_dir")" = "700" ] && [ -w "$state_dir" ] \
+                || { echo "Persistent state directory is unsafe"; exit 1; }
+            else
+              [ -w "$state_parent" ] \
+                || { echo "Persistent state parent must be writable for the first deployment"; exit 1; }
+            fi
+            for private_file in "$DEPLOY_DIR/.env" "$DEPLOY_DIR/.webhook.env"; do
+              [ -f "$private_file" ] && [ -O "$private_file" ] \
+                || { echo "$private_file is missing or not owned"; exit 1; }
+              resolved="$(readlink -f -- "$private_file")"
+              [ -f "$resolved" ] && [ ! -L "$resolved" ] && [ -O "$resolved" ] \
+                || { echo "$private_file does not resolve to an owned regular file"; exit 1; }
+              permissions="$(stat -c '%a' "$resolved")"
+              case "$permissions" in ''|*[!0-7]*) echo "$private_file has invalid permissions"; exit 1 ;; esac
+              numeric_permissions=$((8#$permissions))
+              [ "$numeric_permissions" -le $((8#777)) ] \
+                && [ $((numeric_permissions & 8#400)) -ne 0 ] \
+                && [ $((numeric_permissions & 8#133)) -eq 0 ] \
+                || { echo "$private_file is writable by another user, executable, or unreadable by its owner"; exit 1; }
+              if [ "$permissions" != "600" ]; then
+                echo "$private_file is an owned non-writable legacy file; deployment will tighten it to mode 0600"
               fi
             done
-            if command -v systemctl >/dev/null 2>&1; then
-              echo "user-systemd=$(systemctl --user is-system-running 2>/dev/null || true)"
+            [ ! -L "$DEPLOY_DIR/.env" ] || { echo "Control .env cannot be a symlink"; exit 1; }
+            if [ -L "$DEPLOY_DIR/.webhook.env" ]; then
+              case "$(readlink -f -- "$DEPLOY_DIR/.webhook.env")" in
+                "$state_dir/secrets/"*) ;;
+                *) echo "Control .webhook.env points outside the private secrets directory"; exit 1 ;;
+              esac
             fi
-            if command -v nginx >/dev/null 2>&1; then
-              grep -RhsE '^[[:space:]]*server_name|^[[:space:]]*listen.*443' /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null || true
-              for config in $(grep -Rls 'server_name api\.runningorder\.app' /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null || true); do
-                echo "nginx-config=$config"
-                grep -nE 'merge4appstore|api\.runningorder\.app' "$config" || true
-              done
-            fi
-            if command -v caddy >/dev/null 2>&1; then
-              grep -nE 'merge4appstore|api\.runningorder\.app' /etc/caddy/Caddyfile 2>/dev/null || true
-            fi
+            echo "user=$(id -un) uid=$(id -u) init=$(ps -p 1 -o comm=)"
+            echo "hostname=$(hostname -f 2>/dev/null || hostname)"
+            for command in nginx systemctl pm2 node npm git tar flock stat timeout curl readlink logrotate gzip; do
+              command -v "$command" >/dev/null 2>&1 || { echo "$command=missing"; exit 1; }
+              echo "$command=$(command -v "$command")"
+            done
+            node -e '
+              const [major, minor] = process.versions.node.split(".").map(Number);
+              if (major < 20) throw new Error(`Node.js 20.0.0 or newer is required; found ${process.versions.node}`);
+            '
+            node --version
+            npm --version
+            git_version="$(git --version)"
+            GIT_VERSION_OUTPUT="$git_version" node -e '
+              const match = /^git version (\d+)\.(\d+)\.(\d+)(?:\s|$)/.exec(process.env.GIT_VERSION_OUTPUT || "");
+              if (!match) throw new Error(`Could not parse Git version: ${process.env.GIT_VERSION_OUTPUT || "empty"}`);
+              const [major, minor, patch] = match.slice(1).map(Number);
+              const maintenanceFloors = new Map([[39, 4], [40, 2], [41, 1], [42, 2], [43, 4], [44, 1], [45, 1]]);
+              const supported = major > 2 || (major === 2
+                && (minor >= 46 || (maintenanceFloors.has(minor) && patch >= maintenanceFloors.get(minor))));
+              if (!supported) throw new Error(`Git ${major}.${minor}.${patch} lacks reliable GIT_NO_LAZY_FETCH support`);
+            '
+            printf '%s\n' "$git_version"
+            logrotate --version | sed -n '1p'
+            disk_path="$state_parent"
+            if [ -d "$state_dir" ]; then disk_path="$state_dir"; fi
+            DISK_PATH="$disk_path" node -e '
+              const fs = require("fs");
+              const stats = fs.statfsSync(process.env.DISK_PATH);
+              const available = BigInt(stats.bavail) * BigInt(stats.bsize);
+              const total = BigInt(stats.blocks) * BigInt(stats.bsize);
+              const required = 1073741824n > (total + 9n) / 10n ? 1073741824n : (total + 9n) / 10n;
+              console.log(`disk_available_bytes=${available} disk_total_bytes=${total} disk_required_bytes=${required}`);
+              if (available < required) throw new Error("Insufficient disk headroom for deployment");
+            '
+            node_binary="$(readlink -f -- "$(command -v node)")"
+            pm2_home="${PM2_HOME:-$HOME/.pm2}"
+            pm2_unit="${MERGE4APPSTORE_PM2_STARTUP_UNIT:-pm2-$(id -un).service}"
+            case "$pm2_unit" in
+              *.service) ;;
+              *) echo "PM2 startup unit must name one systemd service"; exit 1 ;;
+            esac
+            case "$pm2_unit" in
+              *[!A-Za-z0-9_.@-]*) echo "PM2 startup unit contains unsafe characters"; exit 1 ;;
+            esac
+            case "$pm2_home" in /*) ;; *) echo "PM2_HOME must be absolute"; exit 1 ;; esac
+            [ -d "$pm2_home" ] && [ ! -L "$pm2_home" ] && [ -O "$pm2_home" ] \
+              || { echo "PM2_HOME is not an owned real directory"; exit 1; }
+            expected_pm2_home="$(readlink -f -- "$pm2_home")"
+            [ "$(systemctl is-enabled "$pm2_unit" 2>/dev/null || true)" = enabled ] \
+              || { echo "$pm2_unit is not durably enabled"; exit 1; }
+            [ "$(systemctl is-active "$pm2_unit" 2>/dev/null || true)" = active ] \
+              || { echo "$pm2_unit is not active"; exit 1; }
+            unit_user="$(systemctl show "$pm2_unit" --property=User --value)"
+            [ "$unit_user" = "$(id -un)" ] \
+              || { echo "$pm2_unit runs as $unit_user, expected $(id -un)"; exit 1; }
+            main_pid="$(systemctl show "$pm2_unit" --property=MainPID --value)"
+            case "$main_pid" in ''|*[!0-9]*) echo "$pm2_unit has no valid MainPID"; exit 1 ;; esac
+            [ "$main_pid" -gt 1 ] || { echo "$pm2_unit has no live daemon"; exit 1; }
+            [ "$(cat "$pm2_home/pm2.pid" 2>/dev/null || true)" = "$main_pid" ] \
+              || { echo "$pm2_unit does not own the active PM2 daemon"; exit 1; }
+            daemon_executable="$(readlink -f -- "/proc/$main_pid/exe")"
+            [ "$daemon_executable" = "$node_binary" ] \
+              || { echo "PM2 daemon uses $daemon_executable, expected $node_binary"; exit 1; }
+            daemon_pm2_home="$(PM2_DAEMON_PID="$main_pid" node -e '
+              const fs = require("fs");
+              const entry = fs.readFileSync(`/proc/${process.env.PM2_DAEMON_PID}/environ`, "utf8")
+                .split("\0").find(value => value.startsWith("PM2_HOME="));
+              if (entry) process.stdout.write(entry.slice("PM2_HOME=".length));
+            ')"
+            [ -n "$daemon_pm2_home" ] && [ "$(readlink -f -- "$daemon_pm2_home")" = "$expected_pm2_home" ] \
+              || { echo "$pm2_unit does not use $expected_pm2_home"; exit 1; }
+            exec_start="$(systemctl show "$pm2_unit" --property=ExecStart --value)"
+            case "$exec_start" in *pm2*resurrect*) ;; *) echo "$pm2_unit does not resurrect the PM2 dump"; exit 1 ;; esac
+            echo "pm2_startup=$pm2_unit:enabled:active:user=$unit_user:pid=$main_pid:node=$daemon_executable:home=$expected_pm2_home"
+            grep -RhsE '^[[:space:]]*server_name|^[[:space:]]*listen.*443|proxy_pass.*878[78]' \
+              /etc/nginx/sites-enabled /etc/nginx/conf.d /etc/nginx/snippets 2>/dev/null || true
             ss -lnt 2>/dev/null | sed -n '1,30p' || true
-            pm2 jlist 2>/dev/null | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{for(const p of JSON.parse(s||"[]")) console.log(`pm2=${p.name}:${p.pm2_env?.status}:${p.pm2_env?.pm_cwd}`)})' || true
-            pm2 logs merge4appstore-webhooks --lines 50 --nostream 2>/dev/null || true
+            pm2 jlist 2>/dev/null | STATE_DIRECTORY="$state_dir" node -e '
+              const path = require("path");
+              let input = "";
+              process.stdin.on("data", chunk => input += chunk).on("end", () => {
+                const managed = JSON.parse(input || "[]").filter(processInfo =>
+                  ["merge4appstore-webhooks", "merge4appstore-webhooks-v2"].includes(processInfo.name));
+                if (managed.length === 0) throw new Error("No managed merge4appstore PM2 process is running");
+                for (const processInfo of managed) {
+                  if (processInfo.pm2_env?.status !== "online") {
+                    throw new Error(`${processInfo.name} is ${processInfo.pm2_env?.status || "unknown"}, expected online`);
+                  }
+                  const nodeVersion = String(processInfo.pm2_env?.node_version || "");
+                  if (!/^\d+\./.test(nodeVersion) || Number(nodeVersion.split(".")[0]) < 20) {
+                    throw new Error(`${processInfo.name} uses unsupported Node.js ${nodeVersion || "unknown"}`);
+                  }
+                  if (processInfo.name === "merge4appstore-webhooks-v2") {
+                    const expectedOut = path.join(process.env.STATE_DIRECTORY, "logs", "webhook-out.log");
+                    const expectedError = path.join(process.env.STATE_DIRECTORY, "logs", "webhook-error.log");
+                    if (processInfo.pm2_env?.pm_out_log_path !== expectedOut
+                      || processInfo.pm2_env?.pm_err_log_path !== expectedError) {
+                      throw new Error(`${processInfo.name} does not use the bounded private logs`);
+                    }
+                  }
+                  console.log(`pm2=${processInfo.name}:${processInfo.pm2_env?.status}:${processInfo.pm2_env?.pm_cwd}:node=${nodeVersion}`);
+                }
+              });
+            '
+            pm2 logs merge4appstore-webhooks-v2 --lines 50 --nostream 2>/dev/null || pm2 logs merge4appstore-webhooks --lines 50 --nostream 2>/dev/null || true
+            if [ -f "$state_dir/logrotate.conf" ]; then
+              [ ! -L "$state_dir/logrotate.conf" ] && [ -O "$state_dir/logrotate.conf" ] \
+                && [ "$(stat -c '%a' "$state_dir/logrotate.conf")" = 600 ] \
+                || { echo "Private logrotate configuration is unsafe"; exit 1; }
+              for rotation_state in "$state_dir/logrotate.state" "$state_dir/logrotate.lock"; do
+                [ -f "$rotation_state" ] && [ ! -L "$rotation_state" ] && [ -O "$rotation_state" ] \
+                  && [ "$(stat -c '%a' "$rotation_state")" = 600 ] \
+                  || { echo "Private logrotate state is unsafe: $rotation_state"; exit 1; }
+              done
+              logrotate --debug --state "$state_dir/logrotate.state" "$state_dir/logrotate.conf" >/dev/null
+              [ "$(crontab -l 2>/dev/null | grep -Fc '# merge4appstore-logrotate' || true)" -eq 1 ] \
+                || { echo "Managed log rotation cron is missing or duplicated"; exit 1; }
+              for managed_log in "$state_dir/logs/nginx-upstream.log" "$state_dir/logs/webhook-out.log" \
+                "$state_dir/logs/webhook-error.log" "$state_dir/logs/cron.log" \
+                "$state_dir/logs/logrotate.log"; do
+                [ -f "$managed_log" ] && [ ! -L "$managed_log" ] && [ -O "$managed_log" ] \
+                  && [ "$(stat -c '%a' "$managed_log")" = 600 ] \
+                  || { echo "Managed log is unsafe: $managed_log"; exit 1; }
+                echo "managed_log=$(basename -- "$managed_log") bytes=$(stat -c '%s' "$managed_log")"
+              done
+              [ -f /etc/nginx/conf.d/merge4appstore-observability.conf ] \
+                && [ ! -L /etc/nginx/conf.d/merge4appstore-observability.conf ] \
+                && [ -O /etc/nginx/conf.d/merge4appstore-observability.conf ] \
+                && [ "$(stat -c '%a' /etc/nginx/conf.d/merge4appstore-observability.conf)" = 644 ] \
+                || { echo "Nginx observability configuration is missing or unsafe"; exit 1; }
+              if grep -Eq '\$(request_uri|uri|args|request_body|remote_addr|http_[A-Za-z0-9_]*)' \
+                /etc/nginx/conf.d/merge4appstore-observability.conf; then
+                echo "Nginx diagnostics contain a forbidden request field"
+                exit 1
+              fi
+            else
+              echo "managed_observability=not-yet-installed"
+            fi
           ENDSSH
 
       - name: Deploy to VPS
+        id: deploy_vps
         if: ${{ !inputs.inspect_only }}
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           DEPLOY_DIR: ${{ secrets.SERVER_DIR }}
           DEPLOY_SHA: ${{ github.sha }}
-          PAUSE_CRON: ${{ github.event_name != 'workflow_dispatch' || inputs.pause_cron }}
+          DEPLOY_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          PAUSE_CRON: ${{ github.event_name == 'workflow_dispatch' && inputs.pause_cron }}
           RECONCILE_PROFILE: ${{ inputs.reconcile_profile || 'none' }}
-          GH_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
-          XCODE_CLOUD_WEBHOOK_TOKEN: ${{ secrets.XCODE_CLOUD_WEBHOOK_TOKEN }}
-          MERGE4APPSTORE_BUILD_TOKEN_JAMSONTOAST: ${{ secrets.MERGE4APPSTORE_BUILD_TOKEN_JAMSONTOAST }}
-          MERGE4APPSTORE_BUILD_TOKEN_RUNNINGORDER_IOS: ${{ secrets.MERGE4APPSTORE_BUILD_TOKEN_RUNNINGORDER_IOS }}
         run: |
+          set -Eeuo pipefail
           umask 077
-          printf 'GH_WEBHOOK_SECRET=%s\nXCODE_CLOUD_WEBHOOK_TOKEN=%s\nMERGE4APPSTORE_BUILD_TOKEN_JAMSONTOAST=%s\nMERGE4APPSTORE_BUILD_TOKEN_RUNNINGORDER_IOS=%s\n' \
-            "$GH_WEBHOOK_SECRET" "$XCODE_CLOUD_WEBHOOK_TOKEN" \
-            "$MERGE4APPSTORE_BUILD_TOKEN_JAMSONTOAST" "$MERGE4APPSTORE_BUILD_TOKEN_RUNNINGORDER_IOS" \
-            > /tmp/merge4appstore-webhook.env
-          scp -i ~/.ssh/deploy_key /tmp/merge4appstore-webhook.env \
-            "$VPS_USER@$VPS_HOST:$DEPLOY_DIR/.webhook.env.new"
-          ssh -i ~/.ssh/deploy_key "$VPS_USER@$VPS_HOST" \
-            "DEPLOY_DIR='$DEPLOY_DIR' DEPLOY_SHA='$DEPLOY_SHA' PAUSE_CRON='$PAUSE_CRON' RECONCILE_PROFILE='$RECONCILE_PROFILE' bash -s" <<'ENDSSH'
-            set -e
+          case "$DEPLOY_RUN_ID" in ''|*[!0-9-]*) echo "Invalid deployment run id"; exit 1 ;; esac
+          case "$DEPLOY_SHA" in ''|*[!0-9a-fA-F]*) echo "Invalid deployment commit"; exit 1 ;; esac
+          [ "${#DEPLOY_SHA}" -eq 40 ] || { echo "Deployment commit must be a full SHA-1"; exit 1; }
+          case "$DEPLOY_DIR" in /|''|*[\$\`\"\'\!\;\&\|\<\>\(\)\{\}%]*) echo "Unsafe SERVER_DIR"; exit 1 ;; /*) ;; *) echo "SERVER_DIR must be absolute"; exit 1 ;; esac
 
-            echo "Starting merge4appstore deployment..."
-
-            if [ -z "$DEPLOY_DIR" ]; then
-              echo "SERVER_DIR secret is not set"
-              exit 1
-            fi
-
-            cd "$DEPLOY_DIR"
-
-            node --version || { echo "Node.js not found"; exit 1; }
-            npm --version || { echo "npm not found"; exit 1; }
-
-            git fetch origin '+refs/heads/*:refs/remotes/origin/*'
-            git cat-file -e "$DEPLOY_SHA^{commit}"
-            git reset --hard "$DEPLOY_SHA"
-
-            COMMIT_SHA=$(git rev-parse --short HEAD)
-            COMMIT_MSG=$(git log -1 --pretty=%B | head -1)
-            echo "Deployed commit: $COMMIT_SHA - $COMMIT_MSG"
-
-            npm ci --omit=dev
-
-            npm test
-            npm run validate:profiles
-
+          deploy_dir_b64="$(printf '%s' "$DEPLOY_DIR" | base64 -w 0)"
+          deployment_log="$(mktemp)"
+          trap 'rm -f -- "$deployment_log"' EXIT
+          set +e
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -o GlobalKnownHostsFile=/dev/null \
+            -o HostKeyAlgorithms=ssh-ed25519 -o UpdateHostKeys=no -o IdentitiesOnly=yes \
+            -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+            -i ~/.ssh/deploy_key "$VPS_USER@$VPS_HOST" \
+            "DEPLOY_DIR_B64='$deploy_dir_b64' DEPLOY_SHA='$DEPLOY_SHA' DEPLOY_RUN_ID='$DEPLOY_RUN_ID' PAUSE_CRON='$PAUSE_CRON' RECONCILE_PROFILE='$RECONCILE_PROFILE' bash -s" <<'ENDSSH' | tee "$deployment_log"
+            set -Eeuo pipefail
             umask 077
-            chmod 600 .webhook.env.new
-            mv .webhook.env.new .webhook.env
+            DEPLOY_DIR="$(printf '%s' "$DEPLOY_DIR_B64" | base64 --decode)"
+            while [ "${DEPLOY_DIR%/}" != "$DEPLOY_DIR" ]; do DEPLOY_DIR="${DEPLOY_DIR%/}"; done
+            case "$DEPLOY_DIR" in /|"") echo "SERVER_DIR cannot be empty or root"; exit 1 ;; /*) ;; *) echo "SERVER_DIR must be absolute"; exit 1 ;; esac
+            [ -d "$DEPLOY_DIR" ] && [ ! -L "$DEPLOY_DIR" ] && [ -O "$DEPLOY_DIR" ] || { echo "SERVER_DIR must be an owned, real checkout directory"; exit 1; }
+            case "$DEPLOY_RUN_ID" in ''|*[!0-9-]*) echo "Invalid deployment run id"; exit 1 ;; esac
+            case "$DEPLOY_SHA" in ''|*[!0-9a-fA-F]*) echo "Invalid deployment commit"; exit 1 ;; esac
+            [ "${#DEPLOY_SHA}" -eq 40 ] || { echo "Deployment commit must be a full SHA-1"; exit 1; }
 
-            read_webhook_secret() {
-              node -e 'import("dotenv").then(({config})=>process.stdout.write(config({path:".webhook.env",quiet:true}).parsed?.[process.argv[1]]||""))' "$1"
-            }
-            export GH_WEBHOOK_SECRET="$(read_webhook_secret GH_WEBHOOK_SECRET)"
-            export XCODE_CLOUD_WEBHOOK_TOKEN="$(read_webhook_secret XCODE_CLOUD_WEBHOOK_TOKEN)"
-            export MERGE4APPSTORE_BUILD_TOKEN_JAMSONTOAST="$(read_webhook_secret MERGE4APPSTORE_BUILD_TOKEN_JAMSONTOAST)"
-            export MERGE4APPSTORE_BUILD_TOKEN_RUNNINGORDER_IOS="$(read_webhook_secret MERGE4APPSTORE_BUILD_TOKEN_RUNNINGORDER_IOS)"
-            unset -f read_webhook_secret
-            export GH_TOKEN="$(node -e "import('dotenv').then(d=>console.log(d.config({path:'.env',quiet:true}).parsed?.GH_TOKEN||''))")"
-            shopt -s nullglob
-            repository_profiles=(profiles/*.yml profiles/*.yaml)
-
-            export WEBHOOK_AUTOSTART=true WEBHOOK_HOST=127.0.0.1 WEBHOOK_PORT=8787
-            export MERGE4APPSTORE_DEPLOY_SHA="$DEPLOY_SHA"
-            if pm2 describe merge4appstore-webhooks >/dev/null 2>&1; then
-              pm2 delete merge4appstore-webhooks
-            fi
-            pm2 start ecosystem.config.cjs --only merge4appstore-webhooks --update-env
-            pm2 save
-
-            export EXPECTED_PM2_CWD="$DEPLOY_DIR"
-            export EXPECTED_PM2_SCRIPT="$DEPLOY_DIR/webhook-server.js"
-            pm2 jlist | node -e '
-              const fs = require("fs");
-              let source = "";
-              process.stdin.on("data", chunk => { source += chunk; });
-              process.stdin.on("end", () => {
-                const processInfo = JSON.parse(source).find(item => item.name === "merge4appstore-webhooks");
-                if (!processInfo) throw new Error("merge4appstore-webhooks is not registered in PM2");
-                const actualCwd = fs.realpathSync(processInfo.pm2_env.pm_cwd);
-                const actualScript = fs.realpathSync(processInfo.pm2_env.pm_exec_path);
-                const expectedCwd = fs.realpathSync(process.env.EXPECTED_PM2_CWD);
-                const expectedScript = fs.realpathSync(process.env.EXPECTED_PM2_SCRIPT);
-                if (actualCwd !== expectedCwd || actualScript !== expectedScript) {
-                  throw new Error(`PM2 is serving ${actualScript} from ${actualCwd}; expected ${expectedScript} from ${expectedCwd}`);
-                }
-              });
-            '
-            unset EXPECTED_PM2_CWD EXPECTED_PM2_SCRIPT
-
-            health=""
-            for attempt in {1..10}; do
-              if health="$(curl --fail --silent --show-error http://127.0.0.1:8787/health)"; then break; fi
-              sleep 1
-            done
-            HEALTH="$health" EXPECTED_SHA="$DEPLOY_SHA" node -e '
-              const health = JSON.parse(process.env.HEALTH || "{}");
-              if (!health.ok || health.deployment_sha !== process.env.EXPECTED_SHA) {
-                throw new Error(`Webhook health reports deployment ${health.deployment_sha || "unknown"}; expected ${process.env.EXPECTED_SHA}`);
-              }
-            '
-            for profile_file in "${repository_profiles[@]}"; do
-              instance="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>console.log(loadRepositoryProfile(process.argv[1]).instance))" "$profile_file")"
-              repository="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>{const p=loadRepositoryProfile(process.argv[1]);console.log(p.repository.owner+'/'+p.repository.name)})" "$profile_file")"
-              beta_branch="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>{const p=loadRepositoryProfile(process.argv[1]);console.log(p.repository.beta_branch||'develop')})" "$profile_file")"
-              token_env="$(node -e "Promise.all([import('./lib/profile.js'),import('./lib/webhooks.js')]).then(([{loadRepositoryProfile},{webhookSettings}])=>console.log(webhookSettings(loadRepositoryProfile(process.argv[1])).buildTokenEnv))" "$profile_file")"
-              build_token="${!token_env}"
-              encoded_beta_branch="$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$beta_branch")"
-              commit="$(gh api "repos/$repository/commits/$encoded_beta_branch" --jq .sha)"
-              payload="$(REPOSITORY="$repository" COMMIT="$commit" BRANCH="$beta_branch" node -e 'console.log(JSON.stringify({repository:process.env.REPOSITORY,commit:process.env.COMMIT,branch:process.env.BRANCH,target_branch:"",pull_request:null,current_marketing_version:"0.1"}))')"
-              prepared="$(curl --fail-with-body --silent --show-error \
-                -H "Authorization: Bearer $build_token" -H 'Content-Type: application/json' \
-                --data "$payload" "http://127.0.0.1:8787/v1/builds/prepare/$instance")"
-              PREPARED="$prepared" node -e 'const value=JSON.parse(process.env.PREPARED);console.log(`Prepared endpoint: ${value.role}/${value.purpose} version ${value.marketing_version}`)'
-            done
-
-            printf '%s\n' \
-              'location /merge4appstore/ {' \
-              '    proxy_pass http://127.0.0.1:8787/;' \
-              '    proxy_http_version 1.1;' \
-              '    proxy_set_header Host $host;' \
-              '    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;' \
-              '    proxy_set_header X-Forwarded-Proto $scheme;' \
-              '}' > /etc/nginx/snippets/merge4appstore-webhooks.conf
-
-            nginx_config="$(grep -Rls 'server_name api\.runningorder\.app' /etc/nginx/sites-enabled /etc/nginx/conf.d | head -1)"
-            if [ -z "$nginx_config" ]; then
-              echo "Could not find api.runningorder.app nginx configuration"
-              exit 1
-            fi
-            if ! grep -q 'merge4appstore-webhooks.conf' "$nginx_config"; then
-              perl -0pi -e 's{(listen 443 ssl http2;.*?server_name api\.runningorder\.app;\n)}{$1    include /etc/nginx/snippets/merge4appstore-webhooks.conf;\n}s' "$nginx_config"
-            fi
-            nginx -t
-            systemctl reload nginx
-
-            public_health="$(curl --fail --silent --show-error "https://api.runningorder.app/merge4appstore/health?deployment=$DEPLOY_SHA")"
-            HEALTH="$public_health" EXPECTED_SHA="$DEPLOY_SHA" node -e '
-              const health = JSON.parse(process.env.HEALTH || "{}");
-              if (!health.ok || health.deployment_sha !== process.env.EXPECTED_SHA) {
-                throw new Error(`Public webhook health reports deployment ${health.deployment_sha || "unknown"}; expected ${process.env.EXPECTED_SHA}`);
-              }
-            '
-
-            for profile_file in "${repository_profiles[@]}"; do
-              instance="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>console.log(loadRepositoryProfile(process.argv[1]).instance))" "$profile_file")"
-              repository="$(node -e "import('./lib/profile.js').then(({loadRepositoryProfile})=>{const p=loadRepositoryProfile(process.argv[1]);console.log(p.repository.owner+'/'+p.repository.name)})" "$profile_file")"
-              webhook_url="https://api.runningorder.app/merge4appstore/webhooks/github/$instance"
-              hook_id="$(gh api "repos/$repository/hooks" --jq ".[] | select(.config.url == \"$webhook_url\") | .id" | head -1)"
-              if [ -n "$hook_id" ]; then
-                gh api --method PATCH "repos/$repository/hooks/$hook_id" \
-                  -F active=true -f 'events[]=push' -f 'events[]=pull_request' \
-                  -f "config[url]=$webhook_url" -f 'config[content_type]=json' \
-                  -f "config[secret]=$GH_WEBHOOK_SECRET" >/dev/null
-              else
-                gh api --method POST "repos/$repository/hooks" \
-                  -f name=web -F active=true -f 'events[]=push' -f 'events[]=pull_request' \
-                  -f "config[url]=$webhook_url" -f 'config[content_type]=json' \
-                  -f "config[secret]=$GH_WEBHOOK_SECRET" >/dev/null
+            release_temp=""
+            candidate_release=""
+            handed_to_deployer=0
+            cleanup_bootstrap() {
+              status=$?
+              if [ -n "$release_temp" ]; then case "$release_temp" in "$MERGE4APPSTORE_STATE_DIR/releases/"*) rm -rf -- "$release_temp" ;; esac; fi
+              if [ "$status" -ne 0 ] && [ "$handed_to_deployer" -eq 0 ] && [ -n "$candidate_release" ] \
+                && [ -d "$candidate_release" ] && [ ! -L "$candidate_release" ] \
+                && [ "$(cat "$candidate_release/.merge4appstore-release" 2>/dev/null || true)" = "merge4appstore-release-v1" ]; then
+                case "$candidate_release" in "$MERGE4APPSTORE_STATE_DIR/releases/"*) rm -rf -- "$candidate_release" ;; esac
               fi
-              echo "Configured GitHub webhook for $repository"
-            done
+              exit "$status"
+            }
+            trap cleanup_bootstrap EXIT
+            trap 'exit 130' HUP INT TERM
 
-            echo "Configuring repository profiles..."
-            current_crontab="$(crontab -l 2>/dev/null || true)"
-            printf -v deploy_dir_quoted '%q' "$DEPLOY_DIR"
+            for command in node npm git tar flock stat timeout logrotate gzip; do command -v "$command" >/dev/null 2>&1 || { echo "$command not found"; exit 1; }; done
+            node -e '
+              const [major, minor] = process.versions.node.split(".").map(Number);
+              if (major < 20) {
+                console.error(`Node.js 20.0.0 or newer is required; found ${process.versions.node}`);
+                process.exit(1);
+              }
+            '
 
-            for profile_file in "${repository_profiles[@]}"; do
-              profile_name="$(basename "$profile_file")"
-              profile_name="${profile_name%.*}"
-              marker="# merge4appstore:${profile_name}"
+            export MERGE4APPSTORE_STATE_DIR="${DEPLOY_DIR}.state"
+            # A persistent control checkout may contain local replace refs.
+            # Always archive the real object graph for the verified main SHA.
+            export GIT_NO_REPLACE_OBJECTS=1
+            STATE_DIRECTORY="$MERGE4APPSTORE_STATE_DIR" CONTROL_DIRECTORY="$DEPLOY_DIR" node --input-type=module <<'NODE'
+              import crypto from 'node:crypto';
+              import fs from 'node:fs';
+              import path from 'node:path';
+              import { constants } from 'node:fs';
+              const state = path.resolve(process.env.STATE_DIRECTORY);
+              const control = path.resolve(process.env.CONTROL_DIRECTORY);
+              if (state !== process.env.STATE_DIRECTORY || state === path.parse(state).root || state === control || state.startsWith(`${control}${path.sep}`)) throw new Error(`Unsafe persistent state directory: ${state}`);
+              const parent = path.dirname(state);
+              const parentStat = fs.lstatSync(parent);
+              if (!parentStat.isDirectory() || parentStat.isSymbolicLink() || (parentStat.mode & 0o022) !== 0) throw new Error(`Unsafe persistent state parent: ${parent}`);
+              const syncDirectory = directory => {
+                const fd = fs.openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+                try { fs.fsyncSync(fd); } catch (error) {
+                  if (!['EINVAL', 'ENOTSUP', 'EISDIR'].includes(error.code)) throw error;
+                } finally { fs.closeSync(fd); }
+              };
+              let stateStat;
+              try { stateStat = fs.lstatSync(state); } catch (error) {
+                if (error.code !== 'ENOENT') throw error;
+                try { fs.mkdirSync(state, { mode: 0o700 }); } catch (mkdirError) { if (mkdirError.code !== 'EEXIST') throw mkdirError; }
+                syncDirectory(parent);
+                stateStat = fs.lstatSync(state);
+              }
+              if (!stateStat.isDirectory() || stateStat.isSymbolicLink() || stateStat.uid !== process.getuid() || (stateStat.mode & 0o777) !== 0o700) throw new Error(`Persistent state must be a private owned mode-0700 real directory: ${state}`);
+              const marker = path.join(state, '.merge4appstore-state');
+              let markerFd;
+              try { markerFd = fs.openSync(marker, constants.O_RDONLY | constants.O_NOFOLLOW); } catch (error) {
+                if (error.code !== 'ENOENT') throw error;
+                const entries = fs.readdirSync(state);
+                if (entries.length !== 0) {
+                  try { markerFd = fs.openSync(marker, constants.O_RDONLY | constants.O_NOFOLLOW); } catch (retryError) {
+                    if (retryError.code === 'ENOENT') throw new Error('Unmarked persistent state directory is not empty');
+                    throw retryError;
+                  }
+                }
+              }
+              if (markerFd === undefined) {
+                const temporary = path.join(parent, `.merge4appstore-state.${path.basename(state)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+                try {
+                  const createdFd = fs.openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+                  try {
+                    fs.writeFileSync(createdFd, 'merge4appstore-state-v1\n');
+                    fs.fsyncSync(createdFd);
+                  } finally { fs.closeSync(createdFd); }
+                  try { fs.linkSync(temporary, marker); } catch (linkError) {
+                    if (linkError.code !== 'EEXIST') throw linkError;
+                  }
+                  syncDirectory(state);
+                } finally { try { fs.unlinkSync(temporary); } catch (unlinkError) { if (unlinkError.code !== 'ENOENT') throw unlinkError; } }
+                markerFd = fs.openSync(marker, constants.O_RDONLY | constants.O_NOFOLLOW);
+              }
+              const markerStat = fs.fstatSync(markerFd);
+              const markerContents = fs.readFileSync(markerFd, 'utf8');
+              if (!markerStat.isFile() || markerStat.uid !== process.getuid() || (markerStat.mode & 0o077) !== 0 || markerContents !== 'merge4appstore-state-v1\n') {
+                fs.closeSync(markerFd); throw new Error(`Invalid persistent state marker: ${marker}`);
+              }
+              fs.fchmodSync(markerFd, 0o600); fs.closeSync(markerFd);
+              const deployLock = path.join(state, 'deploy.lock');
+              let lockFd;
+              try { lockFd = fs.openSync(deployLock, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW, 0o600); } catch (error) {
+                if (error.code !== 'EEXIST') throw error;
+                lockFd = fs.openSync(deployLock, constants.O_RDWR | constants.O_NOFOLLOW);
+              }
+              const lockStat = fs.fstatSync(lockFd);
+              if (!lockStat.isFile() || lockStat.uid !== process.getuid() || (lockStat.mode & 0o077) !== 0) {
+                fs.closeSync(lockFd); throw new Error(`Unsafe deployment lock: ${deployLock}`);
+              }
+              fs.fchmodSync(lockFd, 0o600); fs.closeSync(lockFd);
+          NODE
 
-              DRY_RUN=true node index.js deploy --profile "$profile_file"
-              DRY_RUN=true node index.js expire --profile "$profile_file"
+            exec 9<>"$MERGE4APPSTORE_STATE_DIR/deploy.lock"
+            if ! flock --exclusive --wait 900 9; then echo "Timed out waiting for another merge4appstore deployment"; exit 1; fi
 
-              current_crontab="$(printf '%s\n' "$current_crontab" | grep -Fv "$marker" || true)"
-              cron_line="*/5 * * * * cd ${deploy_dir_quoted} && node index.js --profile ${profile_file} >> logs/cron.log 2>&1 ${marker}"
-              current_crontab="$(printf '%s\n%s\n' "$current_crontab" "$cron_line")"
-            done
-
-            if [ "$PAUSE_CRON" = "true" ]; then
-              crontab -l > .merge4appstore-crontab.backup 2>/dev/null || true
-              for profile_file in "${repository_profiles[@]}"; do
-                profile_name="$(basename "$profile_file")"
-                marker="# merge4appstore:${profile_name%.*}"
-                current_crontab="$(printf '%s\n' "$current_crontab" | grep -Fv "$marker" || true)"
-              done
-              printf '%s\n' "$current_crontab" | sed '/^[[:space:]]*$/d' | crontab -
-              echo "Paused merge4appstore profile cron jobs"
-            elif (( ${#repository_profiles[@]} > 0 )); then
-              printf '%s\n' "$current_crontab" | sed '/^[[:space:]]*$/d' | crontab -
-              echo "Configured ${#repository_profiles[@]} repository profile cron job(s)"
+            releases_dir="$MERGE4APPSTORE_STATE_DIR/releases"
+            if [ -L "$releases_dir" ]; then echo "Releases directory cannot be a symlink"; exit 1; fi
+            if [ -e "$releases_dir" ]; then
+              [ -d "$releases_dir" ] && [ -O "$releases_dir" ] && [ "$(stat -c '%a' "$releases_dir")" = "700" ] || { echo "Unsafe releases directory"; exit 1; }
+            else
+              mkdir -m 700 -- "$releases_dir"
             fi
 
-            if [ "$RECONCILE_PROFILE" != "none" ]; then
-              case "$RECONCILE_PROFILE" in
-                jamsontoast|runningorder) ;;
-                *) echo "Unsupported reconciliation profile: $RECONCILE_PROFILE"; exit 1 ;;
-              esac
-              echo "Running live deployment reconciliation for $RECONCILE_PROFILE..."
-              node index.js deploy --profile "profiles/${RECONCILE_PROFILE}.yml"
+            git -C "$DEPLOY_DIR" rev-parse --is-inside-work-tree >/dev/null
+            timeout 120 git -C "$DEPLOY_DIR" fetch origin '+refs/heads/*:refs/remotes/origin/*'
+            git -C "$DEPLOY_DIR" cat-file -e "$DEPLOY_SHA^{commit}"
+            origin_main="$(git -C "$DEPLOY_DIR" rev-parse origin/main)"
+            if [ "$DEPLOY_SHA" != "$origin_main" ]; then
+              echo "MERGE4APPSTORE_DEPLOYMENT_SUPERSEDED"
+              exit 78
             fi
 
-            echo "merge4appstore deployment complete"
+            candidate_release="$releases_dir/$DEPLOY_SHA-$DEPLOY_RUN_ID"
+            [ ! -e "$candidate_release" ] && [ ! -L "$candidate_release" ] || { echo "Candidate release already exists"; exit 1; }
+            release_temp="$(mktemp -d "$releases_dir/.$DEPLOY_SHA-$DEPLOY_RUN_ID.XXXXXX")"
+            git -C "$DEPLOY_DIR" archive --format=tar "$DEPLOY_SHA" | tar -xf - -C "$release_temp"
+            [ -f "$release_temp/scripts/deploy-vps.sh" ] && [ ! -L "$release_temp/scripts/deploy-vps.sh" ] || { echo "Deployment script is missing from candidate release"; exit 1; }
+            printf 'merge4appstore-release-v1\n' > "$release_temp/.merge4appstore-release"
+            printf '%s\n' "$DEPLOY_SHA" > "$release_temp/.merge4appstore-deployment-sha"
+            chmod 600 "$release_temp/.merge4appstore-release" "$release_temp/.merge4appstore-deployment-sha"
+            mv -T -- "$release_temp" "$candidate_release"
+            release_temp=""
+
+            handed_to_deployer=1
+            DEPLOY_DIR="$DEPLOY_DIR" DEPLOY_SHA="$DEPLOY_SHA" DEPLOY_RUN_ID="$DEPLOY_RUN_ID" \
+              CANDIDATE_RELEASE="$candidate_release" MERGE4APPSTORE_STATE_DIR="$MERGE4APPSTORE_STATE_DIR" \
+              PAUSE_CRON="$PAUSE_CRON" RECONCILE_PROFILE="$RECONCILE_PROFILE" \
+              bash "$candidate_release/scripts/deploy-vps.sh"
           ENDSSH
+          ssh_status="${PIPESTATUS[0]}"
+          set -e
+          if [ "$ssh_status" -eq 78 ] && grep -Fxq 'MERGE4APPSTORE_DEPLOYMENT_SUPERSEDED' "$deployment_log"; then
+            echo 'outcome=superseded' >> "$GITHUB_OUTPUT"
+            echo 'A newer main-branch commit superseded this deployment.'
+            exit 0
+          fi
+          if [ "$ssh_status" -ne 0 ]; then exit "$ssh_status"; fi
+          echo 'outcome=deployed' >> "$GITHUB_OUTPUT"
 
       - name: Cleanup SSH key
         if: always()
-        run: rm -f ~/.ssh/deploy_key /tmp/merge4appstore-webhook.env
+        run: rm -f ~/.ssh/deploy_key
+
+  deployment-alert:
+    name: Publish deployment result
+    if: ${{ always() && github.event_name != 'pull_request' && github.event_name != 'schedule' && !(github.event_name == 'workflow_dispatch' && inputs.inspect_only) }}
+    needs:
+      - test
+      - deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open or resolve the deployment alert
+        continue-on-error: true
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          DEPLOY_OUTCOME: ${{ needs.deploy.outputs.outcome }}
+        with:
+          script: |
+            const marker = '<!-- merge4appstore:deployment-failure -->';
+            if (process.env.DEPLOY_OUTCOME === 'superseded') {
+              core.info('A newer main-branch commit superseded this run; leaving the deployment alert unchanged.');
+              return;
+            }
+            if (context.eventName === 'push' || context.eventName === 'workflow_dispatch') {
+              const { data: branch } = await github.rest.repos.getBranch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                branch: 'main',
+              });
+              if (branch.commit.sha !== context.sha) {
+                core.info('This run is not for the current main commit; leaving the deployment alert unchanged.');
+                return;
+              }
+            }
+            const failed = process.env.TEST_RESULT !== 'success' || process.env.DEPLOY_RESULT !== 'success';
+            const title = 'merge4appstore VPS deployment failed';
+            const { data: recentIssues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              per_page: 100,
+            });
+            let issue = recentIssues.find(candidate => !candidate.pull_request && candidate.body?.includes(marker));
+            if (!issue) {
+              const { data: search } = await github.rest.search.issuesAndPullRequests({
+                q: `repo:${context.repo.owner}/${context.repo.repo} is:issue in:title "${title}"`,
+                per_page: 10,
+              });
+              issue = search.items.find(candidate => candidate.body?.includes(marker));
+            }
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            if (failed) {
+              const body = `${marker}\n\nThe merge4appstore VPS deployment did not complete.\n\n- Test job: **${process.env.TEST_RESULT}**\n- Deploy job: **${process.env.DEPLOY_RESULT}**\n- Run: ${runUrl}\n\n## Recovery\n\nInspect the failed step. If deployment was interrupted during finalization, correct the reported external or transient cause and rerun failed jobs from the Actions run; the transaction journal resumes finalization safely. If the deployed main commit itself is bad, revert that commit on main and let the resulting main push deploy the revert. Do not switch release pointers manually: PM2, nginx, credentials, cron, and pointers move as one transaction.`;
+              if (issue) {
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  state: 'open',
+                  title,
+                  body,
+                });
+              } else {
+                await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title,
+                  body,
+                });
+              }
+            } else if (issue?.state === 'open') {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `Deployment recovered in ${runUrl}.`,
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed',
+              });
+            }
+
+  public-health-monitor:
+    name: Monitor deployed webhook service
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    env:
+      HEALTH_URL: ${{ vars.MERGE4APPSTORE_HEALTH_URL || 'https://api.runningorder.app/merge4appstore/health' }}
+    steps:
+      - name: Resolve expected main deployment
+        id: expected
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { data: branch } = await github.rest.repos.getBranch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              branch: 'main',
+            });
+            if (!/^[0-9a-f]{40}$/i.test(branch.commit?.sha || '')) {
+              throw new Error('GitHub did not return a full main-branch commit SHA');
+            }
+            const { data: runs } = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'deploy.yml',
+              branch: 'main',
+              per_page: 100,
+            });
+            const activeStatuses = new Set(['queued', 'in_progress', 'waiting', 'pending', 'requested']);
+            const deploymentActive = runs.workflow_runs.some(run => (
+              run.head_sha === branch.commit.sha
+              && ['push', 'workflow_dispatch'].includes(run.event)
+              && activeStatuses.has(run.status)
+              && run.display_title !== 'Inspect VPS webhook readiness'
+            ));
+            core.setOutput('sha', branch.commit.sha);
+            core.setOutput('deployment_active', deploymentActive ? 'true' : 'false');
+
+      - name: Check public health and durable delivery queue
+        id: health
+        env:
+          EXPECTED_SHA: ${{ steps.expected.outputs.sha }}
+          EXPECTED_DEPLOYMENT_ACTIVE: ${{ steps.expected.outputs.deployment_active }}
+        run: |
+          set -Eeuo pipefail
+          response_file="$(mktemp)"
+          trap 'rm -f -- "$response_file"' EXIT
+          status="$(curl --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --connect-timeout 5 --max-time 20 --retry 3 --retry-delay 2 --retry-all-errors \
+            --output "$response_file" --write-out '%{http_code}' "$HEALTH_URL")"
+          BODY_FILE="$response_file" HTTP_STATUS="$status" node -e '
+            const fs = require("fs");
+            const status = Number(process.env.HTTP_STATUS);
+            const body = fs.readFileSync(process.env.BODY_FILE, "utf8");
+            let health;
+            try { health = JSON.parse(body); } catch { throw new Error(`Health returned HTTP ${status} with invalid JSON`); }
+            const object = (value, label) => {
+              if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Health ${label} must be an object`);
+              return value;
+            };
+            const boolean = (value, label) => {
+              if (typeof value !== "boolean") throw new Error(`Health ${label} must be a boolean`);
+              return value;
+            };
+            const counter = (value, label) => {
+              if (!Number.isSafeInteger(value) || value < 0) throw new Error(`Health ${label} must be a non-negative integer`);
+              return value;
+            };
+            object(health, "response");
+            const expected = process.env.EXPECTED_SHA || "";
+            if (!/^[0-9a-f]{40}$/i.test(expected)) throw new Error("Expected deployment SHA is invalid");
+            const deployed = health.deployment_sha || "";
+            if (!/^[0-9a-f]{40}$/i.test(deployed)) {
+              throw new Error(`Health reports an invalid deployment SHA: ${deployed || "unknown"}`);
+            }
+            const activeValue = process.env.EXPECTED_DEPLOYMENT_ACTIVE || "";
+            if (!["true", "false"].includes(activeValue)) {
+              throw new Error("Expected deployment activity must be true or false");
+            }
+            const deploymentActive = activeValue === "true";
+            const rolloutPending = deployed !== expected && deploymentActive;
+            if (deployed !== expected && !deploymentActive) {
+              throw new Error(`Health reports deployment ${health.deployment_sha || "unknown"}; expected current main ${expected}`);
+            }
+            const queue = object(health.delivery_queue, "delivery_queue");
+            const deployment = object(health.deployment_state, "deployment_state");
+            const pending = counter(queue.pending, "delivery_queue.pending");
+            const failed = counter(queue.failed, "delivery_queue.failed");
+            const corrupt = counter(queue.corrupt, "delivery_queue.corrupt");
+            const oldestPendingAge = queue.oldest_pending_age_ms === null
+              ? null
+              : counter(queue.oldest_pending_age_ms, "delivery_queue.oldest_pending_age_ms");
+            const active = counter(deployment.active, "deployment_state.active");
+            const incomplete = counter(deployment.incomplete, "deployment_state.incomplete");
+            const ok = boolean(health.ok, "ok");
+            const degraded = boolean(health.degraded, "degraded");
+            const deliveryPaused = boolean(health.delivery_paused, "delivery_paused");
+            const queueFailed = failed > 0 || corrupt > 0;
+            const queueStale = oldestPendingAge !== null && oldestPendingAge >= 15 * 60_000;
+            const plannedMigration = deliveryPaused
+              && active > 0
+              && incomplete === 0
+              && !queueFailed
+              && !queueStale;
+            if (status !== 200 || !ok || queueStale || (degraded && !plannedMigration)) {
+              throw new Error(`Health is unhealthy: HTTP ${status}, ok=${ok}, degraded=${degraded}, queue=${JSON.stringify(queue)}`);
+            }
+            const state = rolloutPending
+              ? `Healthy current deployment ${deployed}; rollout to ${expected} is active`
+              : plannedMigration ? "Healthy planned migration" : `Healthy deployment ${deployed}`;
+            console.log(`${state}; queue=${JSON.stringify({ pending, failed, corrupt, oldest_pending_age_ms: oldestPendingAge })}`);
+          '
+
+      - name: Open service health alert
+        if: failure()
+        continue-on-error: true
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const marker = '<!-- merge4appstore:public-health-failure -->';
+            const title = 'merge4appstore service health alert';
+            const { data: recentIssues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              per_page: 100,
+            });
+            let issue = recentIssues.find(candidate => !candidate.pull_request && candidate.body?.includes(marker));
+            if (!issue) {
+              const { data: search } = await github.rest.search.issuesAndPullRequests({
+                q: `repo:${context.repo.owner}/${context.repo.repo} is:issue in:title "${title}"`,
+                per_page: 10,
+              });
+              issue = search.items.find(candidate => candidate.body?.includes(marker));
+            }
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `${marker}\n\nThe external monitor could not verify the merge4appstore public health endpoint, or its durable delivery queue is degraded.\n\n- Monitor run: ${runUrl}\n- Endpoint: ${process.env.HEALTH_URL}\n\n## Recovery\n\nInspect VPS/PM2 logs and the durable queue. Restore service or requeue failed receipts, then rerun this monitor; the alert closes after a healthy check.`;
+            if (issue) {
+              await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, state: 'open', title, body });
+            } else {
+              await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo, title, body });
+            }
+
+      - name: Resolve service health alert
+        if: success()
+        continue-on-error: true
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const marker = '<!-- merge4appstore:public-health-failure -->';
+            const title = 'merge4appstore service health alert';
+            const { data: recentIssues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            let issue = recentIssues.find(candidate => !candidate.pull_request && candidate.body?.includes(marker));
+            if (!issue) {
+              const { data: search } = await github.rest.search.issuesAndPullRequests({
+                q: `repo:${context.repo.owner}/${context.repo.repo} is:issue is:open in:title "${title}"`,
+                per_page: 10,
+              });
+              issue = search.items.find(candidate => candidate.body?.includes(marker));
+            }
+            if (issue) {
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, body: 'The external health check has recovered.' });
+              await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, state: 'closed' });
+            }
+
+      - name: Reconcile the latest main-branch deployment alert
+        if: always()
+        continue-on-error: true
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const marker = '<!-- merge4appstore:deployment-failure -->';
+            const title = 'merge4appstore VPS deployment failed';
+            const { data: branch } = await github.rest.repos.getBranch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              branch: 'main',
+            });
+            const listRuns = event => github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'deploy.yml',
+              branch: 'main',
+              event,
+              status: 'completed',
+              per_page: 100,
+            });
+            const [pushes, dispatches] = await Promise.all([
+              listRuns('push'),
+              listRuns('workflow_dispatch'),
+            ]);
+            const dispatchWindow = dispatches.data.workflow_runs;
+            const executionStartedAt = run => {
+              const timestamp = Date.parse(run.run_started_at || run.created_at || '');
+              return Number.isFinite(timestamp) ? timestamp : 0;
+            };
+            const deployment = [
+              ...pushes.data.workflow_runs,
+              ...dispatchWindow.filter(run => run.display_title !== 'Inspect VPS webhook readiness'),
+            ]
+              .filter(run => run.head_sha === branch.commit.sha)
+              .sort((left, right) => (
+                executionStartedAt(right) - executionStartedAt(left)
+                || Number(right.run_number || 0) - Number(left.run_number || 0)
+                || Number(right.run_attempt || 0) - Number(left.run_attempt || 0)
+              ))[0];
+            const oldestVisibleDispatch = Math.min(
+              ...dispatchWindow.map(run => Number(run.run_number)).filter(Number.isFinite),
+            );
+            if (
+              dispatchWindow.length === 100
+              && (!deployment || Number(deployment.run_number) < oldestVisibleDispatch)
+            ) {
+              core.warning('The bounded dispatch history is saturated by newer inspection runs; leaving the deployment alert unchanged.');
+              return;
+            }
+            if (!deployment) return;
+            const failed = deployment.conclusion !== 'success';
+            const { data: recentIssues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              per_page: 100,
+            });
+            let issue = recentIssues.find(candidate => !candidate.pull_request && candidate.body?.includes(marker));
+            if (!issue) {
+              const { data: search } = await github.rest.search.issuesAndPullRequests({
+                q: `repo:${context.repo.owner}/${context.repo.repo} is:issue in:title "${title}"`,
+                per_page: 10,
+              });
+              issue = search.items.find(candidate => candidate.body?.includes(marker));
+            }
+            if (failed) {
+              const body = `${marker}\n\nThe latest completed main-branch deployment did not succeed.\n\n- Conclusion: **${deployment.conclusion}**\n- Run: ${deployment.html_url}\n\n## Recovery\n\nIf deployment was interrupted during finalization, correct the reported external or transient cause and rerun the failed jobs; the transaction journal resumes finalization safely. If the deployed main commit itself is bad, revert that commit on main and let the resulting main push deploy the revert. Do not switch release pointers manually: PM2, nginx, credentials, cron, and pointers move as one transaction. This scheduled reconciliation keeps the alert visible even if GitHub was temporarily unavailable when the deployment first failed.`;
+              if (issue) {
+                await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, state: 'open', title, body });
+              } else {
+                await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo, title, body });
+              }
+            } else if (issue?.state === 'open') {
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, body: `The latest main-branch deployment recovered in ${deployment.html_url}.` });
+              await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, state: 'closed' });
+            }

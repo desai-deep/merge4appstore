@@ -95,10 +95,16 @@ import { runDeployCheck } from './lib/deploy.js';
 import { runReleaseSync } from './lib/sync.js';
 import { runClosedPRBuildExpiry } from './lib/expire.js';
 import { XcodeCloudBuildProvider } from './lib/build-provider.js';
-import { buildIntentFromEnvironment, runManagedBuildTrigger, waitForBuildCompletion } from './lib/trigger.js';
+import {
+  buildIntentFromEnvironment,
+  effectiveTriggerDryRun,
+  runManagedBuildTrigger,
+  waitForBuildCompletion,
+} from './lib/trigger.js';
 import { refreshTestFlightNotes } from './lib/refresh-notes.js';
 import { reconcileReleasePullRequest } from './lib/release-pr.js';
 import { rebaseOpenPullRequests } from './lib/rebase-prs.js';
+import { FileBuildStatusStore, reportXcodeBuildStatus } from './lib/build-status.js';
 
 async function main() {
   const DRY_RUN = process.env.DRY_RUN === 'true';
@@ -110,10 +116,19 @@ async function main() {
     process.exit(75);
   }
 
-  // Ensure lock is released on exit
-  process.on('exit', releaseLock);
-  process.on('SIGINT', () => { releaseLock(); process.exit(0); });
-  process.on('SIGTERM', () => { releaseLock(); process.exit(0); });
+  // An interrupted job is incomplete. Release the kernel lock cleanly, but
+  // preserve a nonzero exit status so the durable webhook receipt is retried
+  // instead of advancing past work that may have stopped mid-mutation.
+  let terminating = false;
+  const terminate = async (signal, exitCode) => {
+    if (terminating) return;
+    terminating = true;
+    log(`Interrupted by ${signal}; leaving the current job incomplete`);
+    await releaseLock();
+    process.exit(exitCode);
+  };
+  process.once('SIGINT', () => terminate('SIGINT', 130));
+  process.once('SIGTERM', () => terminate('SIGTERM', 143));
 
   log('=== merge4appstore ===');
   log(`Mode: ${mode}`);
@@ -125,7 +140,7 @@ async function main() {
 
   // Validate required environment variables
   const requiredSharedVars = ['GH_TOKEN', 'GITHUB_REPO_OWNER', 'GITHUB_REPO_NAME'];
-  if (!['release-pr', 'rebase-prs'].includes(mode)) requiredSharedVars.push(
+  if (!['release-pr', 'rebase-prs', 'build-status'].includes(mode)) requiredSharedVars.push(
     'APP_STORE_CONNECT_API_KEY_ID',
     'APP_STORE_CONNECT_ISSUER_ID',
     'APP_STORE_CONNECT_API_KEY_CONTENT',
@@ -159,6 +174,20 @@ async function main() {
   };
 
   try {
+    if (mode === 'build-status') {
+      if (!repositoryProfile) throw new Error('build-status mode requires --profile');
+      const github = new GitHubAPI(CONFIG.repoOwner, CONFIG.repoName, CONFIG.productionBranch);
+      await reportXcodeBuildStatus(github, {
+        status: process.env.BUILD_STATUS,
+        workflowId: process.env.BUILD_WORKFLOW_ID,
+        runId: process.env.BUILD_RUN_ID,
+        purpose: process.env.BUILD_PURPOSE || 'production',
+        buildNumber: process.env.BUILD_NUMBER || null,
+        commitSha: process.env.BUILD_COMMIT_SHA || null,
+        completedAt: process.env.BUILD_COMPLETED_AT || null,
+      }, new FileBuildStatusStore());
+    }
+
     if (mode === 'rebase-prs') {
       if (!repositoryProfile) throw new Error('rebase-prs mode requires --profile');
       const policy = resolveAutoRebasePullRequests(repositoryProfile);
@@ -198,11 +227,12 @@ async function main() {
       const purpose = process.env.BUILD_PURPOSE;
       const build = applyBuildPurposeProfile(repositoryProfile, purpose);
       log(`trigger: using ${build.provider}/${build.appRole} (${build.appName}, ${build.workflowId})`);
+      const triggerDryRun = effectiveTriggerDryRun(build.triggerMode, DRY_RUN);
       const { asc, github } = createClients();
       const provider = new XcodeCloudBuildProvider(asc);
       const intent = buildIntentFromEnvironment(build);
-      const result = await runManagedBuildTrigger(provider, github, intent, DRY_RUN);
-      if (!DRY_RUN && process.env.BUILD_WAIT_FOR_COMPLETION === 'true' && result.runId) {
+      const result = await runManagedBuildTrigger(provider, github, intent, triggerDryRun);
+      if (!triggerDryRun && process.env.BUILD_WAIT_FOR_COMPLETION === 'true' && result.runId) {
         const completed = await waitForBuildCompletion(provider, result.runId);
         if (completed.completionStatus !== 'SUCCEEDED') {
           throw new Error(`Build #${completed.number || completed.runId} completed with ${completed.completionStatus}`);
@@ -248,7 +278,9 @@ async function main() {
     if (error.stack) {
       log(`Stack: ${error.stack.split('\n').slice(1, 4).join('\n')}`);
     }
-    process.exit(1);
+    process.exitCode = 1;
+  } finally {
+    await releaseLock();
   }
 }
 

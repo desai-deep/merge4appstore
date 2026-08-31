@@ -305,9 +305,11 @@ npm run trigger:dry    # Resolve a build intent without starting it
 ```
 
 `trigger` is an explicit API/CLI operation in this change. A webhook listener
-can call the same provider-neutral path. Use `shadow` while comparing webhook
-intents with a build provider's native triggers, and `managed` after all native
-automatic triggers have been removed.
+can call the same provider-neutral path. `native` (the default) leaves starts to
+the provider and enqueues no API start. `shadow` evaluates the webhook intent in
+dry-run mode without starting anything. Use `managed` only after all native
+automatic triggers have been removed. A direct non-dry `trigger` is rejected
+for `native` and is always forced to dry-run for `shadow`.
 
 Xcode Cloud is a special case for pull-request builds. Apple rejects API-started
 PR builds when the workflow is deactivated or its enabled start conditions do
@@ -322,9 +324,17 @@ Pull-request workflows use **Manual Start - Branch, Pull Request**.
 
 ```bash
 # Run every repository every 5 minutes
-*/5 * * * * cd /path/to/merge4appstore && node index.js --profile profiles/runningorder.yml >> logs/cron.log 2>&1
-*/5 * * * * cd /path/to/merge4appstore && node index.js --profile profiles/jamsontoast.yml >> logs/cron.log 2>&1
+*/5 * * * * umask 077; cd /srv/merge4appstore.state/current && PATH='/absolute/node/bin:/absolute/gh/bin:/absolute/git/bin:/absolute/flock/bin:/absolute/logrotate/bin:/usr/bin:/bin' MERGE4APPSTORE_ENV=/srv/merge4appstore/.env MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state DRY_RUN=false RECONCILE_METADATA=false /absolute/node/bin/node index.js --profile profiles/runningorder.yml >> /srv/merge4appstore.state/logs/cron.log 2>&1
+*/5 * * * * umask 077; cd /srv/merge4appstore.state/current && PATH='/absolute/node/bin:/absolute/gh/bin:/absolute/git/bin:/absolute/flock/bin:/absolute/logrotate/bin:/usr/bin:/bin' MERGE4APPSTORE_ENV=/srv/merge4appstore/.env MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state DRY_RUN=false RECONCILE_METADATA=false /absolute/node/bin/node index.js --profile profiles/jamsontoast.yml >> /srv/merge4appstore.state/logs/cron.log 2>&1
 ```
+
+Every CLI, cron, and webhook process for the same installation must use the
+same absolute `MERGE4APPSTORE_STATE_DIR`. This makes repository locks, delivery
+deduplication, mirror data, and logs independent of the deployed release.
+Process locks are kernel-held and disappear with their owner: Linux uses GNU
+`flock`, macOS uses `lockf`, and both keep mode-`0600` lock files below a private
+mode-`0700` directory. Windows uses an exclusive named pipe. Other operating
+systems are rejected instead of falling back to an unsafe stale lock file.
 
 Cron is the reconciliation fallback. The primary event path is `npm run
 webhooks`, exposed behind HTTPS:
@@ -335,6 +345,20 @@ webhooks`, exposed behind HTTPS:
   lifecycle events. Because Apple doesn't document a signing header for these
   events, use a high-entropy URL token and never store it in profile YAML.
 - `GET /health` reports the configured instances without exposing secrets.
+
+The listener returns `202` only after the delivery intent is fsynced below
+`MERGE4APPSTORE_STATE_DIR/deliveries`. Workers resume pending receipts after a
+crash, retain their job cursor so completed steps are not repeated, and move a
+delivery to the failed queue after the bounded attempt limit. `/health` keeps
+`ok: true` when the service can accept work and sets `degraded: true` plus the
+pending/failed/corrupt counts and oldest pending age when operator recovery is
+needed. A receipt pending for 15 minutes, a durable migration gate, or a stale
+incomplete deployment transaction makes health degraded; unreadable runtime
+state makes the endpoint return `503`. Each spawned job also has a 20-minute
+hard deadline; on expiry the worker terminates its entire process group, records
+the attempt as failed, and lets the durable retry/dead-letter policy take over.
+Presigned App Store screenshot and preview uploads have their own five-minute
+request deadline, so a stalled upload cannot consume that whole job window.
 
 Each profile can select environment variable names without containing values:
 
@@ -353,14 +377,59 @@ manual deployment can set `pause_cron: true` for an isolated webhook test.
 The deployment workflow also exposes a constrained `reconcile_profile` choice
 for an auditable one-off live reconciliation on the VPS. It defaults to `none`;
 selecting a repository runs its deploy reconciliation only after the rollout and
-health checks succeed. Main-branch deployments keep legacy profile cron jobs
-paused by default while webhook delivery is authoritative.
+health checks succeed. A normal main-branch deployment installs reconciliation
+cron after the first-generation drain; a manual deployment can deliberately
+leave the managed cron entries paused.
 
 Webhook jobs for one repository are serialized. If cron or a manual command
 already holds that repository's lock, a later job waits instead of being
 reported as a successful no-op. The default wait is ten minutes and can be
 overridden with `MERGE4APPSTORE_LOCK_WAIT_MS`; a timeout exits nonzero so the
 incomplete operation remains visible.
+
+### Webhook failure recovery
+
+The scheduled GitHub Actions health monitor opens or updates a marked issue if
+the public endpoint is unreachable, reports `ok: false`, or has a degraded
+delivery queue. Xcode Cloud failures for pull-request, beta, and production
+workflows also open marked issues; an older completion can never overwrite a
+newer status, and a newer successful build closes the alert. To inspect and
+requeue durable failures on the VPS:
+
+```bash
+curl --fail-with-body https://api.runningorder.app/merge4appstore/health
+cd /srv/merge4appstore.state/current
+MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state npm run retry:deliveries
+```
+
+For proxy failures, inspect the private sanitized upstream log and the rotation
+contract. The JSON records contain only a request ID, method, response status,
+upstream address/status/timings, total request time, and bytes sent. They never
+contain a URI, query string, webhook token, header, body, client address,
+referrer, or user agent; Nginx's location error log remains disabled because an
+error can reproduce the token-bearing request line.
+
+```bash
+tail -n 50 /srv/merge4appstore.state/logs/nginx-upstream.log
+logrotate --debug \
+  --state /srv/merge4appstore.state/logrotate.state \
+  /srv/merge4appstore.state/logrotate.conf
+crontab -l | grep -F '# merge4appstore-logrotate'
+```
+
+The retry command requeues every readable failed receipt from its first
+unfinished job. If it exits `2`, inspect the preserved corrupt evidence and
+then quarantine it explicitly:
+
+```bash
+MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state \
+  npm run retry:deliveries -- --quarantine-corrupt
+```
+
+After quarantine, use GitHub’s webhook delivery page to redeliver the original
+GitHub event, or rerun the affected Xcode Cloud build. Receipt keys are stable,
+so ordinary sender retries are deduplicated while a completed receipt is within
+retention. The external alert closes on the next healthy scheduled check.
 
 When `release_pull_request` is enabled, beta and production pushes also
 reconcile the open pull request from `repository.beta_branch` to
@@ -404,6 +473,25 @@ notes as a versioned, provider-neutral response:
   "warnings": []
 }
 ```
+
+Preparation uses a persistent, blobless bare Git mirror for commit ancestry and
+subjects. The mirror has no working tree and does not check out repository
+source files. It downloads refs, commit objects, and tree metadata, but its
+initial and refresh fetches omit file-content blobs. A request performs at most
+one bounded mirror refresh instead of up to 20 sequential GitHub compare API
+calls, then evaluates eligible local ancestor candidates in newest-first order,
+hard-capped at 20 total. Identical preparations across both PM2 workers share a
+kernel lock and a private 60-second result cache; published-build history also
+has a 60-second cache, and a failed refresh is surfaced instead of serving a
+stale result.
+
+The service returns dependency timeouts as `503 Service Unavailable` with a
+`Retry-After` header before the reverse proxy's deadline. Repository adapters
+should retry transient HTTP and transport failures with a bounded backoff,
+re-sending the same preparation payload. A completed 4xx response is not
+transient. If all retries fail, the Xcode Cloud build remains failed and can be
+rerun safely after service recovery; preparation does not make repository or
+App Store mutations.
 
 The checked-out repository owns adapters that read its current marketing
 version and consume this response. That adapter may update an Xcode project,
@@ -449,12 +537,117 @@ Required GitHub Actions secrets:
 | `VPS_HOST` | VPS hostname or IP |
 | `VPS_USER` | SSH user |
 | `VPS_SSH_KEY` | Private SSH key for deployment |
+| `VPS_SSH_HOST_ED25519_SHA256` | Pinned VPS ed25519 host-key fingerprint (`SHA256:...`), obtained from the provider console or an already trusted session |
 | `SERVER_DIR` | Absolute path to this repo on the VPS |
 
-The deploy workflow SSHes into the VPS, updates the checkout to `origin/main`,
-runs `npm ci --omit=dev`, executes the full test suite, dry-runs deploy and
-cleanup for every YAML profile, and installs one idempotent cron entry per
-repository.
+The checkout at `SERVER_DIR` is a control repository: deployments fetch into
+its Git object database but never reset its working tree. A deployment extracts
+the requested commit with `git archive` into the private sibling state root at
+`${SERVER_DIR}.state/releases/<sha>-<run>`, installs dependencies and runs tests
+there, dry-runs each profile, and warms the shared bare mirrors. Only a fully
+verified immutable release is started by PM2. `current` and `previous` symlinks
+identify the retained releases; cron always runs `current` and writes locks and
+logs below the state root.
+
+The state root must be a real, deployment-user-owned directory with mode
+`0700`, under a non-writable real parent. The workflow creates it only when the
+exact path is absent and empty, then installs a private ownership marker before
+opening its deployment lock. It refuses symlinks, foreign ownership, permissive
+modes, and an unmarked nonempty directory. A first deployment may migrate owned
+regular `.env` and `.webhook.env` control files that are owner-readable and
+neither writable by another user nor executable; it tightens them to `0600`
+before reading any secret. Unsafe legacy modes fail closed. After migration,
+`.webhook.env` is a validated symlink to the active private release credential.
+
+PM2 runs the permanent `merge4appstore-webhooks-v2` app as two cluster workers
+on loopback port 8788. Workers receive only non-secret settings and paths to the
+control `.env` and a release-specific `0600` webhook environment file; they load
+those files themselves. Secret values are filtered from PM2's environment and
+validated as absent before `pm2 save`. PM2's kill timeout stays ten seconds
+above `MERGE4APPSTORE_DRAIN_TIMEOUT_MS`, so acknowledged background jobs get the
+same graceful-shutdown window as the application. Deployment and inspect mode
+both require the deployment user's enabled, active `pm2-<user>.service` startup
+unit to own the live PM2 daemon, resurrect the saved dump with the same
+`PM2_HOME`, and run both the daemon and managed apps on Node.js 20 or newer.
+PM2's merged stdout and stderr, profile logs, cron output, and the sanitized
+Nginx upstream log all live below the private state root. The PM2 daemon's
+`pm2.log` and optional `agent.log` remain below the deployment user's private
+`PM2_HOME` and are covered by the same rotation policy. A deployment-user
+`logrotate` job checks them every five minutes, rotates daily or at 10 MiB,
+keeps seven rotations for at most fourteen days, and compresses old files. Its
+configuration, state file, and execution lock are owned by that user with mode
+`0600`; deployment runs one serialized rootless rotation pass before commit.
+Rotation uses `copytruncate` so neither Nginx nor PM2 needs privileged reopen
+commands; a few lines can be lost in the narrow copy/truncate window. The
+private rotation configuration is never installed under `/etc/logrotate.d`,
+where an application-writable file would otherwise be executed by root.
+
+Every rollout snapshots the exact crontab and removes all managed
+`merge4appstore` entries before starting or reloading the candidate. The first
+migration does not disturb the legacy app on port 8787; it starts and
+authenticates the new app on 8788 after cron is quiesced. A private, durable gate
+file lets the new listener acknowledge arrivals into its queue but prevents
+their execution regardless of how long preparation takes.
+The deployment persists both PM2 apps for reboot safety, switches nginx
+transactionally, verifies public health, commits the release pointers, and
+verifies that the legacy PM2 process has no descendant jobs or live legacy lock
+holders for a continuous quiet window. It then removes the legacy app, installs v2 cron, and
+clears the gate. If observable quiescence is not reached before the drain
+deadline, the committed v2 service and transaction are preserved with delivery
+paused for a safe rerun; the legacy process is not killed. A crash leaves the
+gate closed and health
+degraded until journal recovery safely finishes or restores the legacy service.
+Later releases use a PM2 rolling reload on the permanent port.
+
+Before the release pointers are committed, any error or termination restores
+the prior PM2 release, nginx files, secret pointer, `current`/`previous` links,
+and the exact saved crontab. A failure after commit (for example, while
+reconciling GitHub hooks or cron) intentionally leaves the already healthy
+release serving traffic; fix the external or transient cause and rerun the
+failed jobs so the transaction journal can finish idempotently. If the deployed
+main commit itself is bad, revert that commit on `main` and let the resulting
+push deploy the revert. Do not switch release pointers manually: PM2, nginx,
+credentials, cron, and pointers move as one transaction. The retained previous
+release and webhook file are recovery evidence and transaction inputs, not a
+standalone pointer-only rollback mechanism; do not delete them until a later
+deployment has succeeded.
+
+Every switch phase is fsynced to a private transaction journal. A later
+deployment detects an interrupted nginx/pointer switch and either rolls forward
+to the still-healthy candidate or retains the healthy previous service; the
+first migration can restore the saved legacy nginx route. Automatic rollback
+deletes candidate code and credentials only after PM2, nginx, pointers, and
+cron are positively restored. Otherwise it preserves the release, secret, and
+journal paths in the failed run log for manual recovery.
+
+The Nginx log format and private rotation configuration are part of that same
+transactional snapshot. A pre-commit failure restores or removes them exactly;
+a committed rollout retains and revalidates them before cron resumes. Before
+dependency installation and again before proxy cutover, deployment requires at
+least 1 GiB and 10% of the state filesystem to remain available. This leaves
+room for the journal, mirrors, delivery receipts, dependencies, and bounded
+logs instead of discovering a full disk during cutover.
+
+The workflow retries idempotent GitHub, authenticated preparation, and public
+health probes with bounded exponential backoff. Mirror prewarming is best effort:
+an authenticated preparation smoke test still verifies the safe API fallback
+when a transient fetch cannot refresh a valid stale mirror. A persistent
+test/deploy failure opens a marked GitHub issue containing the Actions run and
+rerun instructions, without masking the failed job; a later successful
+deployment closes it. A separate five-minute workflow checks public health and
+reconciles the latest completed main-branch deployment result even when no
+deployment is running. Set repository variable
+`MERGE4APPSTORE_HEALTH_URL` only when the public endpoint differs from the
+documented default.
+
+Webhook credentials never transit GitHub Actions during a normal deployment.
+The deployer copies the VPS's existing control `.webhook.env` into the candidate
+release before changing any pointers, then compares it with the active rollback
+credentials. Credential rotation is therefore a separate coordinated
+maintenance operation: rotate the active and retained rollback files together,
+reload and authenticate the service, update GitHub/Xcode Cloud senders, and
+only then resume normal deployment. This prevents a code rollback from silently
+restoring credentials that senders no longer use.
 
 Pull requests run the test job in the deployment workflow and validate every
 tracked repository profile without requiring production credentials. The VPS
@@ -488,14 +681,34 @@ requires `APP_BUNDLE_ID`, `APP_NAME`, `GITHUB_REPO_OWNER`, and
 | `EXPIRE_MERGED_BUILDS` | Run closed-PR expiry in the default `all` mode (default `true`) |
 | `IOS_REPO_PATH` | Optional server checkout used to trigger the next beta build |
 | `MERGE4APPSTORE_ENV` | Alternative to the `--config` command-line option |
+| `MERGE4APPSTORE_WEBHOOK_ENV` | Private webhook-only environment file loaded after `MERGE4APPSTORE_ENV`, overriding duplicate values; deployments point this at the active release credential |
 | `MERGE4APPSTORE_PROFILE` | Alternative to the `--profile` command-line option |
 | `MERGE4APPSTORE_LOCK_WAIT_MS` | Maximum time to wait for another job for the same repository (default `600000`) |
+| `MERGE4APPSTORE_STATE_DIR` | Absolute private directory for persistent Git mirrors and deployment coordination (default `~/.local/state/merge4appstore`) |
+| `MERGE4APPSTORE_MIRROR_TTL_MS` | Minimum interval between successful mirror refreshes (default `60000`) |
+| `MERGE4APPSTORE_MIRROR_TIMEOUT_MS` | Timeout for each mirror Git command (default `15000`) |
+| `MERGE4APPSTORE_MIRROR_LOCK_TIMEOUT_MS` | Maximum wait for a concurrent mirror mutation (default `60000`) |
+| `MERGE4APPSTORE_MIRROR_RETRY_BACKOFF_MS` | Backoff before retrying an unavailable mirror (default `5000`) |
+| `MERGE4APPSTORE_MIRROR_CANDIDATE_LIMIT` | Maximum eligible local build ancestors to check in newest-first order, including branch-unknown candidates (default and maximum `20`) |
+| `MERGE4APPSTORE_PREPARE_TIMEOUT_MS` | Build-preparation HTTP deadline, kept below the proxy timeout (default `45000`) |
+| `MERGE4APPSTORE_DRAIN_TIMEOUT_MS` | Maximum graceful wait for acknowledged webhook work during PM2 reload/shutdown (default `600000`) |
+| `MERGE4APPSTORE_LEGACY_DRAIN_QUIET_SECONDS` | Continuous no-child/no-live-lock window required before deleting the first-generation webhook process (default `30`) |
+| `MERGE4APPSTORE_MIN_FREE_BYTES` | Absolute free-space floor enforced by VPS deployment (default and minimum `1073741824`, 1 GiB) |
+| `MERGE4APPSTORE_MIN_FREE_PERCENT` | Percentage free-space floor enforced in addition to the byte floor (default and minimum `10`) |
+| `MERGE4APPSTORE_DELIVERY_PAUSE_FILE` | Private regular file whose presence durably pauses execution while continuing to accept and persist deliveries; deployment manages this during first migration |
+| `MERGE4APPSTORE_RECOVERY_INTERVAL_MS` | Pending-delivery recovery scan interval (default `5000`) |
+| `MERGE4APPSTORE_JOB_RETRY_MS` | Delay before retrying a failed webhook job (default `5000`) |
+| `MERGE4APPSTORE_JOB_MAX_ATTEMPTS` | Attempts before a webhook delivery enters the failed queue (default `8`) |
 | `DRY_RUN` | Set to `true` to run without making changes |
 
 ## Requirements
 
-- Node.js 18+
+- Node.js 20 LTS or newer
+- Git with reliable `GIT_NO_LAZY_FETCH` support: 2.39.4+, 2.40.2+, 2.41.1+,
+  2.42.2+, 2.43.4+, 2.44.1+, or 2.45.1+ on those maintenance branches;
+  Git 2.46.0 or newer is also supported
 - `gh` CLI (for GitHub PR operations)
+- Nginx, PM2, GNU `flock`, `logrotate`, and `gzip` on the deployment VPS
 - App Store Connect API key with App Manager permissions
 
 ## How It Filters Builds

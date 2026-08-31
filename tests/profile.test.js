@@ -217,6 +217,15 @@ test('rejects unknown build providers and purposes', () => {
   assert.throws(() => validateRepositoryProfile(purposeProfile), /Unknown build purpose/);
 });
 
+test('requires a distinct Xcode Cloud workflow for every build purpose', () => {
+  const profile = profileFixture();
+  profile.build.purposes.beta.workflow_id = 'prod-workflow';
+  assert.throws(
+    () => validateRepositoryProfile(profile),
+    /beta and production cannot share Xcode Cloud workflow prod-workflow/,
+  );
+});
+
 test('applies a build purpose to an environment', () => {
   const environment = {};
   const build = applyBuildPurposeProfile(

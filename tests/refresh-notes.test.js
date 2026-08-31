@@ -18,7 +18,7 @@ test('refreshes the localization for every published build of the PR commit', as
   };
   const github = {
     getCommitSubject: () => 'Current subject',
-    getPRDetails: () => ({ title: 'Feature', body: 'Manual tester instructions' }),
+    getPRDetails: () => ({ title: 'Feature', body: 'Manual tester instructions', headRefOid: 'head' }),
     getCommitSubjectsSince: () => ({ baseCommit: 'previous', baseBuildNumber: '100', baseMarketingVersion: '1.4', subjects: ['First', 'Second'] }),
     getPullRequestCommitSubjects: () => [],
   };
@@ -49,6 +49,7 @@ test('uses a release pull request body for matching beta workflow builds', async
     getPRDetails: () => ({
       title: 'Bug fixes and performance improvements',
       body: '## Release Notes\nCI improvements\nacross two lines\n\n## Automation\nMaintained automatically.',
+      headRefOid: 'release-head',
     }),
   };
   const build = { purpose: 'beta', appId: 'app-1', workflowId: 'wf-beta', includeCommits: false };
@@ -73,6 +74,7 @@ test('does not publish other PR sections when release notes are empty', async ()
     getPRDetails: () => ({
       title: 'Bug fixes and performance improvements',
       body: '## Release Notes\n\n## Automation\nMaintained automatically.',
+      headRefOid: 'release-head',
     }),
   };
   const build = { purpose: 'beta', appId: 'app-1', workflowId: 'wf-beta', includeCommits: false };
