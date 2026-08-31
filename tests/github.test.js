@@ -3,6 +3,20 @@ import assert from 'node:assert/strict';
 
 import { GitHubAPI } from '../lib/github.js';
 
+test('reads whether repository issues are enabled', () => {
+  const calls = [];
+  const github = new GitHubAPI('example', 'ios', 'main', { mirror: null });
+  github.exec = args => {
+    calls.push(args);
+    return 'false';
+  };
+
+  assert.equal(github.repositoryIssuesEnabled(), false);
+  assert.deepEqual(calls, [[
+    'api', 'repos/example/ios', '--jq', '.has_issues',
+  ]]);
+});
+
 test('lists open pull requests with the state needed for safe rebasing', () => {
   const github = new GitHubAPI('example', 'ios');
   let args;

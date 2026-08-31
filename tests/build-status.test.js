@@ -58,6 +58,24 @@ test('publishes failure alerts for pull request workflows too', async () => {
   assert.match(title, /pull_request build failed/i);
 });
 
+test('skips build alerts when repository issues are disabled and records ordering', async () => {
+  const store = new MemoryBuildStatusStore();
+  const github = {
+    repositoryIssuesEnabled: async () => false,
+    upsertIssue: () => { throw new Error('must not publish an issue'); },
+    closeIssueByMarker: () => { throw new Error('must not close an issue'); },
+  };
+  const result = await reportXcodeBuildStatus(github, {
+    status: 'SUCCEEDED', workflowId: 'workflow-pr', runId: 'run-44', buildNumber: 44,
+  }, store);
+
+  assert.deepEqual(result, { skipped: true, reason: 'issues-disabled' });
+  assert.equal((await store.read('production:workflow-pr')).status, 'SUCCEEDED');
+  assert.deepEqual(await reportXcodeBuildStatus(github, {
+    status: 'FAILED', workflowId: 'workflow-pr', runId: 'run-43', buildNumber: 43,
+  }, store), { ignored: true, reason: 'older-build' });
+});
+
 test('fails for retry when GitHub cannot publish the build alert', async () => {
   await assert.rejects(
     () => reportXcodeBuildStatus({ upsertIssue: () => false }, {
