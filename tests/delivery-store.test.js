@@ -451,3 +451,16 @@ test('health and recovery do not scan a large completed backlog', async t => {
   assert.equal(recovered.length, 1);
   assert.ok(completedReads <= 2, `recovery read ${completedReads} completed receipts`);
 });
+
+test('initialization does not block serving readiness on retention maintenance', async t => {
+  const stateDirectory = await temporaryState(t);
+  const store = new FileDeliveryStore({ stateDirectory });
+  let pruned = false;
+  store.maybePrune = async () => {
+    pruned = true;
+    throw new Error('maintenance must not run during initialization');
+  };
+
+  await store.initialize();
+  assert.equal(pruned, false);
+});

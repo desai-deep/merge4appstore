@@ -563,7 +563,7 @@ test('builds immutable marked releases without mutating the control checkout', (
   assert.match(deployScript, /timeout --kill-after=30s 10m npm ci --omit=dev/);
   assert.match(deployScript, /timeout --kill-after=10s 1m npm run validate:profiles/);
   assert.doesNotMatch(deployScript, /npm test/);
-  assert.match(deployScript, /if ! \(cd \"\$CANDIDATE_RELEASE\" && timeout --kill-after=30s 15m npm run prepare:mirrors\); then/);
+  assert.match(deployScript, /if ! \(cd \"\$CANDIDATE_RELEASE\" && timeout --kill-after=30s 20m npm run prepare:mirrors\); then/);
   assert.match(deployScript, /fail \"Git mirror prewarming failed before cutover\"/);
   assert.doesNotMatch(deployScript, /Git mirror prewarming failed; authenticated preparation smoke/);
 });
@@ -1387,6 +1387,44 @@ test('discovers exactly the two PM2 workers created after a generation snapshot'
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
+test('selects a reusable exact generation and identifies every extra managed worker', () => {
+  const generationFunctions = shellSection('pm2_reusable_target_ids() {', 'pm2_unhealthy_target_ids() {');
+  const sha = 'b'.repeat(40);
+  const targetScript = '/srv/releases/target/webhook-server.js';
+  const fixture = JSON.stringify([
+    { name: 'v2', pm_id: 17, pm2_env: { status: 'online', pm_exec_path: targetScript, env: { MERGE4APPSTORE_DEPLOY_SHA: sha } } },
+    { name: 'v2', pm_id: 15, pm2_env: { status: 'online', pm_exec_path: targetScript, MERGE4APPSTORE_DEPLOY_SHA: sha } },
+    { name: 'v2', pm_id: 16, pm2_env: { status: 'online', pm_exec_path: targetScript, env: { MERGE4APPSTORE_DEPLOY_SHA: sha } } },
+    { name: 'v2', pm_id: 18, pm2_env: { status: 'online', pm_exec_path: targetScript, env: { MERGE4APPSTORE_DEPLOY_SHA: 'c'.repeat(40) } } },
+    { name: 'v2', pm_id: 20, pm2_env: { status: 'online', pm_exec_path: '/srv/releases/other/webhook-server.js', env: { MERGE4APPSTORE_DEPLOY_SHA: sha } } },
+    { name: 'unrelated', pm_id: 2, pm2_env: { status: 'online', pm_exec_path: targetScript, env: { MERGE4APPSTORE_DEPLOY_SHA: sha } } },
+  ]);
+  const oneReusable = JSON.stringify(JSON.parse(fixture).filter(item => item.pm_id !== 16 && item.pm_id !== 17));
+  const result = runBash([
+    'set -u',
+    'NODE_BINARY="$TEST_NODE_BINARY"',
+    'PM2_FIXTURE="$TEST_FIXTURE"',
+    'pm2() { [ "$1" = jlist ] && printf "%s" "$PM2_FIXTURE"; }',
+    generationFunctions,
+    'reusable="$(pm2_reusable_target_ids v2 "$TEST_TARGET_SCRIPT" "$TEST_SHA")" || exit 10',
+    '[ "$reusable" = "15,16" ] || exit 11',
+    'retiring="$(pm2_app_ids_except v2 "$reusable")" || exit 12',
+    '[ "$retiring" = "17,18,20" ] || exit 13',
+    'PM2_FIXTURE="$TEST_ONE_REUSABLE"',
+    '[ -z "$(pm2_reusable_target_ids v2 "$TEST_TARGET_SCRIPT" "$TEST_SHA")" ] || exit 14',
+    'PM2_FIXTURE="$TEST_FIXTURE"',
+    'if pm2_app_ids_except v2 "15,unsafe" >/dev/null 2>&1; then exit 15; fi',
+    'if pm2_app_ids_except v2 "15,99" >/dev/null 2>&1; then exit 16; fi',
+  ].join('\n'), {
+    TEST_FIXTURE: fixture,
+    TEST_NODE_BINARY: process.execPath,
+    TEST_ONE_REUSABLE: oneReusable,
+    TEST_SHA: sha,
+    TEST_TARGET_SCRIPT: targetScript,
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});
+
 test('measures PM2 commands precisely while preserving their exit status and output', () => {
   const timedCommand = shellSection('run_timed_command() {', 'start_release() {');
   const result = runBash([
@@ -1429,6 +1467,11 @@ test('hands PM2 releases over only after the new immutable generation validates'
     'DRAIN_TIMEOUT_MS=600000',
     'LOGS_DIR="$TEST_LOGS"',
     'configure_process_environment() { printf "configure:%s:%s:%s\\n" "$1" "$2" "$3" >> "$TEST_EVENTS"; }',
+    'pm2_reusable_target_ids() { printf "%s" "${REUSABLE_IDS:-}"; }',
+    'pm2_app_ids_except() {',
+    '  printf "select-retire:%s:%s\\n" "$1" "$2" >> "$TEST_EVENTS"',
+    '  printf "%s" "${RETIRING_IDS:-}"',
+    '}',
     'pm2_unhealthy_target_ids() { printf "5"; }',
     'pm2_app_ids() { printf "snapshot\\n" >> "$TEST_EVENTS"; printf "7,8"; }',
     'pm2_new_app_ids() { printf "new-ids:%s:%s\\n" "$1" "$2" >> "$TEST_EVENTS"; printf "9,10"; }',
@@ -1511,6 +1554,21 @@ test('hands PM2 releases over only after the new immutable generation validates'
   assert.ok(unhealthyDeletion >= 0 && unhealthyDeletion < snapshot, result.stdout);
   assert.ok(stagedValidation >= 0 && stagedValidation < health
     && health < deletion && deletion < finalValidation, result.stdout);
+
+  fs.rmSync(eventLog);
+  const reused = runBash([
+    'REUSABLE_IDS=15,16',
+    'RETIRING_IDS=17,18',
+    source,
+  ].join('\n'), environment);
+  assert.equal(reused.status, 0, reused.stderr || reused.stdout);
+  const reusedEvents = fs.readFileSync(eventLog, 'utf8');
+  assert.match(reusedEvents, /validate:15,16/);
+  assert.match(reusedEvents, new RegExp(`health:15,16:${environment.TEST_SHA}:true`));
+  assert.match(reusedEvents, /select-retire:v2:15,16/);
+  assert.match(reusedEvents, /delete:v2:17,18/);
+  assert.match(reusedEvents, /validate:all/);
+  assert.doesNotMatch(reusedEvents, /pm2:<start>|snapshot|delete:v2:5/);
 
   fs.rmSync(eventLog);
   const failed = runBash([
@@ -1927,22 +1985,22 @@ test('retries transient deployment probes with bounded diagnostics', () => {
   assert.match(deployScript, /GitHub hook update[\s\S]* 4[\s\S]*timeout 30s/);
   assert.match(deployScript, /GitHub hook creation[\s\S]* 4[\s\S]*timeout 30s/);
   assert.match(deployScript, /timeout --kill-after=30s 10m npm ci/);
-  assert.match(deployScript, /timeout --kill-after=30s 15m npm run prepare:mirrors/);
+  assert.match(deployScript, /timeout --kill-after=30s 20m npm run prepare:mirrors/);
   assert.match(deployScript, /fail "Git mirror prewarming failed before cutover"/);
   assert.match(deployScript, /attempt \$attempt\/\$max_attempts/);
 });
 
 test('aggregate mirror caps bound repositories and reserve network retry headroom', () => {
   const outer = /timeout --kill-after=30s (\d+)m npm run prepare:mirrors/.exec(deployScript);
-  const clone = /MERGE4APPSTORE_MIRROR_CLONE_TIMEOUT_MS,\s*defaultPrewarmNetworkTimeoutMs/.exec(prepareMirrorsScript);
+  const clone = /defaultPrewarmCloneTimeoutMs = ([\d_]+)/.exec(prepareMirrorsScript);
   const command = /defaultPrewarmCommandTimeoutMs = ([\d_]+)/.exec(prepareMirrorsScript);
-  const network = /defaultPrewarmNetworkTimeoutMs = ([\d_]+)/.exec(prepareMirrorsScript);
+  const fetch = /defaultPrewarmFetchTimeoutMs = ([\d_]+)/.exec(prepareMirrorsScript);
   const prewarmLock = /defaultPrewarmLockTimeoutMs = ([\d_]+)/.exec(prepareMirrorsScript);
   const attempts = /defaultPrewarmAttempts = (\d+)/.exec(prepareMirrorsScript);
   const retryDelay = /defaultPrewarmRetryDelayMs = ([\d_]+)/.exec(prepareMirrorsScript);
   const repositoryDeadline = /defaultRepositoryTimeoutMs = (\d+) \* 60_000/.exec(prepareMirrorsScript);
   assert.ok(
-    outer && clone && command && network && prewarmLock
+    outer && clone && command && fetch && prewarmLock
       && attempts && retryDelay && repositoryDeadline,
   );
   const configuredRepositories = new Set(
@@ -1952,8 +2010,8 @@ test('aggregate mirror caps bound repositories and reserve network retry headroo
       .map(profile => `${profile.repository.owner.toLowerCase()}/${profile.repository.name.toLowerCase()}`),
   ).size;
   const outerTimeoutMs = Number(outer[1]) * 60_000;
-  const cloneTimeoutMs = Number(network[1].replaceAll('_', ''));
-  const fetchTimeoutMs = Number(network[1].replaceAll('_', ''));
+  const cloneTimeoutMs = Number(clone[1].replaceAll('_', ''));
+  const fetchTimeoutMs = Number(fetch[1].replaceAll('_', ''));
   const commandTimeoutMs = Number(command[1].replaceAll('_', ''));
   const prewarmLockTimeoutMs = Number(prewarmLock[1].replaceAll('_', ''));
   const maximumAttempts = Number(attempts[1]);

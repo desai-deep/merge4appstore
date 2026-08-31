@@ -77,7 +77,7 @@ test('gives deployment prewarming a longer Git command budget without changing r
   assert.deepEqual(prewarmGitMirrorOptions({}), {
     commandTimeoutMs: 60_000,
     cloneTimeoutMs: 120_000,
-    fetchTimeoutMs: 120_000,
+    fetchTimeoutMs: 180_000,
     lockTimeoutMs: 60_000,
   });
   assert.deepEqual(prewarmGitMirrorOptions({
@@ -99,7 +99,7 @@ test('gives deployment prewarming a longer Git command budget without changing r
   }), {
     commandTimeoutMs: 60_000,
     cloneTimeoutMs: 120_000,
-    fetchTimeoutMs: 120_000,
+    fetchTimeoutMs: 180_000,
     lockTimeoutMs: 60_000,
   });
 });

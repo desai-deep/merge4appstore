@@ -720,6 +720,67 @@ pm2_new_app_ids() {
   '
 }
 
+pm2_reusable_target_ids() {
+  local name="$1"
+  local target_script="$2"
+  local deployment_sha="$3"
+  pm2 jlist | PM2_APP_NAME="$name" PM2_TARGET_SCRIPT="$target_script" \
+    PM2_TARGET_SHA="$deployment_sha" "$NODE_BINARY" -e '
+    const path = require("path");
+    let source = "";
+    process.stdin.on("data", chunk => { source += chunk; });
+    process.stdin.on("end", () => {
+      const expectedScript = path.resolve(process.env.PM2_TARGET_SCRIPT);
+      const ids = JSON.parse(source || "[]")
+        .filter(item => {
+          const environment = item.pm2_env || {};
+          const appEnvironment = environment.env || {};
+          return item.name === process.env.PM2_APP_NAME
+            && environment.status === "online"
+            && path.resolve(String(environment.pm_exec_path || "")) === expectedScript
+            && (environment.MERGE4APPSTORE_DEPLOY_SHA
+              ?? appEnvironment.MERGE4APPSTORE_DEPLOY_SHA) === process.env.PM2_TARGET_SHA;
+        })
+        .map(item => item.pm_id)
+        .sort((left, right) => left - right);
+      if (ids.some(id => !Number.isSafeInteger(id) || id < 0) || new Set(ids).size !== ids.length) {
+        throw new Error(`Unsafe reusable PM2 worker IDs for ${process.env.PM2_APP_NAME}`);
+      }
+      if (ids.length >= 2) process.stdout.write(ids.slice(0, 2).join(","));
+    });
+  '
+}
+
+pm2_app_ids_except() {
+  local name="$1"
+  local retained_ids="$2"
+  pm2 jlist | PM2_APP_NAME="$name" PM2_RETAINED_IDS="$retained_ids" "$NODE_BINARY" -e '
+    let source = "";
+    process.stdin.on("data", chunk => { source += chunk; });
+    process.stdin.on("end", () => {
+      const retainedSource = process.env.PM2_RETAINED_IDS || "";
+      if (!/^\d+,\d+$/.test(retainedSource)) throw new Error("Unsafe retained PM2 worker IDs");
+      const retainedValues = retainedSource.split(",").map(Number);
+      const retained = new Set(retainedValues);
+      if (retained.size !== 2 || retainedValues.some(id => !Number.isSafeInteger(id) || id < 0)) {
+        throw new Error("Unsafe retained PM2 worker IDs");
+      }
+      const managedIds = JSON.parse(source || "[]")
+        .filter(item => item.name === process.env.PM2_APP_NAME)
+        .map(item => item.pm_id);
+      if (managedIds.some(id => !Number.isSafeInteger(id) || id < 0)
+        || new Set(managedIds).size !== managedIds.length
+        || retainedValues.some(id => !managedIds.includes(id))) {
+        throw new Error(`Unsafe PM2 worker IDs for ${process.env.PM2_APP_NAME}`);
+      }
+      process.stdout.write(managedIds
+        .filter(id => !retained.has(id))
+        .sort((left, right) => left - right)
+        .join(","));
+    });
+  '
+}
+
 pm2_unhealthy_target_ids() {
   local name="$1"
   local target_script="$2"
@@ -832,6 +893,7 @@ start_release() {
   local secret_file="$2"
   local deployment_sha="$3"
   local existing_ids created_ids unhealthy_target_ids worker_health_mode
+  local reusable_ids retiring_ids
   local start_elapsed_seconds
   local kill_timeout_ms=$((DRAIN_TIMEOUT_MS + 10000))
   configure_process_environment "$release" "$secret_file" "$deployment_sha"
@@ -847,6 +909,23 @@ start_release() {
   elif [ "$release" = "${CANDIDATE_RELEASE:-}" ]; then
     echo "ERROR: Candidate release lacks PM2 worker health capability" >&2
     return 1
+  fi
+
+  # A timed-out wait-ready command can leave a complete target generation
+  # online even though the shell never reached its validation and retirement
+  # steps. Reuse that generation only after the exact runtime contract and both
+  # worker identities answer health. This makes transaction recovery
+  # idempotent and avoids multiplying same-release workers on every retry.
+  reusable_ids="$(pm2_reusable_target_ids "$SERVICE_NAME" "$release/webhook-server.js" "$deployment_sha")" \
+    || return 1
+  if [ -n "$reusable_ids" ]; then
+    EXPECTED_PM2_IDS="$reusable_ids" validate_pm2_release || return 1
+    verify_pm2_worker_health "$reusable_ids" "$deployment_sha" "$worker_health_mode" || return 1
+    retiring_ids="$(pm2_app_ids_except "$SERVICE_NAME" "$reusable_ids")" || return 1
+    delete_pm2_ids "$SERVICE_NAME" "$retiring_ids" || return 1
+    validate_pm2_release || return 1
+    echo "Reused healthy PM2 generation $reusable_ids for deployment $deployment_sha"
+    return 0
   fi
 
   # PM2 restarts every same-name process instead of creating fresh IDs when it
@@ -2358,7 +2437,7 @@ echo "Paused managed cron; durable webhook execution is gated by $DELIVERY_PAUSE
 # reacquiring the lock needed to validate its replacement. The topology phase
 # above makes every failure from this point recoverable: rollback restores the
 # exact crontab snapshot and clears this deployment's pause gate.
-if ! (cd "$CANDIDATE_RELEASE" && timeout --kill-after=30s 15m npm run prepare:mirrors); then
+if ! (cd "$CANDIDATE_RELEASE" && timeout --kill-after=30s 20m npm run prepare:mirrors); then
   fail "Git mirror prewarming failed before cutover"
 fi
 for profile_file in "${repository_profiles[@]}"; do
