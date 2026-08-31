@@ -1534,11 +1534,19 @@ test('retries transient deployment probes with bounded diagnostics', () => {
   assert.match(deployScript, /attempt \$attempt\/\$max_attempts/);
 });
 
-test('aggregate mirror prewarm budget exceeds sequential clone and recovery budgets', () => {
+test('aggregate mirror caps bound repositories and reserve network retry headroom', () => {
   const outer = /timeout --kill-after=30s (\d+)m npm run prepare:mirrors/.exec(deployScript);
-  const clone = /MERGE4APPSTORE_MIRROR_CLONE_TIMEOUT_MS,\s*([\d_]+)/.exec(prepareMirrorsScript);
+  const clone = /MERGE4APPSTORE_MIRROR_CLONE_TIMEOUT_MS,\s*defaultPrewarmNetworkTimeoutMs/.exec(prepareMirrorsScript);
+  const command = /defaultPrewarmCommandTimeoutMs = ([\d_]+)/.exec(prepareMirrorsScript);
+  const network = /defaultPrewarmNetworkTimeoutMs = ([\d_]+)/.exec(prepareMirrorsScript);
+  const prewarmLock = /defaultPrewarmLockTimeoutMs = ([\d_]+)/.exec(prepareMirrorsScript);
+  const attempts = /defaultPrewarmAttempts = (\d+)/.exec(prepareMirrorsScript);
+  const retryDelay = /defaultPrewarmRetryDelayMs = ([\d_]+)/.exec(prepareMirrorsScript);
   const repositoryDeadline = /defaultRepositoryTimeoutMs = (\d+) \* 60_000/.exec(prepareMirrorsScript);
-  assert.ok(outer && clone && repositoryDeadline);
+  assert.ok(
+    outer && clone && command && network && prewarmLock
+      && attempts && retryDelay && repositoryDeadline,
+  );
   const configuredRepositories = new Set(
     fs.readdirSync(path.join(repositoryRoot, 'profiles'))
       .filter(name => /\.ya?ml$/.test(name))
@@ -1546,7 +1554,12 @@ test('aggregate mirror prewarm budget exceeds sequential clone and recovery budg
       .map(profile => `${profile.repository.owner.toLowerCase()}/${profile.repository.name.toLowerCase()}`),
   ).size;
   const outerTimeoutMs = Number(outer[1]) * 60_000;
-  const cloneTimeoutMs = Number(clone[1].replaceAll('_', ''));
+  const cloneTimeoutMs = Number(network[1].replaceAll('_', ''));
+  const fetchTimeoutMs = Number(network[1].replaceAll('_', ''));
+  const commandTimeoutMs = Number(command[1].replaceAll('_', ''));
+  const prewarmLockTimeoutMs = Number(prewarmLock[1].replaceAll('_', ''));
+  const maximumAttempts = Number(attempts[1]);
+  const retryDelayMs = Number(retryDelay[1].replaceAll('_', ''));
   const repositoryTimeoutMs = Number(repositoryDeadline[1]) * 60_000;
   const perRepositoryLockAndVerificationAllowanceMs = 3 * 60_000;
   assert.ok(
@@ -1554,6 +1567,18 @@ test('aggregate mirror prewarm budget exceeds sequential clone and recovery budg
       * (cloneTimeoutMs + perRepositoryLockAndVerificationAllowanceMs),
   );
   assert.ok(outerTimeoutMs > configuredRepositories * repositoryTimeoutMs);
+  assert.ok(repositoryTimeoutMs > commandTimeoutMs);
+  // This reserves headroom for the dominant network operation and lock on
+  // each attempt. Local validation, fsck, and maintenance remain sequentially
+  // governed by the hard repository AbortController; this is intentionally not
+  // a claim that every successful local command can consume its full timeout.
+  const nominalNetworkRetryBudgetMs = maximumAttempts
+    * (prewarmLockTimeoutMs
+      + Math.max(commandTimeoutMs, cloneTimeoutMs, fetchTimeoutMs))
+    + (maximumAttempts - 1) * retryDelayMs;
+  assert.ok(
+    repositoryTimeoutMs > nominalNetworkRetryBudgetMs,
+  );
 });
 
 test('publishes deploy failures and monitors public health out of band', () => {

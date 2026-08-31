@@ -7,7 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 
-import { getGitMirror } from '../lib/git-mirror.js';
+import { GitMirror, getGitMirror } from '../lib/git-mirror.js';
 import { loadRepositoryProfile } from '../lib/profile.js';
 
 const scriptPath = fileURLToPath(import.meta.url);
@@ -19,7 +19,11 @@ function positiveInteger(value, fallback) {
 }
 
 const defaultPrewarmAttempts = 2;
-const defaultRepositoryTimeoutMs = 6 * 60_000;
+const defaultRepositoryTimeoutMs = 7 * 60_000;
+const defaultPrewarmCommandTimeoutMs = 60_000;
+const defaultPrewarmNetworkTimeoutMs = 120_000;
+const defaultPrewarmLockTimeoutMs = 60_000;
+const defaultPrewarmRetryDelayMs = 5_000;
 
 function abortReason(signal) {
   return signal?.reason || new Error('Git mirror preparation aborted');
@@ -50,7 +54,7 @@ function delay(milliseconds, signal = null) {
 function retryDelayMs(error, maximumMs) {
   const retryAfterSeconds = Number(error?.retryAfter);
   if (!Number.isFinite(retryAfterSeconds) || retryAfterSeconds <= 0) {
-    return Math.min(maximumMs, 5_000);
+    return Math.min(maximumMs, defaultPrewarmRetryDelayMs);
   }
   return Math.min(maximumMs, Math.ceil(retryAfterSeconds * 1_000));
 }
@@ -128,12 +132,30 @@ export async function prewarmGitMirrors(
   }
 }
 
+export function prewarmGitMirrorOptions(environment = process.env) {
+  return {
+    commandTimeoutMs: positiveInteger(
+      environment.MERGE4APPSTORE_MIRROR_PREWARM_TIMEOUT_MS,
+      defaultPrewarmCommandTimeoutMs,
+    ),
+    cloneTimeoutMs: positiveInteger(
+      environment.MERGE4APPSTORE_MIRROR_CLONE_TIMEOUT_MS,
+      defaultPrewarmNetworkTimeoutMs,
+    ),
+    fetchTimeoutMs: positiveInteger(
+      environment.MERGE4APPSTORE_MIRROR_PREWARM_FETCH_TIMEOUT_MS,
+      defaultPrewarmNetworkTimeoutMs,
+    ),
+    lockTimeoutMs: positiveInteger(
+      environment.MERGE4APPSTORE_MIRROR_PREWARM_LOCK_TIMEOUT_MS,
+      defaultPrewarmLockTimeoutMs,
+    ),
+  };
+}
+
 export async function prepareConfiguredGitMirrors() {
   dotenv.config({ path: process.env.MERGE4APPSTORE_ENV || path.join(root, '.env') });
-  const cloneTimeoutMs = positiveInteger(
-    process.env.MERGE4APPSTORE_MIRROR_CLONE_TIMEOUT_MS,
-    120_000,
-  );
+  const mirrorOptions = prewarmGitMirrorOptions();
 
   const profilesDirectory = path.resolve(
     process.env.MERGE4APPSTORE_PROFILES_DIR || path.join(root, 'profiles'),
@@ -149,7 +171,9 @@ export async function prepareConfiguredGitMirrors() {
   }
 
   await prewarmGitMirrors(repositories, {
-    mirrorFor: (owner, repository) => getGitMirror(owner, repository, { cloneTimeoutMs }),
+    // This command is a standalone process. Construct dedicated instances so
+    // deployment-only budgets cannot be shadowed by an earlier registry entry.
+    mirrorFor: (owner, repository) => new GitMirror(owner, repository, mirrorOptions),
   });
 }
 

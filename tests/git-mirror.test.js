@@ -12,9 +12,15 @@ import {
   ensureStateDirectory,
   gitSupportsNoLazyFetch,
   GitMirror,
+  requestMirrorLockTimeoutMs,
   resolveStateDirectory,
 } from '../lib/git-mirror.js';
-import { prewarmGitMirrors } from '../scripts/prepare-git-mirrors.js';
+import { GitHubAPI } from '../lib/github.js';
+import { acquireProcessLock } from '../lib/process-lock.js';
+import {
+  prewarmGitMirrorOptions,
+  prewarmGitMirrors,
+} from '../scripts/prepare-git-mirrors.js';
 
 const execFileAsync = promisify(execFile);
 const stateDirectoryWorker = fileURLToPath(new URL('./fixtures/state-directory-worker.js', import.meta.url));
@@ -29,6 +35,7 @@ test('keeps request-time mirror initialization within the steady-state command b
 
   assert.equal(mirror.commandTimeoutMs, 12_345);
   assert.equal(mirror.cloneTimeoutMs, 12_345);
+  assert.equal(mirror.fetchTimeoutMs, 12_345);
 
   for (const [index, invalid] of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 'invalid'].entries()) {
     const normalized = new GitMirror('example', `invalid-${index}`, {
@@ -42,9 +49,473 @@ test('keeps request-time mirror initialization within the steady-state command b
   const invalidCommand = new GitMirror('example', 'invalid-command', {
     stateDirectory: path.join(root, 'state'),
     commandTimeoutMs: 0,
+    fetchTimeoutMs: 0,
+    lockTimeoutMs: 0,
   });
   assert.equal(invalidCommand.commandTimeoutMs, 15_000);
   assert.equal(invalidCommand.cloneTimeoutMs, 15_000);
+  assert.equal(invalidCommand.fetchTimeoutMs, 15_000);
+  assert.equal(invalidCommand.lockTimeoutMs, 5_000);
+
+  assert.equal(requestMirrorLockTimeoutMs({}), 5_000);
+  assert.equal(requestMirrorLockTimeoutMs({
+    MERGE4APPSTORE_MIRROR_LOCK_TIMEOUT_MS: '60000',
+  }), 5_000);
+  assert.equal(requestMirrorLockTimeoutMs({
+    MERGE4APPSTORE_MIRROR_LOCK_TIMEOUT_MS: '2500',
+  }), 2_500);
+  assert.equal(requestMirrorLockTimeoutMs({
+    MERGE4APPSTORE_MIRROR_REQUEST_LOCK_TIMEOUT_MS: '60000',
+    MERGE4APPSTORE_MIRROR_LOCK_TIMEOUT_MS: '1000',
+  }), 5_000);
+  assert.equal(requestMirrorLockTimeoutMs({
+    MERGE4APPSTORE_MIRROR_REQUEST_LOCK_TIMEOUT_MS: '2500',
+  }), 2_500);
+});
+
+test('gives deployment prewarming a longer Git command budget without changing runtime defaults', () => {
+  assert.deepEqual(prewarmGitMirrorOptions({}), {
+    commandTimeoutMs: 60_000,
+    cloneTimeoutMs: 120_000,
+    fetchTimeoutMs: 120_000,
+    lockTimeoutMs: 60_000,
+  });
+  assert.deepEqual(prewarmGitMirrorOptions({
+    MERGE4APPSTORE_MIRROR_PREWARM_TIMEOUT_MS: '90000',
+    MERGE4APPSTORE_MIRROR_CLONE_TIMEOUT_MS: '180000',
+    MERGE4APPSTORE_MIRROR_PREWARM_FETCH_TIMEOUT_MS: '150000',
+    MERGE4APPSTORE_MIRROR_PREWARM_LOCK_TIMEOUT_MS: '30000',
+  }), {
+    commandTimeoutMs: 90_000,
+    cloneTimeoutMs: 180_000,
+    fetchTimeoutMs: 150_000,
+    lockTimeoutMs: 30_000,
+  });
+  assert.deepEqual(prewarmGitMirrorOptions({
+    MERGE4APPSTORE_MIRROR_PREWARM_TIMEOUT_MS: 'invalid',
+    MERGE4APPSTORE_MIRROR_CLONE_TIMEOUT_MS: '0',
+    MERGE4APPSTORE_MIRROR_PREWARM_FETCH_TIMEOUT_MS: '-1',
+    MERGE4APPSTORE_MIRROR_PREWARM_LOCK_TIMEOUT_MS: '-1',
+  }), {
+    commandTimeoutMs: 60_000,
+    cloneTimeoutMs: 120_000,
+    fetchTimeoutMs: 120_000,
+    lockTimeoutMs: 60_000,
+  });
+});
+
+test('prewarms a missing mirror with one lock and no redundant post-clone fetch', async t => {
+  const fixture = await createRepository(t);
+  let lockCalls = 0;
+  let cloneCalls = 0;
+  let fetchCalls = 0;
+  const mirror = new GitMirror('example', 'single-lock-prewarm', {
+    stateDirectory: fixture.stateDirectory,
+    remoteUrl: fixture.remoteUrl,
+    run: async (args, options) => {
+      if (args.includes('clone')) cloneCalls += 1;
+      if (args.includes('fetch')) fetchCalls += 1;
+      return git(args, options);
+    },
+  });
+  const withMutationLock = mirror.withMutationLock.bind(mirror);
+  mirror.withMutationLock = (...args) => {
+    lockCalls += 1;
+    return withMutationLock(...args);
+  };
+
+  await mirror.refresh({ force: true });
+  assert.deepEqual({ lockCalls, cloneCalls, fetchCalls }, {
+    lockCalls: 1,
+    cloneCalls: 1,
+    fetchCalls: 0,
+  });
+
+  await mirror.refresh({ force: true });
+  assert.deepEqual({ lockCalls, cloneCalls, fetchCalls }, {
+    lockCalls: 2,
+    cloneCalls: 1,
+    fetchCalls: 1,
+  });
+});
+
+test('fetches a requested head that lands after the initial clone snapshot', async t => {
+  const fixture = await createRepository(t);
+  const requestedHead = await commit(fixture.source, 'Post-clone change', 'post-clone');
+  let pushedRequestedHead = false;
+  let fetchCalls = 0;
+  const mirror = new GitMirror('example', 'post-clone-head', {
+    stateDirectory: fixture.stateDirectory,
+    remoteUrl: fixture.remoteUrl,
+    run: async (args, options) => {
+      const result = await git(args, options);
+      if (args.includes('clone') && !pushedRequestedHead) {
+        await git(['-C', fixture.source, 'push', 'origin', 'main']);
+        pushedRequestedHead = true;
+      }
+      if (args.includes('fetch')) fetchCalls += 1;
+      return result;
+    },
+  });
+
+  await mirror.refresh({ force: true, headCommit: requestedHead });
+  assert.equal(fetchCalls, 1);
+  assert.equal(await mirror.getCommitSubject(requestedHead), 'Post-clone change');
+});
+
+test('coalesces forced initialization failures behind one backoff window', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge4appstore-forced-backoff-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const now = 10_000;
+  let cloneCalls = 0;
+  let releaseClone;
+  let announceClone;
+  const cloneStarted = new Promise(resolve => {
+    announceClone = resolve;
+  });
+  const mirror = new GitMirror('example', 'forced-backoff', {
+    stateDirectory: path.join(root, 'state'),
+    retryBackoffMs: 60_000,
+    now: () => now,
+    run: async args => {
+      if (!args.includes('clone')) throw new Error(`Unexpected Git command: ${args.join(' ')}`);
+      cloneCalls += 1;
+      announceClone();
+      await new Promise(resolve => {
+        releaseClone = resolve;
+      });
+      const error = new Error('remote temporarily unavailable');
+      error.code = 128;
+      throw error;
+    },
+  });
+
+  const first = mirror.refresh({ force: true });
+  await cloneStarted;
+  const second = mirror.refresh({ force: true });
+  releaseClone();
+  const results = await Promise.allSettled([first, second]);
+  for (const result of results) {
+    assert.equal(result.status, 'rejected');
+    assert.equal(result.reason.statusCode, 503);
+    assert.equal(result.reason.retryAfter, 60);
+  }
+  assert.equal(cloneCalls, 1);
+
+  await assert.rejects(
+    mirror.refresh({ force: true }),
+    error => error.statusCode === 503 && error.retryAfter === 60,
+  );
+  assert.equal(cloneCalls, 1);
+});
+
+test('coalesces unvalidated mirror verification failures behind initialization backoff', async t => {
+  const fixture = await createRepository(t);
+  const seed = new GitMirror('example', 'verification-backoff', {
+    stateDirectory: fixture.stateDirectory,
+    remoteUrl: fixture.remoteUrl,
+  });
+  await seed.refresh({ force: true });
+
+  const now = 10_000;
+  let verificationCalls = 0;
+  let releaseVerification;
+  let announceVerification;
+  const verificationStarted = new Promise(resolve => {
+    announceVerification = resolve;
+  });
+  const mirror = new GitMirror('example', 'verification-backoff', {
+    stateDirectory: fixture.stateDirectory,
+    remoteUrl: fixture.remoteUrl,
+    retryBackoffMs: 60_000,
+    now: () => now,
+    run: async (args, options) => {
+      if (args.includes('fsck')) {
+        verificationCalls += 1;
+        announceVerification();
+        await new Promise(resolve => {
+          releaseVerification = resolve;
+        });
+        const error = new Error('connectivity verification timed out');
+        error.code = null;
+        throw error;
+      }
+      return git(args, options);
+    },
+  });
+
+  const first = mirror.refresh({ force: true });
+  await verificationStarted;
+  const second = mirror.refresh({ force: true });
+  releaseVerification();
+  const results = await Promise.allSettled([first, second]);
+  assert.equal(results.every(result => (
+    result.status === 'rejected'
+      && result.reason.statusCode === 503
+      && result.reason.retryAfter === 60
+  )), true);
+  assert.equal(verificationCalls, 1);
+
+  await assert.rejects(
+    mirror.refresh({ headCommit: fixture.headCommit }),
+    error => error.statusCode === 503 && error.retryAfter === 60,
+  );
+  assert.equal(verificationCalls, 1);
+});
+
+test('does not record initialization backoff when unvalidated verification is cancelled', async t => {
+  const fixture = await createRepository(t);
+  const seed = new GitMirror('example', 'cancelled-verification', {
+    stateDirectory: fixture.stateDirectory,
+    remoteUrl: fixture.remoteUrl,
+  });
+  await seed.refresh({ force: true });
+
+  const cancellation = new Error('request cancelled during mirror verification');
+  const controller = new AbortController();
+  let cancelVerification = true;
+  let verificationCalls = 0;
+  const mirror = new GitMirror('example', 'cancelled-verification', {
+    stateDirectory: fixture.stateDirectory,
+    remoteUrl: fixture.remoteUrl,
+    retryBackoffMs: 60_000,
+    run: async (args, options) => {
+      if (args.includes('fsck')) {
+        verificationCalls += 1;
+        if (cancelVerification) {
+          cancelVerification = false;
+          controller.abort(cancellation);
+          throw cancellation;
+        }
+      }
+      return git(args, options);
+    },
+  });
+
+  await assert.rejects(
+    mirror.refresh({ force: true, signal: controller.signal }),
+    error => error === cancellation,
+  );
+  assert.equal(mirror.retryAt, 0);
+  assert.equal(mirror.lastFailure, null);
+  assert.equal(mirror.refreshRetryAt, 0);
+  assert.equal(mirror.lastRefreshFailure, null);
+
+  await mirror.refresh({ force: true });
+  assert.equal(mirror.validated, true);
+  assert.equal(verificationCalls, 3);
+});
+
+test('shares forced initialization lock failures with later forced and ordinary calls', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge4appstore-forced-lock-backoff-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const now = 10_000;
+  const mirror = new GitMirror('example', 'forced-lock-backoff', {
+    stateDirectory: path.join(root, 'state'),
+    lockTimeoutMs: 50,
+    retryBackoffMs: 60_000,
+    now: () => now,
+  });
+  await mirror.ensureStateDirectories();
+  let lockCalls = 0;
+  const withMutationLock = mirror.withMutationLock.bind(mirror);
+  mirror.withMutationLock = (...args) => {
+    lockCalls += 1;
+    return withMutationLock(...args);
+  };
+  const release = await acquireProcessLock(
+    mirror.locksDirectory,
+    `mirror:${mirror.lockIdentity}`,
+    { timeoutMs: 0 },
+  );
+
+  let firstFailure;
+  try {
+    await assert.rejects(mirror.refresh({ force: true }), error => {
+      firstFailure = error;
+      return error.statusCode === 503 && error.retryAfter === 60;
+    });
+  } finally {
+    await release();
+  }
+  assert.equal(mirror.retryAt, now + 60_000);
+  assert.equal(mirror.lastFailure, firstFailure);
+  assert.equal(mirror.refreshRetryAt, now + 60_000);
+  assert.equal(mirror.lastRefreshFailure, firstFailure);
+  assert.equal(lockCalls, 1);
+
+  await assert.rejects(mirror.refresh({ force: true }), error => error === firstFailure);
+  await assert.rejects(mirror.refresh(), error => error === firstFailure);
+  assert.equal(lockCalls, 1);
+});
+
+test('shares forced pre-validation metadata failures with later initialization calls', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge4appstore-forced-metadata-backoff-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const now = 10_000;
+  const mirror = new GitMirror('example', 'forced-metadata-backoff', {
+    stateDirectory: path.join(root, 'state'),
+    retryBackoffMs: 60_000,
+    now: () => now,
+  });
+  let metadataCalls = 0;
+  let announceMetadata;
+  const metadataStarted = new Promise(resolve => {
+    announceMetadata = resolve;
+  });
+  let releaseMetadata;
+  const metadataBlocked = new Promise(resolve => {
+    releaseMetadata = resolve;
+  });
+  mirror.getLastRefreshAt = async () => {
+    metadataCalls += 1;
+    announceMetadata();
+    await metadataBlocked;
+    const error = new Error('mirror refresh stamp is temporarily unreadable');
+    error.code = 'EIO';
+    throw error;
+  };
+
+  const first = mirror.refresh({ force: true });
+  await metadataStarted;
+  const second = mirror.refresh({ force: true });
+  releaseMetadata();
+  const results = await Promise.allSettled([first, second]);
+  assert.equal(results.every(result => (
+    result.status === 'rejected'
+      && result.reason.statusCode === 503
+      && result.reason.retryAfter === 60
+  )), true);
+  const firstFailure = results[0].reason;
+  assert.equal(results[1].reason, firstFailure);
+  assert.equal(mirror.retryAt, now + 60_000);
+  assert.equal(mirror.lastFailure, firstFailure);
+  assert.equal(metadataCalls, 1);
+
+  await assert.rejects(mirror.refresh({ force: true }), error => error === firstFailure);
+  await assert.rejects(mirror.refresh(), error => error === firstFailure);
+  assert.equal(metadataCalls, 1);
+});
+
+test('shares forced abandoned-clone cleanup failures before releasing the lock', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge4appstore-forced-cleanup-backoff-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const now = 10_000;
+  const mirror = new GitMirror('example', 'forced-cleanup-backoff', {
+    stateDirectory: path.join(root, 'state'),
+    retryBackoffMs: 60_000,
+    now: () => now,
+  });
+  let cleanupCalls = 0;
+  let announceCleanup;
+  const cleanupStarted = new Promise(resolve => {
+    announceCleanup = resolve;
+  });
+  let releaseCleanup;
+  const cleanupBlocked = new Promise(resolve => {
+    releaseCleanup = resolve;
+  });
+  mirror.cleanupAbandonedCloneDirectories = async () => {
+    const call = ++cleanupCalls;
+    announceCleanup();
+    await cleanupBlocked;
+    const error = new Error(`cleanup EIO call ${call}`);
+    error.code = 'EIO';
+    throw error;
+  };
+
+  const first = mirror.refresh({ force: true });
+  await cleanupStarted;
+  const second = mirror.refresh({ force: true });
+  releaseCleanup();
+  const results = await Promise.allSettled([first, second]);
+  assert.equal(results.every(result => (
+    result.status === 'rejected'
+      && result.reason.statusCode === 503
+      && result.reason.retryAfter === 60
+  )), true);
+  const firstFailure = results[0].reason;
+  assert.equal(results[1].reason, firstFailure);
+  assert.equal(mirror.retryAt, now + 60_000);
+  assert.equal(mirror.lastFailure, firstFailure);
+  assert.equal(mirror.refreshRetryAt, now + 60_000);
+  assert.equal(mirror.lastRefreshFailure, firstFailure);
+  assert.equal(cleanupCalls, 1);
+
+  await assert.rejects(mirror.refresh({ force: true }), error => error === firstFailure);
+  await assert.rejects(mirror.refresh(), error => error === firstFailure);
+  assert.equal(cleanupCalls, 1);
+});
+
+test('does not clone twice when temporary-clone connectivity is corrupt', async t => {
+  const fixture = await createRepository(t);
+  const now = 10_000;
+  let cloneCalls = 0;
+  let temporaryConnectivityCalls = 0;
+  const mirror = new GitMirror('example', 'temporary-clone-corruption', {
+    stateDirectory: fixture.stateDirectory,
+    remoteUrl: fixture.remoteUrl,
+    retryBackoffMs: 60_000,
+    now: () => now,
+    run: async (args, options) => {
+      if (args.includes('clone')) cloneCalls += 1;
+      if (args.includes('fsck') && args[1]?.includes('.tmp-')) {
+        temporaryConnectivityCalls += 1;
+        const error = new Error('temporary clone connectivity is corrupt');
+        error.code = 1;
+        error.stderr = `missing tree ${'a'.repeat(40)}`;
+        throw error;
+      }
+      return git(args, options);
+    },
+  });
+
+  await assert.rejects(
+    mirror.refresh({ force: true }),
+    error => error.statusCode === 503 && error.retryAfter === 60,
+  );
+  assert.equal(cloneCalls, 1);
+  assert.equal(temporaryConnectivityCalls, 1);
+
+  await assert.rejects(
+    mirror.refresh({ force: true }),
+    error => error.statusCode === 503 && error.retryAfter === 60,
+  );
+  assert.equal(cloneCalls, 1);
+});
+
+test('falls back to GitHub before the request deadline when the mirror lock is held', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge4appstore-mirror-lock-budget-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const mirror = new GitMirror('example', 'contended', {
+    stateDirectory: path.join(root, 'state'),
+    lockTimeoutMs: 50,
+  });
+  await mirror.ensureStateDirectories();
+  const release = await acquireProcessLock(
+    mirror.locksDirectory,
+    `mirror:${mirror.lockIdentity}`,
+    { timeoutMs: 0 },
+  );
+  try {
+    const signal = AbortSignal.timeout(2_000);
+    const github = new GitHubAPI('example', 'contended', 'main', { mirror, signal });
+    let fallbackCalls = 0;
+    github.execAsync = async () => {
+      fallbackCalls += 1;
+      return 'Provider fallback subject';
+    };
+    const startedAt = Date.now();
+    assert.equal(
+      await github.getCommitSubjectAsync('a'.repeat(40)),
+      'Provider fallback subject',
+    );
+    assert.ok(Date.now() - startedAt < 1_000);
+    assert.equal(signal.aborted, false);
+    assert.equal(fallbackCalls, 1);
+  } finally {
+    await release();
+  }
 });
 
 test('prewarms every repository sequentially and aggregates per-repository failures', async () => {
@@ -623,10 +1094,12 @@ test('uses branch-aware ancestry locally, fetches a new head, and tolerates a st
   const fixture = await createRepository(t);
   let now = 10_000;
   let fetchCalls = 0;
+  const fetchTimeouts = [];
   let failFetch = false;
   const run = async (args, options) => {
     if (args.includes('fetch')) {
       fetchCalls += 1;
+      fetchTimeouts.push(options.timeoutMs);
       if (failFetch) {
         const error = new Error('remote temporarily unavailable');
         error.code = 128;
@@ -639,6 +1112,8 @@ test('uses branch-aware ancestry locally, fetches a new head, and tolerates a st
     stateDirectory: fixture.stateDirectory,
     remoteUrl: fixture.remoteUrl,
     refreshTtlMs: 50,
+    commandTimeoutMs: 23_456,
+    fetchTimeoutMs: 78_901,
     candidateLimit: 3,
     now: () => now,
     run,
@@ -699,6 +1174,7 @@ test('uses branch-aware ancestry locally, fetches a new head, and tolerates a st
   failFetch = true;
   assert.equal(await mirror.getCommitSubject(newHead), 'Third change');
   assert.equal(fetchCalls, 2);
+  assert.deepEqual(fetchTimeouts, [78_901, 78_901]);
 });
 
 test('treats contributor-controlled corruption-like commit subjects as ordinary text', async t => {
