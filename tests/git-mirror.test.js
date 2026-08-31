@@ -29,6 +29,22 @@ test('keeps request-time mirror initialization within the steady-state command b
 
   assert.equal(mirror.commandTimeoutMs, 12_345);
   assert.equal(mirror.cloneTimeoutMs, 12_345);
+
+  for (const [index, invalid] of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 'invalid'].entries()) {
+    const normalized = new GitMirror('example', `invalid-${index}`, {
+      stateDirectory: path.join(root, 'state'),
+      commandTimeoutMs: 12_345,
+      cloneTimeoutMs: invalid,
+    });
+    assert.equal(normalized.cloneTimeoutMs, 12_345);
+  }
+
+  const invalidCommand = new GitMirror('example', 'invalid-command', {
+    stateDirectory: path.join(root, 'state'),
+    commandTimeoutMs: 0,
+  });
+  assert.equal(invalidCommand.commandTimeoutMs, 15_000);
+  assert.equal(invalidCommand.cloneTimeoutMs, 15_000);
 });
 
 test('prewarms every repository sequentially and aggregates per-repository failures', async () => {
@@ -321,6 +337,26 @@ test('initializes one atomic, private, blobless bare mirror for concurrent calle
   });
   assert.equal(await restartedProcess.getCommitSubject(fixture.headCommit), 'Second change');
   assert.equal(reuseFetches, 0);
+});
+
+test('ignores local Git replacement refs for mirror reads and validation', async t => {
+  const fixture = await createRepository(t);
+  const mirror = new GitMirror('example', 'replacement-resistant', {
+    stateDirectory: fixture.stateDirectory,
+    remoteUrl: fixture.remoteUrl,
+  });
+  await mirror.refresh({ force: true });
+  await git([
+    '-C', mirror.mirrorPath,
+    'replace', fixture.headCommit, fixture.baseCommit,
+  ]);
+
+  assert.equal(
+    await output(['-C', mirror.mirrorPath, 'show', '-s', '--format=%s', fixture.headCommit]),
+    'Published release',
+  );
+  assert.equal(await mirror.getCommitSubject(fixture.headCommit), 'Second change');
+  await mirror.verifyObjectConnectivity();
 });
 
 test('isolates mirror storage when one repository identity uses two remote URLs', async t => {

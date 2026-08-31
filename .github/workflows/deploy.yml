@@ -295,7 +295,7 @@ jobs:
                 [ -f "$refresh_stamp" ] && [ ! -L "$refresh_stamp" ] && [ -O "$refresh_stamp" ] \
                   && [ "$(stat -c '%a' "$refresh_stamp")" = 600 ] \
                   || { echo "Git mirror refresh stamp is missing or unsafe"; exit 1; }
-                GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0 \
+                GIT_NO_LAZY_FETCH=1 GIT_NO_REPLACE_OBJECTS=1 GIT_TERMINAL_PROMPT=0 \
                   timeout --kill-after=5s 30s git -C "$mirror" fsck --connectivity-only --no-dangling
                 echo "git_mirror=$identity:ready"
               done

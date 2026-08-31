@@ -318,7 +318,7 @@ test('inspection verifies both private blobless mirrors without lazy fetching', 
   assert.match(inspectRun, /remote\.origin\.promisor/);
   assert.match(inspectRun, /remote\.origin\.partialclonefilter/);
   assert.match(inspectRun, /\.merge4appstore-refresh/);
-  assert.match(inspectRun, /GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0/);
+  assert.match(inspectRun, /GIT_NO_LAZY_FETCH=1 GIT_NO_REPLACE_OBJECTS=1 GIT_TERMINAL_PROMPT=0/);
   assert.match(inspectRun, /fsck --connectivity-only --no-dangling/);
   assert.match(inspectRun, /Expected exactly one ready mirror for each configured repository/);
 });
