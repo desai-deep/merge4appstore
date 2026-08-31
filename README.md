@@ -487,7 +487,10 @@ calls, then evaluates eligible local ancestor candidates in newest-first order,
 hard-capped at 20 total. Identical preparations across both PM2 workers share a
 kernel lock and a private 60-second result cache; published-build history also
 has a 60-second cache, and a failed refresh is surfaced instead of serving a
-stale result.
+stale result. File-lock startup avoids a second Node.js cold start, waits for a
+timed-out helper to exit before retrying, and retries only helper-readiness
+timeouts; lock contention and permanent helper failures retain their distinct
+outcomes.
 
 The service returns dependency timeouts as `503 Service Unavailable` with a
 `Retry-After` header before the reverse proxy's deadline. Repository adapters
@@ -638,11 +641,14 @@ logs instead of discovering a full disk during cutover.
 
 The workflow retries idempotent GitHub, authenticated preparation, and public
 health probes with bounded exponential backoff. Before cutover, it prewarms
-every configured Git mirror sequentially with the longer clone budget. Any
-mirror failure rejects the candidate while the previous production release
-remains selected, so the deployment-alert issue makes the degraded optimization
-visible; rerun the failed workflow after the transient cause clears. Runtime
-requests retain the shorter mirror-command budget and safe provider fallback.
+every configured Git mirror sequentially with the longer clone budget. Each
+repository has a six-minute deadline and one retry after a mirror reports a
+transient `503`; request-time mirror initialization is never retried. An
+exhausted or permanent mirror failure rejects the candidate while the previous
+production release remains selected, so the deployment-alert issue makes the
+degraded optimization visible; rerun the failed workflow after the reported
+cause clears. Runtime requests retain the shorter mirror-command budget and
+safe provider fallback.
 A persistent test/deploy failure opens a marked GitHub issue containing the
 Actions run and rerun instructions, without masking the failed job; a later
 successful deployment closes it. A separate five-minute workflow checks public
