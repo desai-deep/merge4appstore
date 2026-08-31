@@ -367,6 +367,13 @@ the attempt as failed, and lets the durable retry/dead-letter policy take over.
 Presigned App Store screenshot and preview uploads have their own five-minute
 request deadline, so a stalled upload cannot consume that whole job window.
 
+Every authenticated GitHub and Xcode Cloud webhook request also emits one
+single-line JSON `webhook_received` record to `webhook-out.log`. The record is
+limited to delivery/event identity, repository refs or pull request identity,
+Xcode Cloud workflow/run state, the selected jobs, and whether the delivery was
+accepted, deferred, or deduplicated. It never includes request bodies, URL
+tokens, signatures, authorization headers, or other credentials.
+
 Each profile can select environment variable names without containing values:
 
 ```yaml

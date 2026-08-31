@@ -20,11 +20,13 @@ import {
   createSerialDispatcher,
   createVersionRequest,
   createWebhookServer,
+  githubWebhookLogMetadata,
   inspectDeploymentTransactions,
   loadProfiles,
   runJob,
   singleHeader,
   webhookDeliveryKey,
+  xcodeWebhookLogMetadata,
 } from '../webhook-server.js';
 
 const profile = {
@@ -76,6 +78,53 @@ test('namespaces webhook delivery deduplication by profile instance', () => {
     webhookDeliveryKey('github', 'one', 'same-delivery'),
     webhookDeliveryKey('github', 'two', 'same-delivery'),
   );
+});
+
+test('builds bounded webhook log metadata without request secrets or bodies', () => {
+  const github = githubWebhookLogMetadata('pull_request', 'delivery-1', {
+    action: 'synchronize',
+    pull_request: {
+      number: 67,
+      head: { ref: 'feature', sha: COMMIT_SHA },
+      base: { ref: 'develop' },
+    },
+    secret: 'must-not-appear',
+  });
+  assert.deepEqual(github, {
+    provider: 'github',
+    event: 'pull_request',
+    delivery_id: 'delivery-1',
+    action: 'synchronize',
+    ref: null,
+    before_sha: null,
+    after_sha: null,
+    pull_request: 67,
+    source_branch: 'feature',
+    target_branch: 'develop',
+    head_sha: COMMIT_SHA,
+  });
+  assert.doesNotMatch(JSON.stringify(github), /must-not-appear/);
+
+  const xcode = xcodeWebhookLogMetadata({
+    metadata: { attributes: { eventType: 'BUILD_COMPLETED' } },
+    ciWorkflow: { id: 'wf-pr' },
+    ciBuildRun: {
+      id: 'run-1',
+      attributes: {
+        completionStatus: 'SUCCEEDED',
+        sourceCommit: { commitSha: COMMIT_SHA },
+      },
+    },
+  }, 'wf-pr:run-1:BUILD_COMPLETED:SUCCEEDED');
+  assert.deepEqual(xcode, {
+    provider: 'xcode_cloud',
+    delivery_id: 'wf-pr:run-1:BUILD_COMPLETED:SUCCEEDED',
+    event: 'BUILD_COMPLETED',
+    workflow_id: 'wf-pr',
+    run_id: 'run-1',
+    completion_status: 'SUCCEEDED',
+    commit_sha: COMMIT_SHA,
+  });
 });
 
 test('defaults to deployed shared webhook secrets and a profile-scoped version token', () => {
@@ -900,6 +949,59 @@ test('waits for acknowledged background jobs during graceful drain', async t => 
   release();
   await draining;
   assert.equal(server.backgroundWorkCount, 0);
+});
+
+test('logs every authenticated webhook receipt including duplicates', async t => {
+  process.env.XCODE_CLOUD_WEBHOOK_TOKEN = 'xcode-secret';
+  t.after(() => delete process.env.XCODE_CLOUD_WEBHOOK_TOKEN);
+  const records = [];
+  const server = createTestWebhookServer({
+    profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
+    dispatch: async () => 0,
+    webhookLogger: record => records.push(record),
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/webhooks/xcode-cloud/example-ios/xcode-secret`;
+  const body = JSON.stringify({
+    metadata: { attributes: { eventType: 'BUILD_COMPLETED' } },
+    ciWorkflow: { id: 'wf-pr' },
+    ciBuildRun: { id: 'logged-run', attributes: { completionStatus: 'FAILED' } },
+  });
+
+  assert.equal((await fetch(url, { method: 'POST', body })).status, 202);
+  await server.waitForBackground();
+  assert.equal((await fetch(url, { method: 'POST', body })).status, 200);
+
+  assert.deepEqual(records.map(record => ({
+    type: record.type,
+    instance: record.instance,
+    provider: record.provider,
+    event: record.event,
+    workflow_id: record.workflow_id,
+    run_id: record.run_id,
+    disposition: record.disposition,
+    jobs: record.jobs,
+  })), [{
+    type: 'webhook_received',
+    instance: 'example-ios',
+    provider: 'xcode_cloud',
+    event: 'BUILD_COMPLETED',
+    workflow_id: 'wf-pr',
+    run_id: 'logged-run',
+    disposition: 'accepted',
+    jobs: ['build-status:pull_request'],
+  }, {
+    type: 'webhook_received',
+    instance: 'example-ios',
+    provider: 'xcode_cloud',
+    event: 'BUILD_COMPLETED',
+    workflow_id: 'wf-pr',
+    run_id: 'logged-run',
+    disposition: 'duplicate',
+    jobs: ['build-status:pull_request'],
+  }]);
+  assert.match(records[0].timestamp, /^\d{4}-\d{2}-\d{2}T/);
 });
 
 test('retries from the first unfinished job and dead-letters bounded failures', async t => {

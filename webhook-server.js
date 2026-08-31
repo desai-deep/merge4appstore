@@ -333,6 +333,43 @@ export function webhookDeliveryKey(provider, instance, delivery) {
   return `${provider}:${instance}:${delivery}`;
 }
 
+function boundedLogString(value, limit = 200) {
+  if (typeof value !== 'string' || value === '') return null;
+  return value.length <= limit ? value : `${value.slice(0, limit)}…`;
+}
+
+export function githubWebhookLogMetadata(event, delivery, payload) {
+  return {
+    provider: 'github',
+    event: boundedLogString(event),
+    delivery_id: boundedLogString(delivery),
+    action: boundedLogString(payload.action),
+    ref: boundedLogString(payload.ref),
+    before_sha: boundedLogString(payload.before, 64),
+    after_sha: boundedLogString(payload.after, 64),
+    pull_request: Number.isSafeInteger(payload.pull_request?.number) ? payload.pull_request.number : null,
+    source_branch: boundedLogString(payload.pull_request?.head?.ref),
+    target_branch: boundedLogString(payload.pull_request?.base?.ref),
+    head_sha: boundedLogString(payload.pull_request?.head?.sha, 64),
+  };
+}
+
+export function xcodeWebhookLogMetadata(payload, delivery) {
+  return {
+    provider: 'xcode_cloud',
+    delivery_id: boundedLogString(delivery),
+    event: boundedLogString(payload.metadata?.attributes?.eventType),
+    workflow_id: boundedLogString(payload.ciWorkflow?.id),
+    run_id: boundedLogString(xcodeRunId(payload)),
+    completion_status: boundedLogString(payload.ciBuildRun?.attributes?.completionStatus),
+    commit_sha: boundedLogString(
+      payload.ciBuildRun?.attributes?.sourceCommit?.commitSha
+        || payload.ciBuildRun?.attributes?.sourceCommit?.sha,
+      64,
+    ),
+  };
+}
+
 export function createVersionRequest({
   store = createVersionStateStore(),
 } = {}) {
@@ -431,6 +468,7 @@ export function createWebhookServer({
   deliveryPauseFile = process.env.MERGE4APPSTORE_DELIVERY_PAUSE_FILE || null,
   deploymentProbe = () => inspectDeploymentTransactions(process.env.MERGE4APPSTORE_STATE_DIR),
   onFatalDeliveryError = () => {},
+  webhookLogger = record => console.log(JSON.stringify(record)),
 }) {
   if (workerId !== null && (!Number.isSafeInteger(workerId) || workerId < 0)) {
     throw new RangeError('workerId must be a non-negative integer or null');
@@ -679,6 +717,7 @@ export function createWebhookServer({
       const settings = webhookSettings(entry.profile);
       let jobs;
       let deliveryKey;
+      let webhookMetadata;
       if (githubMatch) {
         if (!settings.githubSecret) return send(response, 503, { error: 'GitHub webhook secret is not configured' });
         const signature = singleHeader(request.headers['x-hub-signature-256']);
@@ -690,6 +729,7 @@ export function createWebhookServer({
         if (!delivery) return send(response, 400, { error: 'Missing delivery id' });
         deliveryKey = webhookDeliveryKey('github', instance, delivery);
         jobs = jobsForGitHubEvent(entry.profile, event, payload, delivery);
+        webhookMetadata = githubWebhookLogMetadata(event, delivery, payload);
       } else if (xcodeMatch) {
         let suppliedToken;
         try { suppliedToken = decodeURIComponent(xcodeMatch[2]); }
@@ -705,6 +745,7 @@ export function createWebhookServer({
           : crypto.createHash('sha256').update(rawBody).digest('hex');
         deliveryKey = webhookDeliveryKey('xcode', instance, delivery);
         jobs = jobsForXcodeCloudEvent(entry.profile, payload);
+        webhookMetadata = xcodeWebhookLogMetadata(payload, delivery);
       } else return send(response, 404, { error: 'Not found' });
 
       const intent = { instance, jobs };
@@ -717,7 +758,19 @@ export function createWebhookServer({
         error.retryAfter ||= 30;
         throw error;
       }
-      if (!deliveryClaim) return send(response, 200, { accepted: true, duplicate: true });
+      const jobNames = jobs.map(job => `${job.mode}${job.purpose ? `:${job.purpose}` : ''}`);
+      if (!deliveryClaim) {
+        webhookLogger({
+          timestamp: new Date().toISOString(),
+          type: 'webhook_received',
+          instance,
+          ...webhookMetadata,
+          disposition: 'duplicate',
+          jobs: jobNames,
+        });
+        return send(response, 200, { accepted: true, duplicate: true });
+      }
+      let disposition = 'accepted';
       if (isDeliveryPaused()) {
         const delayMs = Math.max(0, deliveryPausedUntil - Date.now());
         const deferred = await persistDelivery(
@@ -726,8 +779,17 @@ export function createWebhookServer({
         );
         if (!deferred) throw new Error('Webhook delivery ownership changed before migration deferral');
         deliveryClaim = null;
+        disposition = 'deferred';
       }
-      send(response, 202, { accepted: true, jobs: jobs.map(job => `${job.mode}${job.purpose ? `:${job.purpose}` : ''}`) });
+      webhookLogger({
+        timestamp: new Date().toISOString(),
+        type: 'webhook_received',
+        instance,
+        ...webhookMetadata,
+        disposition,
+        jobs: jobNames,
+      });
+      send(response, 202, { accepted: true, jobs: jobNames });
       if (deliveryClaim) runDelivery(deliveryClaim, intent);
     } catch (error) {
       if (!response.headersSent) send(
