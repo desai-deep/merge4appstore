@@ -362,6 +362,8 @@ test('inspection verifies both private blobless mirrors without lazy fetching', 
   assert.match(inspectRun, /repository_lock=\$instance:held:pid=\$holder_pid/);
   assert.match(inspectRun, /\$2 == "FLOCK" && \$4 == "WRITE"/);
   assert.match(inspectRun, /repository_lock_process=\$instance:/);
+  assert.match(inspectRun, /repository_lock_job_process=/);
+  assert.match(inspectRun, /tail -n 160 "\$state_dir\/logs\/cron\.log"/);
 });
 
 test('inspection fails closed for corrupt current release pointers and markers', t => {

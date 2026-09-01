@@ -349,6 +349,16 @@ jobs:
                 case "$holder_pid" in
                   *[!0-9]*|''|*,*) echo "repository_lock_lineage=$instance:unavailable"; continue ;;
                 esac
+                job_pid="$(awk '$1 == "PPid:" { print $2 }' "/proc/$holder_pid/status")"
+                job_group="$(ps -p "$job_pid" -o pgid= | tr -d ' ')"
+                case "$job_group" in
+                  *[!0-9]*|'') echo "repository_lock_job_group=$instance:unavailable" ;;
+                  *)
+                    ps -eo pid=,ppid=,pgid=,etime=,stat=,comm=,args= \
+                      | awk -v group="$job_group" -v instance="$instance" \
+                        '$3 == group { print "repository_lock_job_process=" instance ":" $0 }'
+                    ;;
+                esac
                 current_pid="$holder_pid"
                 depth=0
                 while [ "$current_pid" -gt 1 ] && [ "$depth" -lt 8 ] && [ -r "/proc/$current_pid/status" ]; do
@@ -362,6 +372,11 @@ jobs:
               done
             }
             inspect_repository_locks
+            if [ -f "$state_dir/logs/cron.log" ]; then
+              echo "cron_log_tail=begin"
+              tail -n 160 "$state_dir/logs/cron.log"
+              echo "cron_log_tail=end"
+            fi
             node_binary="$(readlink -f -- "$(command -v node)")"
             pm2_home="${PM2_HOME:-$HOME/.pm2}"
             pm2_unit="${MERGE4APPSTORE_PM2_STARTUP_UNIT:-pm2-$(id -un).service}"
