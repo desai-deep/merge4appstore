@@ -349,7 +349,7 @@ jobs:
             grep -RhsE '^[[:space:]]*server_name|^[[:space:]]*listen.*443|proxy_pass.*878[78]' \
               /etc/nginx/sites-enabled /etc/nginx/conf.d /etc/nginx/snippets 2>/dev/null || true
             ss -lnt 2>/dev/null | sed -n '1,30p' || true
-            pm2 jlist 2>/dev/null | STATE_DIRECTORY="$state_dir" node -e '
+            pm2 --silent jlist 2>/dev/null | STATE_DIRECTORY="$state_dir" node -e '
               const path = require("path");
               let input = "";
               process.stdin.on("data", chunk => input += chunk).on("end", () => {

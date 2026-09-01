@@ -697,9 +697,16 @@ configure_process_environment() {
   unset EXPECTED_PM2_IDS
 }
 
+pm2_json_list() {
+  # `jlist` writes JSON directly, but a missing daemon normally prepends its
+  # startup banner to stdout. Silent mode suppresses CLI messages while leaving
+  # the command's JSON output intact, so every parser receives one JSON value.
+  pm2 --silent jlist
+}
+
 pm2_app_ids() {
   local name="$1"
-  pm2 jlist | PM2_APP_NAME="$name" "$NODE_BINARY" -e '
+  pm2_json_list | PM2_APP_NAME="$name" "$NODE_BINARY" -e '
     let source = "";
     process.stdin.on("data", chunk => { source += chunk; });
     process.stdin.on("end", () => {
@@ -718,7 +725,7 @@ pm2_app_ids() {
 pm2_new_app_ids() {
   local name="$1"
   local existing_ids="$2"
-  pm2 jlist | PM2_APP_NAME="$name" PM2_EXISTING_IDS="$existing_ids" "$NODE_BINARY" -e '
+  pm2_json_list | PM2_APP_NAME="$name" PM2_EXISTING_IDS="$existing_ids" "$NODE_BINARY" -e '
     let source = "";
     process.stdin.on("data", chunk => { source += chunk; });
     process.stdin.on("end", () => {
@@ -759,7 +766,7 @@ pm2_reusable_target_ids() {
   local name="$1"
   local target_script="$2"
   local deployment_sha="$3"
-  pm2 jlist | PM2_APP_NAME="$name" PM2_TARGET_SCRIPT="$target_script" \
+  pm2_json_list | PM2_APP_NAME="$name" PM2_TARGET_SCRIPT="$target_script" \
     PM2_TARGET_SHA="$deployment_sha" "$NODE_BINARY" -e '
     const path = require("path");
     let source = "";
@@ -789,7 +796,7 @@ pm2_reusable_target_ids() {
 pm2_app_ids_except() {
   local name="$1"
   local retained_ids="$2"
-  pm2 jlist | PM2_APP_NAME="$name" PM2_RETAINED_IDS="$retained_ids" "$NODE_BINARY" -e '
+  pm2_json_list | PM2_APP_NAME="$name" PM2_RETAINED_IDS="$retained_ids" "$NODE_BINARY" -e '
     let source = "";
     process.stdin.on("data", chunk => { source += chunk; });
     process.stdin.on("end", () => {
@@ -819,7 +826,7 @@ pm2_app_ids_except() {
 pm2_unhealthy_target_ids() {
   local name="$1"
   local target_script="$2"
-  pm2 jlist | PM2_APP_NAME="$name" PM2_TARGET_SCRIPT="$target_script" "$NODE_BINARY" -e '
+  pm2_json_list | PM2_APP_NAME="$name" PM2_TARGET_SCRIPT="$target_script" "$NODE_BINARY" -e '
     const path = require("path");
     let source = "";
     process.stdin.on("data", chunk => { source += chunk; });
@@ -842,7 +849,7 @@ pm2_unhealthy_target_ids() {
 pm2_id_belongs_to_app() {
   local name="$1"
   local id="$2"
-  pm2 jlist | PM2_APP_NAME="$name" PM2_APP_ID="$id" "$NODE_BINARY" -e '
+  pm2_json_list | PM2_APP_NAME="$name" PM2_APP_ID="$id" "$NODE_BINARY" -e '
     let source = "";
     process.stdin.on("data", chunk => { source += chunk; });
     process.stdin.on("end", () => {
@@ -1013,7 +1020,7 @@ start_release() {
 }
 
 validate_pm2_release() {
-  pm2 jlist | "$NODE_BINARY" -e '
+  pm2_json_list | "$NODE_BINARY" -e '
     const fs = require("fs");
     let source = "";
     process.stdin.on("data", chunk => { source += chunk; });
@@ -1134,7 +1141,7 @@ validate_pm2_release() {
 
 pm2_app_count() {
   local name="$1"
-  pm2 jlist | PM2_APP_NAME="$name" node -e '
+  pm2_json_list | PM2_APP_NAME="$name" node -e '
     let source = "";
     process.stdin.on("data", chunk => { source += chunk; });
     process.stdin.on("end", () => process.stdout.write(String(JSON.parse(source || "[]").filter(item => item.name === process.env.PM2_APP_NAME).length)));
@@ -1547,7 +1554,7 @@ cleanup_candidate_artifacts() {
   local pointer resolved release_identity secret_identity
   release_identity="$(readlink -f -- "$release" 2>/dev/null || printf '%s' "$release")"
   secret_identity="$(readlink -f -- "$secret" 2>/dev/null || printf '%s' "$secret")"
-  if pm2 jlist | CANDIDATE_RELEASE="$release" CANDIDATE_RELEASE_REAL="$release_identity" \
+  if pm2_json_list | CANDIDATE_RELEASE="$release" CANDIDATE_RELEASE_REAL="$release_identity" \
     CANDIDATE_SECRET="$secret" CANDIDATE_SECRET_REAL="$secret_identity" node -e '
     let source="";
     process.stdin.on("data", chunk => { source += chunk; });
@@ -1790,7 +1797,7 @@ configure_repository_hooks() {
 
 legacy_descendant_count() {
   local roots
-  roots="$(pm2 jlist | PM2_APP_NAME="$LEGACY_SERVICE_NAME" node -e '
+  roots="$(pm2_json_list | PM2_APP_NAME="$LEGACY_SERVICE_NAME" node -e '
     let source = "";
     process.stdin.on("data", chunk => { source += chunk; });
     process.stdin.on("end", () => {
