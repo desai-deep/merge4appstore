@@ -39,6 +39,24 @@ test('lists open pull requests with the state needed for safe rebasing', () => {
   ]);
 });
 
+test('updates a pull request body without replacing its title', () => {
+  const github = new GitHubAPI('example', 'ios');
+  let args;
+  github.exec = received => {
+    args = received;
+    return JSON.stringify({ number: 42, html_url: 'https://github.test/pull/42' });
+  };
+
+  assert.deepEqual(github.updatePullRequest(42, 'Updated body'), {
+    number: 42,
+    url: 'https://github.test/pull/42',
+  });
+  assert.deepEqual(args, [
+    'api', '--method', 'PATCH', 'repos/example/ios/pulls/42',
+    '-f', 'body=Updated body',
+  ]);
+});
+
 test('rebases a pull request with an optimistic head check', () => {
   const github = new GitHubAPI('example', 'ios');
   let args;
