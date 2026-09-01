@@ -1004,6 +1004,36 @@ test('logs every authenticated webhook receipt including duplicates', async t =>
   assert.match(records[0].timestamp, /^\d{4}-\d{2}-\d{2}T/);
 });
 
+test('does not let a webhook log sink failure reject or strand a delivery', async t => {
+  process.env.XCODE_CLOUD_WEBHOOK_TOKEN = 'xcode-secret';
+  t.after(() => delete process.env.XCODE_CLOUD_WEBHOOK_TOKEN);
+  let dispatched = 0;
+  let logAttempts = 0;
+  const server = createTestWebhookServer({
+    profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
+    dispatch: async () => { dispatched += 1; return 0; },
+    webhookLogger: () => {
+      logAttempts += 1;
+      if (logAttempts === 1) throw new Error('log sink unavailable');
+      return Promise.reject(new Error('async log sink unavailable'));
+    },
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/webhooks/xcode-cloud/example-ios/xcode-secret`;
+  const body = JSON.stringify({
+    metadata: { attributes: { eventType: 'BUILD_COMPLETED' } },
+    ciWorkflow: { id: 'wf-pr' },
+    ciBuildRun: { id: 'log-failure-run', attributes: { completionStatus: 'FAILED' } },
+  });
+
+  assert.equal((await fetch(url, { method: 'POST', body })).status, 202);
+  await server.waitForBackground();
+  assert.equal(dispatched, 1);
+  assert.equal((await fetch(url, { method: 'POST', body })).status, 200);
+  assert.equal(logAttempts, 2);
+});
+
 test('retries from the first unfinished job and dead-letters bounded failures', async t => {
   process.env.GH_WEBHOOK_SECRET = 'github-secret';
   t.after(() => delete process.env.GH_WEBHOOK_SECRET);

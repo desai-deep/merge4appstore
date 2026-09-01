@@ -515,6 +515,20 @@ export function createWebhookServer({
     tracked.then(remove, remove);
     return tracked;
   };
+  const reportWebhookLogFailure = error => {
+    try {
+      console.error(`${new Date().toISOString()} could not log authenticated webhook receipt: ${error?.stack || error?.message || String(error)}`);
+    } catch {
+      // Diagnostics must never interfere with durable delivery processing.
+    }
+  };
+  const logWebhookReceipt = record => {
+    try {
+      Promise.resolve(webhookLogger(record)).catch(reportWebhookLogFailure);
+    } catch (error) {
+      reportWebhookLogFailure(error);
+    }
+  };
   let recoveryStopped = false;
   let recovering = false;
   const isDeliveryPaused = () => {
@@ -760,7 +774,7 @@ export function createWebhookServer({
       }
       const jobNames = jobs.map(job => `${job.mode}${job.purpose ? `:${job.purpose}` : ''}`);
       if (!deliveryClaim) {
-        webhookLogger({
+        logWebhookReceipt({
           timestamp: new Date().toISOString(),
           type: 'webhook_received',
           instance,
@@ -781,7 +795,7 @@ export function createWebhookServer({
         deliveryClaim = null;
         disposition = 'deferred';
       }
-      webhookLogger({
+      logWebhookReceipt({
         timestamp: new Date().toISOString(),
         type: 'webhook_received',
         instance,

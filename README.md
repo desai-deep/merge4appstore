@@ -372,7 +372,8 @@ single-line JSON `webhook_received` record to `webhook-out.log`. The record is
 limited to delivery/event identity, repository refs or pull request identity,
 Xcode Cloud workflow/run state, the selected jobs, and whether the delivery was
 accepted, deferred, or deduplicated. It never includes request bodies, URL
-tokens, signatures, authorization headers, or other credentials.
+tokens, signatures, authorization headers, or other credentials. Receipt
+logging is best-effort and cannot reject or strand a durable delivery.
 
 Each profile can select environment variable names without containing values:
 
