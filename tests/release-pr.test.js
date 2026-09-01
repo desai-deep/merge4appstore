@@ -150,7 +150,7 @@ test('creates a release PR with the default title', () => {
   assert.deepEqual(labeled, [70, RELEASE_PULL_REQUEST_LABEL]);
 });
 
-test('updates the exact open release PR', () => {
+test('updates the exact open release PR body without replacing its title', () => {
   let updated;
   let labeled;
   const github = githubFixture({
@@ -164,7 +164,8 @@ test('updates the exact open release PR', () => {
 
   assert.equal(reconcileReleasePullRequest(github, policy).action, 'updated');
   assert.equal(updated[0], 69);
-  assert.equal(updated[1], DEFAULT_RELEASE_PR_TITLE);
+  assert.match(updated[1], /- #61 Feature/);
+  assert.equal(updated.length, 2);
   assert.deepEqual(labeled, [69, RELEASE_PULL_REQUEST_LABEL]);
 });
 
