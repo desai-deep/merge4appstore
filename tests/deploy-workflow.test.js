@@ -63,6 +63,8 @@ function shellSection(start, end) {
   return deployScript.slice(startIndex, endIndex);
 }
 
+const pm2JsonListFunction = shellSection('pm2_json_list() {', 'pm2_app_ids() {');
+
 function runBash(source, environment = {}) {
   return spawnSync('bash', ['-c', source], {
     encoding: 'utf8',
@@ -280,7 +282,38 @@ test('inspection verifies the PM2 reboot and Node runtime contract', () => {
   assert.match(inspectRun, /pm2_env\?\.status !== "online"/);
   assert.match(inspectRun, /node_version/);
   assert.match(inspectRun, /Number\(nodeVersion\.split\("\."\)\[0\]\) < 20/);
-  assert.doesNotMatch(inspectRun, /pm2 jlist[^\n]*\|[^\n]*\|\| true/);
+  assert.match(inspectRun, /pm2 --silent jlist[^\n]*\|/);
+  assert.doesNotMatch(inspectRun, /pm2 jlist/);
+});
+
+test('keeps PM2 JSON parsers clean when jlist has to start the daemon', () => {
+  assert.match(pm2JsonListFunction, /pm2 --silent jlist/);
+  assert.doesNotMatch(deployScript, /pm2 jlist/);
+  assert.equal(deployScript.match(/pm2_json_list \|/g)?.length, 10);
+
+  const result = runBash([
+    'set -uo pipefail',
+    'pm2() {',
+    '  if [ "$1" = --silent ] && [ "${2:-}" = jlist ]; then',
+    '    printf "%s" "$PM2_FIXTURE"',
+    '  else',
+    '    printf "[PM2] Spawning PM2 daemon\\n%s" "$PM2_FIXTURE"',
+    '  fi',
+    '}',
+    pm2JsonListFunction,
+    'pm2_json_list | "$TEST_NODE_BINARY" -e \'',
+    '  let source = "";',
+    '  process.stdin.on("data", chunk => { source += chunk; });',
+    '  process.stdin.on("end", () => {',
+    '    const processes = JSON.parse(source);',
+    '    if (processes.length !== 1 || processes[0].pm_id !== 7) process.exit(1);',
+    '  });',
+    '\'',
+  ].join('\n'), {
+    PM2_FIXTURE: '[{"pm_id":7}]',
+    TEST_NODE_BINARY: process.execPath,
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
 test('deployment and inspection require Git versions with GIT_NO_LAZY_FETCH support', t => {
@@ -907,6 +940,7 @@ test('refuses candidate cleanup while a pointer or PM2 still references it', t =
     '  else printf "[]"; fi',
     '}',
     'validate_private_file() { [ ! -L "$1" ] && [ -f "$1" ]; }',
+    pm2JsonListFunction,
     cleanupFunction,
     'if cleanup_candidate_artifacts "$TEST_RELEASE" "$TEST_SECRET"; then exit 10; fi',
     '[ -d "$TEST_RELEASE" ] && [ -f "$TEST_SECRET" ] || exit 11',
@@ -1406,7 +1440,8 @@ test('discovers exactly the two PM2 workers created after a generation snapshot'
   const result = runBash([
     'set -u',
     'NODE_BINARY="$TEST_NODE_BINARY"',
-    'pm2() { [ "$1" = jlist ] && printf "%s" "$PM2_FIXTURE"; }',
+    'pm2() { [ "$1" = --silent ] && [ "${2:-}" = jlist ] && printf "%s" "$PM2_FIXTURE"; }',
+    pm2JsonListFunction,
     idFunctions,
     'PM2_FIXTURE="$TEST_BEFORE"',
     'existing_ids="$(pm2_app_ids v2)" || exit 10',
@@ -1446,7 +1481,8 @@ test('selects a reusable exact generation and identifies every extra managed wor
     'set -u',
     'NODE_BINARY="$TEST_NODE_BINARY"',
     'PM2_FIXTURE="$TEST_FIXTURE"',
-    'pm2() { [ "$1" = jlist ] && printf "%s" "$PM2_FIXTURE"; }',
+    'pm2() { [ "$1" = --silent ] && [ "${2:-}" = jlist ] && printf "%s" "$PM2_FIXTURE"; }',
+    pm2JsonListFunction,
     generationFunctions,
     'reusable="$(pm2_reusable_target_ids v2 "$TEST_TARGET_SCRIPT" "$TEST_SHA")" || exit 10',
     '[ "$reusable" = "15,16" ] || exit 11',
@@ -1778,7 +1814,8 @@ test('validates a staged PM2 generation without accepting a mixed final topology
     'export EXPECTED_PM2_SHA="$TEST_SHA"',
     'export EXPECTED_PM2_OUT_LOG="$TEST_OUT_LOG"',
     'export EXPECTED_PM2_ERROR_LOG="$TEST_ERROR_LOG"',
-    'pm2() { [ "$1" = jlist ] && printf "%s" "$PM2_FIXTURE"; }',
+    'pm2() { [ "$1" = --silent ] && [ "${2:-}" = jlist ] && printf "%s" "$PM2_FIXTURE"; }',
+    pm2JsonListFunction,
     validator,
     'PM2_FIXTURE="$TEST_MIXED"',
     'EXPECTED_PM2_IDS=9,10 validate_pm2_release || exit 10',
