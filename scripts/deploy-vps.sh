@@ -179,6 +179,22 @@ validate_private_file() {
     || { echo "ERROR: Private file must have mode 600: $file" >&2; return 1; }
 }
 
+validate_nginx_log_file() {
+  local file="$1"
+  local directory permissions
+  directory="$(dirname -- "$file")" || return 1
+  [ -d "$directory" ] && [ ! -L "$directory" ] && [ -O "$directory" ] \
+    && [ "$(stat -c '%a' "$directory")" = "700" ] \
+    || { echo "ERROR: Nginx log directory is unsafe: $directory" >&2; return 1; }
+  [ ! -L "$file" ] || { echo "ERROR: Nginx log is a symlink: $file" >&2; return 1; }
+  [ -f "$file" ] || { echo "ERROR: Nginx log is missing: $file" >&2; return 1; }
+  permissions="$(stat -c '%a' "$file")" || return 1
+  [ "$permissions" = "600" ] \
+    || { echo "ERROR: Nginx log must have mode 600: $file" >&2; return 1; }
+  [ -r "$file" ] && [ -w "$file" ] \
+    || { echo "ERROR: Nginx log is not readable and writable by the deployment user: $file" >&2; return 1; }
+}
+
 validate_owned_regular_file() {
   local file="$1"
   [ ! -L "$file" ] || return 1
@@ -220,6 +236,22 @@ ensure_private_log_file() {
     (umask 077; : > "$file") || return 1
   fi
   validate_private_file "$file"
+}
+
+ensure_nginx_log_file() {
+  local file="$1"
+  local permissions
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ ! -L "$file" ] && [ -f "$file" ] \
+      || { echo "ERROR: Unsafe Nginx managed log file: $file" >&2; return 1; }
+    # On log reopen Nginx assigns the inode to its worker user. The owned 0700
+    # parent protects the path. Avoid a no-op chmod that its new owner can deny.
+    permissions="$(stat -c '%a' "$file")" || return 1
+    if [ "$permissions" != "600" ]; then chmod 600 -- "$file" || return 1; fi
+  else
+    (umask 077; : > "$file") || return 1
+  fi
+  validate_nginx_log_file "$file"
 }
 
 ensure_disk_headroom() {
@@ -388,7 +420,9 @@ restore_link() {
 for directory in "$STATE_DIR" "$RELEASES_DIR" "$SECRETS_DIR" "$LOGS_DIR" "$JOBS_DIR" "$TRANSACTIONS_DIR"; do
   ensure_private_directory "$directory"
 done
-for managed_log in "$NGINX_ACCESS_LOG" "$LOGS_DIR/webhook-out.log" "$LOGS_DIR/webhook-error.log" \
+ensure_nginx_log_file "$NGINX_ACCESS_LOG" \
+  || fail "Could not secure Nginx managed log file: $NGINX_ACCESS_LOG"
+for managed_log in "$LOGS_DIR/webhook-out.log" "$LOGS_DIR/webhook-error.log" \
   "$LOGS_DIR/cron.log" "$LOGS_DIR/logrotate.log"; do
   ensure_private_log_file "$managed_log" || fail "Could not secure managed log file: $managed_log"
 done
@@ -1446,7 +1480,8 @@ validate_logging_contract() {
   cmp -s -- "$source/nginx-observability.candidate" "$NGINX_OBSERVABILITY_CONFIG" || return 1
   validate_private_file "$LOGROTATE_CONFIG" || return 1
   cmp -s -- "$source/logrotate.candidate" "$LOGROTATE_CONFIG" || return 1
-  for managed_log in "$NGINX_ACCESS_LOG" "$LOGS_DIR/webhook-out.log" "$LOGS_DIR/webhook-error.log" \
+  validate_nginx_log_file "$NGINX_ACCESS_LOG" || return 1
+  for managed_log in "$LOGS_DIR/webhook-out.log" "$LOGS_DIR/webhook-error.log" \
     "$LOGS_DIR/cron.log" "$LOGS_DIR/logrotate.log"; do
     validate_private_file "$managed_log" || return 1
   done
@@ -1458,7 +1493,7 @@ verify_nginx_diagnostic_log() {
   local probe_url="$2"
   local attempt line
   for attempt in 1 2 3 4 5; do
-    validate_private_file "$NGINX_ACCESS_LOG" || return 1
+    validate_nginx_log_file "$NGINX_ACCESS_LOG" || return 1
     line="$(tail -n 1 -- "$NGINX_ACCESS_LOG")" || return 1
     if [ -n "$line" ] && [ "$line" != "$previous_line" ]; then
       if NGINX_DIAGNOSTIC_LINE="$line" "$NODE_BINARY" -e '
@@ -1484,7 +1519,7 @@ verify_nginx_diagnostic_log() {
 }
 
 print_sanitized_nginx_diagnostics() {
-  validate_private_file "$NGINX_ACCESS_LOG" >/dev/null 2>&1 || return 0
+  validate_nginx_log_file "$NGINX_ACCESS_LOG" >/dev/null 2>&1 || return 0
   tail -n 20 -- "$NGINX_ACCESS_LOG" | "$NODE_BINARY" -e '
     const readline = require("readline");
     const expected = [
