@@ -1457,17 +1457,19 @@ test('finds uploaded commits for one configured workflow', async () => {
     };
   };
   let scopedLoads = 0;
+  const workflowRuns = [{
+    workflowId: 'workflow-1',
+    run: {
+      attributes: { number: 1, sourceCommit: { commitSha: 'ancestor' } },
+      relationships: { builds: { data: [{ id: 'build-1' }] } },
+    },
+  }];
   asc.loadCIBuildRunsForWorkflow = async workflowId => {
     scopedLoads += 1;
     assert.equal(workflowId, 'workflow-1');
-    return [{
-      workflowId,
-      run: {
-        attributes: { number: 1, sourceCommit: { commitSha: 'ancestor' } },
-        relationships: { builds: { data: [{ id: 'build-1' }] } },
-      },
-    }];
+    return workflowRuns;
   };
+  asc.loadCIBuildRuns = async () => workflowRuns;
   assert.deepEqual(await asc.getPublishedWorkflowCommits('workflow-1'), [{
     commitSha: 'ancestor', sourceBranch: null, buildId: 'build-1', buildNumber: '1', marketingVersion: '1.4', uploadedDate: '2026-08-27T01:00:00Z',
   }]);
@@ -1492,8 +1494,63 @@ test('does not attribute an unrelated App Store build by workflow-local number a
       relationships: { builds: { data: [] } },
     },
   }];
+  asc.loadCIBuildRuns = async () => ([{
+    workflowId: 'workflow-1',
+    sourceBranch: 'develop',
+    run: {
+      attributes: { number: 101, sourceCommit: { commitSha: 'wrong-ancestor' } },
+      relationships: { builds: { data: [] } },
+    },
+  }, {
+    workflowId: 'other-workflow',
+    sourceBranch: 'main',
+    run: {
+      attributes: { number: 101, sourceCommit: { commitSha: 'unrelated-commit' } },
+      relationships: { builds: { data: [] } },
+    },
+  }]);
 
   assert.deepEqual(await asc.getPublishedWorkflowCommits('workflow-1'), []);
+});
+
+test('attributes published history by a globally unique build number when Apple omits linkage', async () => {
+  const asc = createASCWithVersions({ data: [], included: [] });
+  asc.getAppId = async () => 'app-1';
+  asc.request = async () => ({
+    data: [{
+      id: 'build-101',
+      attributes: {
+        version: '101',
+        processingState: 'VALID',
+        uploadedDate: '2026-08-27T01:00:00Z',
+      },
+    }],
+  });
+  const targetRun = {
+    workflowId: 'workflow-1',
+    sourceBranch: 'develop',
+    run: {
+      attributes: { number: 101, sourceCommit: { commitSha: 'ancestor' } },
+      relationships: { builds: { data: [] } },
+    },
+  };
+  asc.loadCIBuildRunsForWorkflow = async () => [targetRun];
+  asc.loadCIBuildRuns = async () => [targetRun, {
+    workflowId: 'other-workflow',
+    run: {
+      attributes: { number: 100, sourceCommit: { commitSha: 'other' } },
+      relationships: { builds: { data: [] } },
+    },
+  }];
+
+  assert.deepEqual(await asc.getPublishedWorkflowCommits('workflow-1'), [{
+    commitSha: 'ancestor',
+    sourceBranch: 'develop',
+    buildId: 'build-101',
+    buildNumber: '101',
+    marketingVersion: null,
+    uploadedDate: '2026-08-27T01:00:00Z',
+  }]);
 });
 
 test('derives source branches from Xcode Cloud pull-request relationships', async () => {
@@ -1583,6 +1640,27 @@ test('finds builds for a commit without enumerating unrelated workflows', async 
 
   assert.deepEqual(await asc.getBuildsForWorkflowCommit('workflow-1', 'head'), [
     { buildId: 'build-2', buildNumber: '2' },
+  ]);
+});
+
+test('finds a commit build by globally unique number when Apple omits linkage', async () => {
+  const asc = createASCWithVersions({ data: [], included: [] });
+  asc.getAppId = async () => 'app-1';
+  asc.request = async () => ({ data: [
+    { id: 'build-205', attributes: { version: '205' } },
+  ] });
+  const targetRun = {
+    workflowId: 'workflow-1',
+    run: {
+      attributes: { number: 205, sourceCommit: { commitSha: 'head' } },
+      relationships: { builds: { data: [] } },
+    },
+  };
+  asc.loadCIBuildRunsForWorkflow = async () => [targetRun];
+  asc.loadCIBuildRuns = async () => [targetRun];
+
+  assert.deepEqual(await asc.getBuildsForWorkflowCommit('workflow-1', 'head'), [
+    { buildId: 'build-205', buildNumber: '205' },
   ]);
 });
 
