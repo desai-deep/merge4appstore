@@ -437,6 +437,35 @@ test('recovers a missed production workflow trigger for a merged PR', async () =
   });
 });
 
+test('uses bounded asynchronous GitHub lookups during trigger recovery', async () => {
+  await withTriggerRecovery(async () => {
+    const calls = [];
+    const asc = createASC({
+      getWorkflowRunStatus: async () => ({ found: true, executionProgress: 'COMPLETE', completionStatus: 'SUCCEEDED' }),
+    });
+    const github = createGitHub({
+      getProductionHead: () => { throw new Error('synchronous head lookup used'); },
+      findPRFromCommit: () => { throw new Error('synchronous PR lookup used'); },
+      getProductionHeadAsync: async options => {
+        calls.push(['head', options]);
+        return 'a'.repeat(40);
+      },
+      findPRFromCommitAsync: async (commitSha, options) => {
+        calls.push(['pull', commitSha, options]);
+        return '123';
+      },
+    });
+
+    const result = await recoverMissedProductionBuild(asc, github, false);
+
+    assert.deepEqual(calls, [
+      ['head', { strict: true }],
+      ['pull', 'a'.repeat(40), { strict: true }],
+    ]);
+    assert.deepEqual(result, { waiting: false, commitSha: 'a'.repeat(40) });
+  });
+});
+
 test('does not duplicate an existing production run for the release commit', async () => {
   await withTriggerRecovery(async () => {
     let started = false;
