@@ -361,6 +361,60 @@ test('strict production head lookup does not hide a GitHub outage', () => {
   ]);
 });
 
+test('resolves production recovery inputs through bounded GitHub HTTP requests', async () => {
+  const calls = [];
+  const github = new GitHubAPI('example', 'ios', 'release/main', {
+    mirror: null,
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      if (url.endsWith('/commits/release%2Fmain')) {
+        return new Response(JSON.stringify({ sha: 'a'.repeat(40) }), { status: 200 });
+      }
+      return new Response(JSON.stringify([
+        {
+          number: 41,
+          merged_at: '2026-08-31T00:00:00Z',
+          merge_commit_sha: 'a'.repeat(40),
+          base: { ref: 'develop' },
+        },
+        {
+          number: 42,
+          merged_at: '2026-08-31T00:00:00Z',
+          merge_commit_sha: 'b'.repeat(40),
+          base: { ref: 'release/main' },
+        },
+        {
+          number: 43,
+          merged_at: '2026-08-31T00:00:00Z',
+          merge_commit_sha: 'a'.repeat(40),
+          base: { ref: 'release/main' },
+        },
+      ]), { status: 200 });
+    },
+  });
+
+  assert.equal(await github.getProductionHeadAsync({ strict: true }), 'a'.repeat(40));
+  assert.equal(await github.findPRFromCommitAsync('a'.repeat(40), { strict: true }), '43');
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].url, 'https://api.github.com/repos/example/ios/commits/release%2Fmain');
+  assert.match(calls[1].url, /\/commits\/a{40}\/pulls\?per_page=100$/);
+  assert.equal(calls.every(call => call.options.headers.accept === 'application/vnd.github+json'), true);
+});
+
+test('aborts a stalled GitHub HTTP request at its deadline', async () => {
+  const github = new GitHubAPI('example', 'ios', 'main', {
+    mirror: null,
+    fetchImpl: async (_url, { signal }) => new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }),
+  });
+
+  await assert.rejects(
+    github.requestJson('/repos/example/ios', { timeoutMs: 10 }),
+    error => error.name === 'TimeoutError' && error.statusCode === 503,
+  );
+});
+
 test('strict merged-PR lookup preserves an inconclusive GitHub failure', () => {
   const github = new GitHubAPI('example', 'ios');
   const outage = new Error('GitHub unavailable');

@@ -615,6 +615,7 @@ test('journals every mutating boundary and commits before legacy teardown', () =
   const gate = main.indexOf('activate_delivery_pause "$transaction_dir"');
   const cronPausing = main.indexOf('write_transaction_phase legacy-cron-pausing');
   const cronMutation = main.indexOf('pause_managed_cron "$transaction_dir/crontab.before"');
+  const cronDrain = main.indexOf('quiesce_managed_cron_jobs');
   const candidateStarting = main.indexOf('write_transaction_phase candidate-starting');
   const candidateStart = main.indexOf('start_release "$CANDIDATE_RELEASE"');
   const nginxSwitching = main.indexOf('write_transaction_phase nginx-switching');
@@ -623,7 +624,7 @@ test('journals every mutating boundary and commits before legacy teardown', () =
   const pointerMutation = main.indexOf('replace_link "$CANDIDATE_RELEASE" "$STATE_DIR/current"');
   const serviceCommitted = main.indexOf('write_transaction_phase service-committed');
   assert.ok(topology >= 0 && topology < gate && gate < cronPausing);
-  assert.ok(cronPausing < cronMutation && cronMutation < candidateStarting);
+  assert.ok(cronPausing < cronMutation && cronMutation < cronDrain && cronDrain < candidateStarting);
   assert.doesNotMatch(main.slice(gate, cronPausing), /if \[ "\$had_v2" -eq 0 \]/);
   assert.doesNotMatch(
     main.slice(cronMutation, candidateStarting),
@@ -2000,7 +2001,7 @@ test('does not couple candidate deployment to release-provider preflight', () =>
   );
 });
 
-test('pauses, restores, and installs managed cron idempotently before unpausing delivery', t => {
+test('bounds, pauses, restores, and installs managed cron idempotently before unpausing delivery', t => {
   const directory = temporaryDirectory(t, 'merge4appstore-cron-');
   const release = path.join(directory, 'release with spaces');
   const state = path.join(directory, 'state with spaces');
@@ -2025,9 +2026,21 @@ test('pauses, restores, and installs managed cron idempotently before unpausing 
   for (const tool of ['gh', 'git', 'flock']) {
     writeExecutable(path.join(toolDirectory, tool), '#!/bin/bash\nexit 0\n');
   }
+  writeExecutable(path.join(toolDirectory, 'timeout'), [
+    '#!/bin/bash',
+    'while [ "$#" -gt 0 ]; do',
+    '  case "$1" in',
+    '    --verbose|--signal=*|--kill-after=*) shift ;;',
+    '    *s) shift; break ;;',
+    '    *) break ;;',
+    '  esac',
+    'done',
+    'exec "$@"',
+    '',
+  ].join('\n'));
   writeExecutable(nodeBinary, [
     '#!/bin/bash',
-    `for tool in gh git flock; do command -v "$tool" || exit 1; done > "${nodeCalled}"`,
+    `for tool in gh git flock timeout; do command -v "$tool" || exit 1; done > "${nodeCalled}"`,
     `printf '%s\\n' "$*" >> "${nodeCalled}"`,
     '',
   ].join('\n'));
@@ -2045,6 +2058,8 @@ test('pauses, restores, and installs managed cron idempotently before unpausing 
     'LOGROTATE_STATE="$TEST_STATE/logrotate.state"',
     'LOGROTATE_LOCK="$TEST_STATE/logrotate.lock"',
     'FLOCK_BINARY="$TEST_TOOL_DIRECTORY/flock"',
+    'TIMEOUT_BINARY="$TEST_TOOL_DIRECTORY/timeout"',
+    'MANAGED_CRON_JOB_TIMEOUT_SECONDS=240',
     'DEPLOY_RUN_ID=123-1',
     'CRONTAB_STATE="$TEST_DIRECTORY/crontab"',
     'crontab() {',
@@ -2063,6 +2078,8 @@ test('pauses, restores, and installs managed cron idempotently before unpausing 
     'grep -Fq "MERGE4APPSTORE_STATE_DIR=" "$CRONTAB_STATE" || exit 12',
     'grep -Fq "MERGE4APPSTORE_ENV=" "$CRONTAB_STATE" || exit 13',
     'grep -Fq "DRY_RUN=false RECONCILE_METADATA=false" "$CRONTAB_STATE" || exit 22',
+    'grep -Fq "MERGE4APPSTORE_LOCK_WAIT_MS=0" "$CRONTAB_STATE" || exit 37',
+    'grep -Fq "\x27$TEST_TOOL_DIRECTORY/timeout\x27 --verbose --signal=TERM --kill-after=30s 240s" "$CRONTAB_STATE" || exit 38',
     'grep "# merge4appstore:" "$CRONTAB_STATE" | grep -Fq "umask 077;" || exit 36',
     'grep -Fq "PATH=\x27$TEST_CRON_PATH\x27" "$CRONTAB_STATE" || exit 23',
     'grep -Fq "\x27$TEST_NODE_BINARY\x27 index.js" "$CRONTAB_STATE" || exit 19',
@@ -2072,6 +2089,7 @@ test('pauses, restores, and installs managed cron idempotently before unpausing 
     'grep -Fq "$TEST_TOOL_DIRECTORY/gh" "$TEST_NODE_CALLED" || exit 24',
     'grep -Fq "$TEST_TOOL_DIRECTORY/git" "$TEST_NODE_CALLED" || exit 25',
     'grep -Fq "$TEST_TOOL_DIRECTORY/flock" "$TEST_NODE_CALLED" || exit 26',
+    'grep -Fq "$TEST_TOOL_DIRECTORY/timeout" "$TEST_NODE_CALLED" || exit 39',
     'install_managed_cron "$TEST_RELEASE" false || exit 14',
     '[ "$(grep -Fc "# merge4appstore:" "$CRONTAB_STATE" || true)" -eq 2 ] || exit 15',
     'cp "$CRONTAB_STATE" "$TEST_DIRECTORY/crontab.before"',
@@ -2103,6 +2121,37 @@ test('pauses, restores, and installs managed cron idempotently before unpausing 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const finalizer = shellSection('finish_committed_transaction() {', 'recover_interrupted_transactions() {');
   assert.ok(finalizer.indexOf('install_managed_cron') < finalizer.indexOf('clear_delivery_pause'));
+});
+
+test('terminates only verified managed cron process groups after a bounded drain', t => {
+  const directory = temporaryDirectory(t, 'merge4appstore-cron-drain-');
+  const functions = shellSection('managed_cron_jobs() {', 'install_managed_cron() {');
+  const result = runBash([
+    'set -u',
+    'MANAGED_CRON_DRAIN_GRACE_SECONDS=0',
+    'MANAGED_CRON_TERM_GRACE_SECONDS=0',
+    'MANAGED_CRON_KILL_GRACE_SECONDS=0',
+    'printf "1\n" > "$TEST_DIRECTORY/alive"',
+    functions,
+    'managed_cron_jobs() { printf "222 222\n"; }',
+    'process_group_alive() { [ "$(cat "$TEST_DIRECTORY/alive")" = 1 ]; }',
+    'kill() {',
+    '  printf "%s\n" "$*" >> "$TEST_DIRECTORY/signals"',
+    '  if [ "$1" = -KILL ]; then printf "0\n" > "$TEST_DIRECTORY/alive"; fi',
+    '}',
+    'sleep() { :; }',
+    'quiesce_managed_cron_jobs || exit 10',
+    'grep -Fxq -- "-TERM -- -222" "$TEST_DIRECTORY/signals" || exit 11',
+    'grep -Fxq -- "-KILL -- -222" "$TEST_DIRECTORY/signals" || exit 12',
+    'managed_cron_jobs() { :; }',
+    'quiesce_managed_cron_jobs || exit 13',
+  ].join('\n'), { TEST_DIRECTORY: directory });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(functions, /row\.pid === row\.pgid/);
+  assert.match(functions, /descendants\.has\(row\.ppid\)/);
+  assert.match(functions, /\^cron\$\/i\.test\(parent\?\.command/);
+  assert.match(functions, /row\.args\.includes\("MERGE4APPSTORE_STATE_DIR="\)/);
+  assert.match(functions, /# merge4appstore:/);
 });
 
 test('retries transient deployment probes with bounded diagnostics', () => {

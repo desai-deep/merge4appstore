@@ -15,6 +15,10 @@ SERVICE_PORT="8788"
 DRAIN_TIMEOUT_MS="${MERGE4APPSTORE_DRAIN_TIMEOUT_MS:-600000}"
 LEGACY_DRAIN_QUIET_SECONDS="${MERGE4APPSTORE_LEGACY_DRAIN_QUIET_SECONDS:-30}"
 PM2_START_TIMEOUT_SECONDS=75
+MANAGED_CRON_JOB_TIMEOUT_SECONDS=240
+MANAGED_CRON_DRAIN_GRACE_SECONDS=30
+MANAGED_CRON_TERM_GRACE_SECONDS=10
+MANAGED_CRON_KILL_GRACE_SECONDS=5
 PUBLIC_BASE_URL="${MERGE4APPSTORE_PUBLIC_BASE_URL:-https://api.runningorder.app/merge4appstore}"
 NGINX_SERVER_NAME="${MERGE4APPSTORE_NGINX_SERVER_NAME:-api.runningorder.app}"
 NGINX_SNIPPET="/etc/nginx/snippets/merge4appstore-webhooks.conf"
@@ -89,6 +93,7 @@ GH_BINARY="$(resolve_required_executable gh)" || fail "Could not resolve a safe 
 GIT_BINARY="$(resolve_required_executable git)" || fail "Could not resolve a safe Git executable"
 FLOCK_BINARY="$(resolve_required_executable flock)" || fail "Could not resolve a safe flock executable"
 LOGROTATE_BINARY="$(resolve_required_executable logrotate)" || fail "Could not resolve a safe logrotate executable"
+TIMEOUT_BINARY="$(resolve_required_executable timeout)" || fail "Could not resolve a safe timeout executable"
 CRON_COMMAND_PATH=""
 for command_directory in \
   "$(dirname -- "$NODE_BINARY")" \
@@ -96,6 +101,7 @@ for command_directory in \
   "$(dirname -- "$GIT_BINARY")" \
   "$(dirname -- "$FLOCK_BINARY")" \
   "$(dirname -- "$LOGROTATE_BINARY")" \
+  "$(dirname -- "$TIMEOUT_BINARY")" \
   /usr/bin /bin; do
   case ":$CRON_COMMAND_PATH:" in *":$command_directory:"*) continue ;; esac
   CRON_COMMAND_PATH="${CRON_COMMAND_PATH:+$CRON_COMMAND_PATH:}$command_directory"
@@ -1621,11 +1627,137 @@ pause_managed_cron() {
   [ -z "$(printf '%s\n' "$verification" | grep '# merge4appstore:' || true)" ]
 }
 
+managed_cron_jobs() {
+  local current_uid
+  current_uid="$(id -u)" || return 1
+  ps -eo pid=,ppid=,pgid=,uid=,comm=,args= \
+    | CURRENT_UID="$current_uid" STATE_DIRECTORY="$STATE_DIR" NODE_EXECUTABLE="$NODE_BINARY" \
+      "$NODE_BINARY" -e '
+        let source = "";
+        process.stdin.on("data", chunk => { source += chunk; });
+        process.stdin.on("end", () => {
+          const rows = source.split("\n").map(line => {
+            const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line);
+            if (!match) return null;
+            return {
+              pid: Number(match[1]),
+              ppid: Number(match[2]),
+              pgid: Number(match[3]),
+              uid: Number(match[4]),
+              command: match[5],
+              args: match[6],
+            };
+          }).filter(Boolean);
+          const byPid = new Map(rows.map(row => [row.pid, row]));
+          const uid = Number(process.env.CURRENT_UID);
+          const state = process.env.STATE_DIRECTORY || "";
+          const node = process.env.NODE_EXECUTABLE || "";
+          const roots = rows.filter(row => {
+            const parent = byPid.get(row.ppid);
+            return Number.isSafeInteger(row.pid)
+              && row.pid > 1
+              && row.pid === row.pgid
+              && row.uid === uid
+              && /^(?:ba)?sh$/.test(row.command)
+              && /^cron$/i.test(parent?.command || "")
+              && row.args.includes("MERGE4APPSTORE_STATE_DIR=")
+              && row.args.includes(state)
+              && row.args.includes(node)
+              && row.args.includes("index.js --profile")
+              && /# merge4appstore:[A-Za-z0-9._-]+(?:\s|$)/.test(row.args);
+          });
+          const jobs = [];
+          for (const root of roots) {
+            const descendants = new Set([root.pid]);
+            let changed = true;
+            while (changed) {
+              changed = false;
+              for (const row of rows) {
+                if (!descendants.has(row.pid) && descendants.has(row.ppid)) {
+                  descendants.add(row.pid);
+                  changed = true;
+                }
+              }
+            }
+            const groups = new Set(rows.filter(row => descendants.has(row.pid))
+              .map(row => row.pgid)
+              .filter(group => Number.isSafeInteger(group) && group > 1));
+            for (const group of groups) jobs.push(`${root.pid} ${group}`);
+          }
+          process.stdout.write([...new Set(jobs)].join("\n"));
+        });
+      '
+}
+
+process_group_alive() {
+  local group="$1"
+  case "$group" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$group" -gt 1 ] && kill -0 -- "-$group" 2>/dev/null
+}
+
+wait_for_managed_cron_groups() {
+  local timeout_seconds="$1"
+  shift
+  local elapsed=0 group alive
+  while [ "$elapsed" -le "$timeout_seconds" ]; do
+    alive=0
+    for group in "$@"; do
+      if process_group_alive "$group"; then alive=1; break; fi
+    done
+    [ "$alive" -eq 1 ] || return 0
+    [ "$elapsed" -lt "$timeout_seconds" ] || break
+    sleep 1 || return 1
+    elapsed=$((elapsed + 1))
+  done
+  return 1
+}
+
+quiesce_managed_cron_jobs() {
+  local jobs elapsed=0 pid group
+  local groups=()
+  local seen_groups=" "
+  jobs="$(managed_cron_jobs)" || return 1
+  while [ -n "$jobs" ] && [ "$elapsed" -lt "$MANAGED_CRON_DRAIN_GRACE_SECONDS" ]; do
+    [ "$elapsed" -ne 0 ] || echo "Waiting up to ${MANAGED_CRON_DRAIN_GRACE_SECONDS}s for managed cron jobs to finish"
+    sleep 1 || return 1
+    elapsed=$((elapsed + 1))
+    jobs="$(managed_cron_jobs)" || return 1
+  done
+  if [ -z "$jobs" ]; then
+    echo "Managed cron quiescence verified"
+    return 0
+  fi
+
+  while read -r pid group; do
+    case "$pid:$group" in *[!0-9:]*) return 1 ;; esac
+    [ "$pid" -gt 1 ] && [ "$group" -gt 1 ] || return 1
+    case "$seen_groups" in *" $group "*) continue ;; esac
+    groups+=("$group")
+    seen_groups="$seen_groups$group "
+  done <<< "$jobs"
+  [ "${#groups[@]}" -gt 0 ] || return 1
+  echo "Managed cron drain deadline reached; terminating ${#groups[@]} verified process group(s)"
+  for group in "${groups[@]}"; do
+    if process_group_alive "$group"; then kill -TERM -- "-$group" || return 1; fi
+  done
+  if wait_for_managed_cron_groups "$MANAGED_CRON_TERM_GRACE_SECONDS" "${groups[@]}"; then
+    echo "Managed cron jobs terminated cleanly"
+    return 0
+  fi
+  echo "Managed cron jobs ignored SIGTERM; forcing the verified process groups to exit"
+  for group in "${groups[@]}"; do
+    if process_group_alive "$group"; then kill -KILL -- "-$group" || return 1; fi
+  done
+  wait_for_managed_cron_groups "$MANAGED_CRON_KILL_GRACE_SECONDS" "${groups[@]}" \
+    || { echo "ERROR: Managed cron process group survived SIGKILL" >&2; return 1; }
+  echo "Managed cron jobs were forcefully quiesced"
+}
+
 install_managed_cron() {
   local release="$1"
   local pause_cron="$2"
   local current_crontab profile_file profile_name profile_relative profile_quoted marker cron_line managed_cron
-  local current_release_quoted control_env_quoted state_dir_quoted cron_log_quoted node_binary_quoted cron_path_quoted verification
+  local current_release_quoted control_env_quoted state_dir_quoted cron_log_quoted node_binary_quoted timeout_binary_quoted cron_path_quoted verification
   local flock_binary_quoted logrotate_binary_quoted logrotate_config_quoted logrotate_state_quoted logrotate_lock_quoted
   local logrotate_log_quoted rotation_line
   local profiles=("$release"/profiles/*.yml "$release"/profiles/*.yaml)
@@ -1638,6 +1770,7 @@ install_managed_cron() {
   state_dir_quoted="$(shell_quote "$STATE_DIR")"
   cron_log_quoted="$(shell_quote "$LOGS_DIR/cron.log")"
   node_binary_quoted="$(shell_quote "$NODE_BINARY")"
+  timeout_binary_quoted="$(shell_quote "$TIMEOUT_BINARY")"
   cron_path_quoted="$(shell_quote "$CRON_COMMAND_PATH")"
   if [ -e "$LOGROTATE_CONFIG" ] || [ -L "$LOGROTATE_CONFIG" ]; then
     validate_private_file "$LOGROTATE_CONFIG" || return 1
@@ -1658,7 +1791,7 @@ install_managed_cron() {
       profile_relative="profiles/$(basename "$profile_file")"
       profile_quoted="$(shell_quote "$profile_relative")"
       marker="# merge4appstore:$profile_name"
-      cron_line="*/5 * * * * umask 077; cd $current_release_quoted && PATH=$cron_path_quoted MERGE4APPSTORE_ENV=$control_env_quoted MERGE4APPSTORE_STATE_DIR=$state_dir_quoted DRY_RUN=false RECONCILE_METADATA=false $node_binary_quoted index.js --profile $profile_quoted >> $cron_log_quoted 2>&1 $marker"
+      cron_line="*/5 * * * * umask 077; cd $current_release_quoted && PATH=$cron_path_quoted MERGE4APPSTORE_ENV=$control_env_quoted MERGE4APPSTORE_STATE_DIR=$state_dir_quoted MERGE4APPSTORE_LOCK_WAIT_MS=0 DRY_RUN=false RECONCILE_METADATA=false $timeout_binary_quoted --verbose --signal=TERM --kill-after=30s ${MANAGED_CRON_JOB_TIMEOUT_SECONDS}s $node_binary_quoted index.js --profile $profile_quoted >> $cron_log_quoted 2>&1 $marker"
       current_crontab="$(printf '%s\n%s\n' "$current_crontab" "$cron_line")"
     done
   fi
@@ -2477,6 +2610,8 @@ activate_delivery_pause "$transaction_dir" || fail "Could not create durable del
 write_transaction_phase legacy-cron-pausing
 pause_managed_cron "$transaction_dir/crontab.before" \
   || fail "Managed cron remained after quiescing"
+quiesce_managed_cron_jobs \
+  || fail "Managed cron jobs did not quiesce"
 write_transaction_phase legacy-cron-paused
 echo "Paused managed cron; durable webhook execution is gated by $DELIVERY_PAUSE_FILE"
 
