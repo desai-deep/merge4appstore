@@ -384,6 +384,19 @@ jobs:
                   | tail -n 200 || true
                 echo "instance_log_tail=$(basename -- "$instance_log"):end"
               fi
+              shopt -s nullglob
+              instance_archives=("$instance_log".*)
+              for instance_archive in "${instance_archives[@]}"; do
+                [ -f "$instance_archive" ] && [ ! -L "$instance_archive" ] && [ -O "$instance_archive" ] \
+                  || { echo "Managed profile log archive is unsafe"; exit 1; }
+                echo "instance_log_archive=$(basename -- "$instance_archive"):begin"
+                case "$instance_archive" in
+                  *.gz) gzip -cd -- "$instance_archive" ;;
+                  *) cat -- "$instance_archive" ;;
+                esac | grep -Ev 'Another instance is running|Timed out waiting for another instance' \
+                  | tail -n 200 || true
+                echo "instance_log_archive=$(basename -- "$instance_archive"):end"
+              done
             done
             node_binary="$(readlink -f -- "$(command -v node)")"
             pm2_home="${PM2_HOME:-$HOME/.pm2}"

@@ -366,6 +366,8 @@ test('inspection verifies both private blobless mirrors without lazy fetching', 
   assert.match(inspectRun, /tail -n 160 "\$state_dir\/logs\/cron\.log"/);
   assert.match(inspectRun, /instance_log_tail=\$\(basename -- "\$instance_log"\):begin/);
   assert.match(inspectRun, /grep -Ev 'Another instance is running\|Timed out waiting for another instance'/);
+  assert.match(inspectRun, /instance_archives=\("\$instance_log"\.\*\)/);
+  assert.match(inspectRun, /gzip -cd -- "\$instance_archive"/);
 });
 
 test('inspection fails closed for corrupt current release pointers and markers', t => {
