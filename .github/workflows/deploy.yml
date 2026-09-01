@@ -389,7 +389,17 @@ jobs:
               logrotate --debug --state "$state_dir/logrotate.state" "$state_dir/logrotate.conf" >/dev/null
               [ "$(crontab -l 2>/dev/null | grep -Fc '# merge4appstore-logrotate' || true)" -eq 1 ] \
                 || { echo "Managed log rotation cron is missing or duplicated"; exit 1; }
-              for managed_log in "$state_dir/logs/nginx-upstream.log" "$state_dir/logs/webhook-out.log" \
+              logs_dir="$state_dir/logs"
+              [ -d "$logs_dir" ] && [ ! -L "$logs_dir" ] && [ -O "$logs_dir" ] \
+                && [ "$(stat -c '%a' "$logs_dir")" = 700 ] \
+                || { echo "Managed log directory is unsafe"; exit 1; }
+              nginx_log="$logs_dir/nginx-upstream.log"
+              [ -f "$nginx_log" ] && [ ! -L "$nginx_log" ] \
+                && [ "$(stat -c '%a' "$nginx_log")" = 600 ] \
+                && [ -r "$nginx_log" ] && [ -w "$nginx_log" ] \
+                || { echo "Nginx managed log is unsafe or inaccessible"; exit 1; }
+              echo "managed_log=$(basename -- "$nginx_log") bytes=$(stat -c '%s' "$nginx_log")"
+              for managed_log in "$state_dir/logs/webhook-out.log" \
                 "$state_dir/logs/webhook-error.log" "$state_dir/logs/cron.log" \
                 "$state_dir/logs/logrotate.log"; do
                 [ -f "$managed_log" ] && [ ! -L "$managed_log" ] && [ -O "$managed_log" ] \

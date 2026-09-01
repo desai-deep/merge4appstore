@@ -1248,6 +1248,7 @@ test('bounds private state and PM2 logs with rootless managed rotation', () => {
   assert.match(deployScript, /LOGROTATE_CONFIG="\$STATE_DIR\/logrotate\.conf"/);
   assert.match(deployScript, /maxsize 10M[\s\S]*rotate 7[\s\S]*maxage 14/);
   assert.match(deployScript, /compress[\s\S]*delaycompress[\s\S]*copytruncate/);
+  assert.match(deployScript, /ensure_nginx_log_file "\$NGINX_ACCESS_LOG"/);
   assert.match(deployScript, /ensure_private_log_file "\$managed_log"[\s\S]*cron\.log/);
   assert.match(deployScript, /"%s\/pm2\.log" "%s\/agent\.log"/);
   assert.match(deployScript, /LOGROTATE_STATE="\$STATE_DIR\/logrotate\.state"/);
@@ -1263,6 +1264,53 @@ test('bounds private state and PM2 logs with rootless managed rotation', () => {
   assert.match(deployScript, /EXPECTED_PM2_ERROR_LOG/);
   assert.match(deployScript, /pm_out_log_path/);
   assert.match(deployScript, /pm_err_log_path/);
+});
+
+test('accepts a safely reopened Nginx log without trusting its inode owner', t => {
+  const directory = temporaryDirectory(t, 'merge4appstore-nginx-log-');
+  const safe = path.join(directory, 'nginx-upstream.log');
+  const loose = path.join(directory, 'loose.log');
+  const linked = path.join(directory, 'linked.log');
+  const exposedDirectory = path.join(directory, 'exposed');
+  const exposed = path.join(exposedDirectory, 'nginx-upstream.log');
+  fs.chmodSync(directory, 0o700);
+  fs.mkdirSync(exposedDirectory, { mode: 0o755 });
+  fs.writeFileSync(safe, '', { mode: 0o600 });
+  fs.writeFileSync(loose, '', { mode: 0o640 });
+  fs.writeFileSync(exposed, '', { mode: 0o600 });
+  fs.symlinkSync(safe, linked);
+  fs.chmodSync(safe, 0o600);
+  fs.chmodSync(loose, 0o640);
+  fs.chmodSync(exposedDirectory, 0o755);
+  fs.chmodSync(exposed, 0o600);
+
+  const validator = shellSection('validate_nginx_log_file() {', 'validate_owned_regular_file() {');
+  assert.doesNotMatch(validator, /\[ -O "\$file" \]/);
+  assert.match(validator, /\[ -r "\$file" \] && \[ -w "\$file" \]/);
+  const run = file => runBash([
+    'set -u',
+    portableStatShim,
+    validator,
+    'validate_nginx_log_file "$TEST_LOG"',
+  ].join('\n'), {
+    TEST_LOG: file,
+    TEST_NODE_BINARY: process.execPath,
+  });
+
+  const safeResult = run(safe);
+  assert.equal(safeResult.status, 0, safeResult.stderr || safeResult.stdout);
+  assert.notEqual(run(loose).status, 0, 'a loose Nginx log was accepted');
+  assert.notEqual(run(linked).status, 0, 'a linked Nginx log was accepted');
+  assert.notEqual(run(exposed).status, 0, 'a log outside an owned 0700 directory was accepted');
+  assert.match(inspectRun, /nginx_log[\s\S]*\[ -r "\$nginx_log" \][\s\S]*\[ -w "\$nginx_log" \]/);
+  const inspectNginxLog = inspectRun.match(
+    /nginx_log="\$logs_dir\/nginx-upstream\.log"[\s\S]*?for managed_log/,
+  );
+  assert.ok(inspectNginxLog, 'inspection must validate the Nginx log separately');
+  assert.doesNotMatch(
+    inspectNginxLog[0],
+    /\[ -O "\$nginx_log" \]/,
+  );
 });
 
 test('precreates an empty private logrotate state before its first real pass', t => {

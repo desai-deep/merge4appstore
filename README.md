@@ -426,7 +426,12 @@ contract. The JSON records contain only a request ID, method, response status,
 upstream address/status/timings, total request time, and bytes sent. They never
 contain a URI, query string, webhook token, header, body, client address,
 referrer, or user agent; Nginx's location error log remains disabled because an
-error can reproduce the token-bearing request line.
+error can reproduce the token-bearing request line. All managed logs remain
+inside the deployment-owned `0700` log directory. [Nginx assigns reopened log
+files to its worker user](https://nginx.org/en/docs/control.html), so the
+diagnostic log inode may have that owner; deployment still requires it to be a
+regular, non-symlinked `0600` file that the deployment account can read and
+rotate. App, cron, and rotation logs remain deployment-owned.
 
 ```bash
 tail -n 50 /srv/merge4appstore.state/logs/nginx-upstream.log
