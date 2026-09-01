@@ -358,6 +358,10 @@ test('inspection verifies both private blobless mirrors without lazy fetching', 
   assert.match(inspectRun, /GIT_NO_LAZY_FETCH=1 GIT_NO_REPLACE_OBJECTS=1 GIT_TERMINAL_PROMPT=0/);
   assert.match(inspectRun, /fsck --connectivity-only --no-dangling/);
   assert.match(inspectRun, /Expected exactly one ready mirror for each configured repository/);
+  assert.match(inspectRun, /inspect_repository_locks/);
+  assert.match(inspectRun, /repository_lock=\$instance:held:pid=\$holder_pid/);
+  assert.match(inspectRun, /\$2 == "FLOCK" && \$4 == "WRITE"/);
+  assert.match(inspectRun, /repository_lock_process=\$instance:/);
 });
 
 test('inspection fails closed for corrupt current release pointers and markers', t => {

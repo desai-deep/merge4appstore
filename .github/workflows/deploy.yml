@@ -306,6 +306,62 @@ jobs:
             # `!` or `||` would disable errexit inside the function and could
             # let a bare Git validation failure continue.
             inspect_git_mirrors
+            inspect_repository_locks() {
+              lock_root="$state_dir/jobs/.process-locks"
+              if [ ! -d "$lock_root" ]; then
+                echo "repository_locks=not-yet-initialized"
+                return
+              fi
+              [ ! -L "$lock_root" ] && [ -O "$lock_root" ] \
+                && [ "$(stat -c '%a' "$lock_root")" = 700 ] \
+                || { echo "Repository process-lock directory is unsafe"; return 1; }
+              for instance in jamsontoast runningorder-ios; do
+                lock_file="$(STATE_DIRECTORY="$state_dir" INSTANCE_NAME="$instance" node -e '
+                  const crypto = require("crypto");
+                  const fs = require("fs");
+                  const path = require("path");
+                  const directory = fs.realpathSync(path.join(process.env.STATE_DIRECTORY, "jobs"));
+                  const digest = crypto.createHash("sha256")
+                    .update(`${directory}\0job:${process.env.INSTANCE_NAME}.lock`)
+                    .digest("hex");
+                  process.stdout.write(path.join(directory, ".process-locks", `${digest}.lock`));
+                ')"
+                if [ ! -e "$lock_file" ]; then
+                  echo "repository_lock=$instance:unused"
+                  continue
+                fi
+                [ -f "$lock_file" ] && [ ! -L "$lock_file" ] && [ -O "$lock_file" ] \
+                  && [ "$(stat -c '%a' "$lock_file")" = 600 ] \
+                  || { echo "Repository process-lock file is unsafe for $instance"; return 1; }
+                inode="$(stat -c '%i' "$lock_file")"
+                holder_pid="$(awk -v inode="$inode" '
+                  $2 == "FLOCK" && $4 == "WRITE" && $5 ~ /^[0-9]+$/ && $6 ~ (":" inode "$") {
+                    if (found) printf ",";
+                    printf "%s", $5;
+                    found = 1;
+                  }
+                ' /proc/locks)"
+                if [ -z "$holder_pid" ]; then
+                  echo "repository_lock=$instance:free"
+                  continue
+                fi
+                echo "repository_lock=$instance:held:pid=$holder_pid"
+                case "$holder_pid" in
+                  *[!0-9]*|''|*,*) echo "repository_lock_lineage=$instance:unavailable"; continue ;;
+                esac
+                current_pid="$holder_pid"
+                depth=0
+                while [ "$current_pid" -gt 1 ] && [ "$depth" -lt 8 ] && [ -r "/proc/$current_pid/status" ]; do
+                  ps -p "$current_pid" -o pid=,ppid=,pgid=,etime=,stat=,comm=,args= \
+                    | sed "s/^/repository_lock_process=$instance:/"
+                  parent_pid="$(awk '$1 == "PPid:" { print $2 }' "/proc/$current_pid/status")"
+                  case "$parent_pid" in *[!0-9]*|'') break ;; esac
+                  current_pid="$parent_pid"
+                  depth="$((depth + 1))"
+                done
+              done
+            }
+            inspect_repository_locks
             node_binary="$(readlink -f -- "$(command -v node)")"
             pm2_home="${PM2_HOME:-$HOME/.pm2}"
             pm2_unit="${MERGE4APPSTORE_PM2_STARTUP_UNIT:-pm2-$(id -un).service}"
