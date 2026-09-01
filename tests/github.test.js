@@ -394,7 +394,7 @@ test('resolves production recovery inputs through bounded GitHub HTTP requests',
   });
 
   assert.equal(await github.getProductionHeadAsync({ strict: true }), 'a'.repeat(40));
-  assert.equal(await github.findPRFromCommitAsync('a'.repeat(40), { strict: true }), '43');
+  assert.equal(await github.findPRFromCommitAsync('A'.repeat(40), { strict: true }), '43');
   assert.equal(calls.length, 2);
   assert.equal(calls[0].url, 'https://api.github.com/repos/example/ios/commits/release%2Fmain');
   assert.match(calls[1].url, /\/commits\/a{40}\/pulls\?per_page=100$/);
