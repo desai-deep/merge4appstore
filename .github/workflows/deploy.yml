@@ -377,6 +377,14 @@ jobs:
               tail -n 160 "$state_dir/logs/cron.log"
               echo "cron_log_tail=end"
             fi
+            for instance_log in "$state_dir/logs/jamsontoast.log" "$state_dir/logs/runningorder-ios.log"; do
+              if [ -f "$instance_log" ]; then
+                echo "instance_log_tail=$(basename -- "$instance_log"):begin"
+                grep -Ev 'Another instance is running|Timed out waiting for another instance' "$instance_log" \
+                  | tail -n 200 || true
+                echo "instance_log_tail=$(basename -- "$instance_log"):end"
+              fi
+            done
             node_binary="$(readlink -f -- "$(command -v node)")"
             pm2_home="${PM2_HOME:-$HOME/.pm2}"
             pm2_unit="${MERGE4APPSTORE_PM2_STARTUP_UNIT:-pm2-$(id -un).service}"
