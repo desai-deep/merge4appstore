@@ -59,12 +59,44 @@ test('matches merged PRs by merge SHA and GitHub merge subjects in comparison or
   assert.deepEqual(mergedPullRequestsInComparison(comparison, pulls), [pulls[1], pulls[0]]);
 });
 
+test('excludes pull requests merged before the production branch commit', () => {
+  const alreadyReleased = {
+    number: 11,
+    title: 'Already released',
+    mergedAt: '2026-09-01T15:00:00Z',
+    mergeCommit: { oid: 'released-sha' },
+  };
+  const unreleased = {
+    number: 12,
+    title: 'Unreleased',
+    mergedAt: '2026-09-02T09:00:00Z',
+    mergeCommit: { oid: 'unreleased-sha' },
+  };
+  const comparison = { commits: [
+    { sha: 'released-sha', message: 'Already released (#11)' },
+    { sha: 'unreleased-sha', message: 'Unreleased (#12)' },
+  ] };
+
+  assert.deepEqual(mergedPullRequestsInComparison(comparison, [alreadyReleased, unreleased], {
+    mergedAfter: '2026-09-01T18:00:00Z',
+  }), [unreleased]);
+});
+
 function githubFixture(overrides = {}) {
   return {
     repo: 'example/ios',
-    getBranchSnapshot: branch => ({ sha: `${branch}-sha`, treeSha: `${branch}-tree` }),
+    getBranchSnapshot: branch => ({
+      sha: `${branch}-sha`,
+      treeSha: `${branch}-tree`,
+      committedAt: branch === 'main' ? '2026-09-01T18:00:00Z' : '2026-09-02T10:00:00Z',
+    }),
     compareBranches: () => ({ commits: [{ sha: 'merge-sha', message: 'Merge pull request #61 from example/feature' }] }),
-    listMergedPullRequests: () => [{ number: 61, title: 'Feature', mergeCommit: { oid: 'merge-sha' } }],
+    listMergedPullRequests: () => [{
+      number: 61,
+      title: 'Feature',
+      mergedAt: '2026-09-02T09:00:00Z',
+      mergeCommit: { oid: 'merge-sha' },
+    }],
     findOpenPullRequest: () => null,
     createPullRequest: () => ({ number: 70, url: 'https://github.com/example/ios/pull/70' }),
     updatePullRequest: () => ({ number: 69, url: 'https://github.com/example/ios/pull/69' }),
