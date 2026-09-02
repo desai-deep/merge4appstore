@@ -167,6 +167,46 @@ test('maps pull request lifecycle events to trigger and expiry jobs', () => {
   }]);
 });
 
+test('builds ordinary pull requests targeting any branch', () => {
+  const pull_request = { number: 75, base: { ref: 'staging' }, head: { ref: 'feature', sha: 'def456' } };
+  const repository = { full_name: 'example/ios' };
+
+  for (const action of ['opened', 'reopened', 'synchronize']) {
+    assert.deepEqual(jobsForGitHubEvent(profile, 'pull_request', {
+      action, pull_request, repository,
+    }, action), [{
+      mode: 'trigger', purpose: 'pull_request', commitSha: 'def456', branch: 'feature', pullRequest: '75', deliveryId: action,
+    }]);
+  }
+
+  assert.deepEqual(jobsForGitHubEvent(profile, 'pull_request', {
+    action: 'edited', pull_request, repository, changes: { body: { from: 'Old notes' } },
+  }, 'notes'), [{
+    mode: 'notes', purpose: 'pull_request', commitSha: 'def456', branch: 'feature', pullRequest: '75', deliveryId: 'notes',
+  }]);
+  assert.deepEqual(jobsForGitHubEvent(profile, 'pull_request', {
+    action: 'edited', pull_request, repository, changes: { base: { ref: { from: 'another-branch' } } },
+  }, 'base'), [{
+    mode: 'trigger', purpose: 'pull_request', commitSha: 'def456', branch: 'feature', pullRequest: '75', deliveryId: 'base',
+  }]);
+  assert.deepEqual(jobsForGitHubEvent(profile, 'pull_request', {
+    action: 'closed', pull_request, repository,
+  }, 'closed'), [{ mode: 'expire', deliveryId: 'closed' }]);
+});
+
+test('does not treat the configured release pull request as an ordinary production-target pull request', () => {
+  const pull_request = { number: 73, base: { ref: 'main' }, head: { ref: 'develop', sha: 'release123' } };
+  const repository = { full_name: 'example/ios' };
+  const releaseProfile = { ...profile, release_pull_request: true };
+
+  assert.deepEqual(jobsForGitHubEvent(releaseProfile, 'pull_request', {
+    action: 'opened', pull_request, repository,
+  }, 'opened'), []);
+  assert.deepEqual(jobsForGitHubEvent(releaseProfile, 'pull_request', {
+    action: 'closed', pull_request, repository,
+  }, 'closed'), []);
+});
+
 test('refreshes beta build notes when an automated release pull request body changes', () => {
   const pull_request = {
     number: 65,
@@ -184,7 +224,9 @@ test('refreshes beta build notes when an automated release pull request body cha
 
   assert.deepEqual(jobsForGitHubEvent(profile, 'pull_request', {
     action: 'edited', pull_request, repository, changes: { body: { from: 'Old release notes' } },
-  }, 'disabled-release-edit'), []);
+  }, 'disabled-release-edit'), [{
+    mode: 'notes', purpose: 'pull_request', commitSha: 'release123', branch: 'develop', pullRequest: '65', deliveryId: 'disabled-release-edit',
+  }]);
 });
 
 test('evaluates base changes against the configured release track', () => {
