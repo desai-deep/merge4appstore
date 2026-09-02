@@ -460,7 +460,9 @@ reconcile the open pull request from `repository.beta_branch` to
 `repository.production_branch`. The default title is “Bug fixes and performance
 improvements”, the PR carries an `automated release` label so it stands out in
 GitHub's pull-request list, and the default body limit is 100 merged pull
-requests. A mapping can override either value:
+requests. Pull requests merged before the current production commit are omitted,
+even when squash-style release history makes GitHub's branch comparison include
+their commits again. A mapping can override either value:
 
 ```yaml
 release_pull_request:

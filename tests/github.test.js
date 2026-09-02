@@ -471,6 +471,34 @@ test('reads paginated branch comparisons for release PR maintenance', () => {
   assert.equal(args.at(-1), 'repos/example/ios/compare/release%2F1...develop%2Fnext?per_page=100');
 });
 
+test('loads the production cutoff and merged timestamps for release notes', () => {
+  const github = new GitHubAPI('example', 'ios');
+  const calls = [];
+  github.exec = args => {
+    calls.push(args);
+    if (args[0] === 'api') {
+      return JSON.stringify({
+        sha: 'commit-sha',
+        commit: {
+          tree: { sha: 'tree-sha' },
+          committer: { date: '2026-09-01T18:00:00Z' },
+        },
+      });
+    }
+    return JSON.stringify([{ number: 12, mergedAt: '2026-09-02T09:00:00Z' }]);
+  };
+
+  assert.deepEqual(github.getBranchSnapshot('main'), {
+    sha: 'commit-sha',
+    treeSha: 'tree-sha',
+    committedAt: '2026-09-01T18:00:00Z',
+  });
+  assert.deepEqual(github.listMergedPullRequests('develop'), [
+    { number: 12, mergedAt: '2026-09-02T09:00:00Z' },
+  ]);
+  assert.equal(calls[1].at(-1), 'number,title,url,mergeCommit,mergedAt');
+});
+
 test('recovers an open pull request only for the exact branch head commit', () => {
   const github = new GitHubAPI('example', 'ios');
   github.exec = () => JSON.stringify([
