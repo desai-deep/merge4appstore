@@ -53,6 +53,7 @@ import {
   applyRepositoryProfile,
   loadRepositoryProfile,
   resolveAutoRebasePullRequests,
+  resolveBuildPurpose,
   resolveReleasePullRequest,
 } from './lib/profile.js';
 
@@ -289,7 +290,20 @@ async function main() {
       const automation = selectAutomation('sync');
       if (automation.enabled) {
         const { asc, tags, github } = createClients();
-        await runReleaseSync(asc, tags, github, DRY_RUN, true, versionLifecycle);
+        let publishedBetaBuilds = null;
+        if (repositoryProfile?.build?.purposes?.beta) {
+          const betaBuild = resolveBuildPurpose(repositoryProfile, 'beta');
+          if (betaBuild.appId === automation.appId) {
+            publishedBetaBuilds = {
+              workflowId: betaBuild.workflowId,
+              betaBranch: repositoryProfile.repository.beta_branch || 'develop',
+            };
+          }
+        }
+        await runReleaseSync(asc, tags, github, DRY_RUN, true, {
+          ...versionLifecycle,
+          publishedBetaBuilds,
+        });
       }
     }
 

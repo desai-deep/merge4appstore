@@ -1,7 +1,58 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { runClosedPRBuildExpiry } from '../lib/expire.js';
+import { runClosedPRBuildExpiry, runPublishedBetaBuildExpiry } from '../lib/expire.js';
+
+test('expires published release-branch builds but keeps the next beta version', async () => {
+  const expiredBuilds = [];
+  const asc = {
+    getTestFlightCleanupCandidates: async () => ([
+      { buildId: 'old-beta', buildNumber: '1401', version: '1.4' },
+      { buildId: 'live-beta', buildNumber: '1501', version: '1.5' },
+      { buildId: 'next-beta', buildNumber: '1601', version: '1.6' },
+      { buildId: 'feature-build', buildNumber: '1502', version: '1.5' },
+    ]),
+    getBuildSource: async buildId => ({
+      found: true,
+      commitSha: buildId,
+      sourceBranch: buildId === 'feature-build' ? 'feature/player' : 'develop',
+      workflowId: buildId === 'feature-build' ? 'pr-workflow' : 'beta-workflow',
+      workflowName: buildId === 'feature-build' ? 'Pull Requests' : 'Make Beta',
+    }),
+    expireBuild: async buildId => { expiredBuilds.push(buildId); },
+  };
+
+  assert.deepEqual(await runPublishedBetaBuildExpiry(asc, false, {
+    liveVersion: '1.5',
+    workflowId: 'beta-workflow',
+    betaBranch: 'develop',
+  }), { checked: 3, expired: 2 });
+  assert.deepEqual(expiredBuilds, ['old-beta', 'live-beta']);
+});
+
+test('uses the exact beta workflow when Apple omits source branch metadata', async () => {
+  const expiredBuilds = [];
+  const asc = {
+    getTestFlightCleanupCandidates: async () => ([
+      { buildId: 'source-less-beta', buildNumber: '1501', version: '1.5.0' },
+    ]),
+    getBuildSource: async () => ({
+      found: true,
+      commitSha: 'abc123',
+      sourceBranch: null,
+      workflowId: 'beta-workflow',
+      workflowName: 'Make Beta',
+    }),
+    expireBuild: async buildId => { expiredBuilds.push(buildId); },
+  };
+
+  assert.deepEqual(await runPublishedBetaBuildExpiry(asc, false, {
+    liveVersion: '1.5',
+    workflowId: 'beta-workflow',
+    betaBranch: 'develop',
+  }), { checked: 1, expired: 1 });
+  assert.deepEqual(expiredBuilds, ['source-less-beta']);
+});
 
 async function withBranches(fn) {
   const previousBeta = process.env.BETA_BRANCH;
