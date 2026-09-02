@@ -6,7 +6,7 @@ Automated iOS App Store deployment and release sync. Monitors TestFlight builds 
 
 1. **Deploy Check** - Monitors TestFlight for new builds from specific Xcode Cloud workflows, automatically submits them to App Store review, extracts release notes from merged GitHub PRs, and comments on PRs when builds are submitted or cancelled. A newer eligible production build always supersedes the build currently in review: merge4appstore withdraws the existing submission, waits for the version to become editable, selects the newer build, and resubmits it. Replacement does not depend on GitHub successfully attributing the commit to a PR.
 
-2. **Release Sync** - Monitors App Store Connect for builds that went live (READY_FOR_SALE), creates git tags (e.g., `v1.4-1400`) for released versions, and comments on PRs when builds are released.
+2. **Release Sync** - Monitors App Store Connect for builds that went live (READY_FOR_SALE), expires beta-workflow builds for released versions, creates git tags (e.g., `v1.4-1400`), and comments on PRs when builds are released. Builds for the next unreleased version remain available in TestFlight.
 
 3. **Closed PR Cleanup** - Expires TestFlight builds from feature branches after their PR is merged or closed against the configured beta branch. Builds from the beta or production branch and builds selected for an App Store version are always protected.
 

@@ -93,3 +93,37 @@ test('records a live version before returning for an existing release tag', asyn
 
   assert.deepEqual(releases, [{ version: '1.2.3', buildId: 'build-target' }]);
 });
+
+test('expires published beta builds before returning for an existing release tag', async () => {
+  const expiredBuilds = [];
+  const asc = {
+    getLiveProductionBuild: async () => ({
+      live: true,
+      version: '1.5',
+      buildNumber: '1505',
+      buildId: 'production-build',
+    }),
+    getTestFlightCleanupCandidates: async () => ([
+      { buildId: 'beta-build', buildNumber: '1504', version: '1.5' },
+    ]),
+    getBuildSource: async () => ({
+      found: true,
+      commitSha: 'a'.repeat(40),
+      sourceBranch: 'develop',
+      workflowId: 'beta-workflow',
+      workflowName: 'Make Beta',
+    }),
+    expireBuild: async buildId => { expiredBuilds.push(buildId); },
+  };
+
+  await runReleaseSync(
+    asc,
+    { tagExists: () => true },
+    {},
+    false,
+    false,
+    { publishedBetaBuilds: { workflowId: 'beta-workflow', betaBranch: 'develop' } },
+  );
+
+  assert.deepEqual(expiredBuilds, ['beta-build']);
+});
