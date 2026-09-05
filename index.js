@@ -11,7 +11,7 @@
  *   node index.js                    # Run both operations
  *   node index.js deploy             # Run only deployment check
  *   node index.js sync               # Run only release sync
- *   node index.js expire             # Expire builds from closed PRs targeting BETA_BRANCH
+ *   node index.js expire             # Expire builds from closed PRs
  *   node index.js trigger            # Trigger a configured build purpose
  *   node index.js notes              # Refresh TestFlight notes after a PR body edit
  *   node index.js release-pr         # Create or update the beta-to-production release PR
