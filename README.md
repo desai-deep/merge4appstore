@@ -766,14 +766,14 @@ PR workflow.
 
 ## Closed PR Build Expiry
 
-The `expire` mode checks each valid, unexpired TestFlight build against its Xcode Cloud source branch. It expires the build only when that exact branch has one closed or merged PR targeting `BETA_BRANCH`. When a branch name has been reused by multiple closed PRs, the source commit must identify exactly one of them. A currently open PR for the branch always protects its builds.
+The `expire` mode checks each valid, unexpired TestFlight build against its Xcode Cloud source branch. It expires the build only when that exact branch has one closed or merged PR. When a branch name has been reused by multiple closed PRs, the source commit must identify exactly one of them. A currently open PR for the branch, regardless of its destination branch, always protects its builds.
 
 The cleanup skips builds when their source cannot be identified, they came from
 a workflow other than the configured PR workflow, their PR is still open or
 ambiguous, they came from the beta or production branch, or they are selected
 for an App Store version. If Apple retains the exact commit and workflow but
 drops only the source branch, cleanup requires exactly one closed PR associated
-with that commit and targeting the configured beta branch. Use `DRY_RUN=true
+with that commit. Use `DRY_RUN=true
 node index.js expire --profile ...` to preview every decision.
 
 ## License

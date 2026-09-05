@@ -120,7 +120,10 @@ test('expires builds from feature branches merged to develop', async () => {
       expireBuild: async buildId => { expiredBuilds.push(buildId); },
     };
     const github = {
-      findClosedPRForBuild: () => ({ number: 41, headBranch: 'feature/player', mergedAt: '2026-08-21T10:00:00Z' }),
+      findClosedPRForBuild: (commit, base, head) => {
+        assert.deepEqual([commit, base, head], ['abc123', null, 'feature/player']);
+        return { number: 41, headBranch: 'feature/player', mergedAt: '2026-08-21T10:00:00Z' };
+      },
     };
 
     const result = await runClosedPRBuildExpiry(asc, github, false);
@@ -226,7 +229,7 @@ test('expires a PR-workflow build by exact commit when Apple omits its source br
     };
     const github = {
       findClosedPRForBuild: (commit, base, head) => {
-        assert.deepEqual([commit, base, head], ['abc123', 'develop', null]);
+        assert.deepEqual([commit, base, head], ['abc123', null, null]);
         return { number: 131, headBranch: 'codex/thin-xcode-cloud-ci', mergedAt: '2026-08-27T20:08:08Z' };
       },
     };

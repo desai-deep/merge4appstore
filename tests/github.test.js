@@ -565,6 +565,49 @@ test('finds a PR closed without merging', () => {
   );
 });
 
+test('finds one closed PR regardless of its destination branch', () => {
+  const github = new GitHubAPI('desai-deep', 'JamsOnToast');
+  let args;
+  github.exec = received => {
+    args = received;
+    return JSON.stringify([{
+      number: 75,
+      state: 'MERGED',
+      closedAt: '2026-09-02T10:00:00Z',
+      mergedAt: '2026-09-02T10:00:00Z',
+      headRefName: 'feature/player',
+      baseRefName: 'staging',
+    }]);
+  };
+
+  assert.equal(
+    github.findClosedPRForBuild('abc123', null, 'feature/player').number,
+    75,
+  );
+  assert.equal(args.includes('--base'), false);
+});
+
+test('keeps a branch with an open PR targeting another destination branch', () => {
+  const github = new GitHubAPI('desai-deep', 'JamsOnToast');
+  github.exec = () => JSON.stringify([{
+    number: 75,
+    state: 'CLOSED',
+    closedAt: '2026-09-02T10:00:00Z',
+    mergedAt: null,
+    headRefName: 'feature/player',
+    baseRefName: 'staging',
+  }, {
+    number: 76,
+    state: 'OPEN',
+    closedAt: null,
+    mergedAt: null,
+    headRefName: 'feature/player',
+    baseRefName: 'main',
+  }]);
+
+  assert.equal(github.findClosedPRForBuild('abc123', null, 'feature/player'), null);
+});
+
 test('keeps a branch when it has a currently open PR', () => {
   const github = new GitHubAPI('desai-deep', 'JamsOnToast');
   github.exec = () => JSON.stringify([
