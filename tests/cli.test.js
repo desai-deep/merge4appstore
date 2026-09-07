@@ -45,6 +45,10 @@ test('accepts the TestFlight notes refresh mode', () => {
   assert.equal(parseCliArgs(['notes'], '/srv/merge4appstore', {}).mode, 'notes');
 });
 
+test('accepts the App Store release notes refresh mode', () => {
+  assert.equal(parseCliArgs(['release-notes'], '/srv/merge4appstore', {}).mode, 'release-notes');
+});
+
 test('accepts the release pull request reconciliation mode', () => {
   assert.equal(parseCliArgs(['release-pr'], '/srv/merge4appstore', {}).mode, 'release-pr');
 });

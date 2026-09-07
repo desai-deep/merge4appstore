@@ -282,6 +282,11 @@ BUILD_COMMIT_SHA=abcdef1234567890 \
 BUILD_SOURCE_DELIVERY_ID=github-delivery-id \
 node index.js trigger --profile profiles/runningorder.yml
 
+# Refresh App Store notes for the matching submitted release
+BUILD_COMMIT_SHA=abcdef1234567890abcdef1234567890abcdef12 \
+BUILD_PULL_REQUEST=65 \
+node index.js release-notes --profile profiles/runningorder.yml
+
 # Run one repository profile
 node index.js --profile profiles/jamsontoast.yml
 node index.js deploy --profile profiles/jamsontoast.yml
@@ -477,6 +482,14 @@ a warning; a later reconciliation retries the label.
 
 This policy and its GitHub writes live in merge4appstore; app repositories do
 not need a release-PR workflow or checkout script.
+
+Editing the title of a merged automated release PR triggers a best-effort
+refresh of the matching submitted App Store version's English release notes.
+The submitted build must resolve to that exact merge commit and PR, so editing
+an older release cannot overwrite the current version. This refresh never
+withdraws, rebuilds, or resubmits the version; it only attempts the metadata
+update while App Store Connect still permits it. Repository-managed
+`en-US/whats_new.txt` remains authoritative and is not replaced by the PR title.
 
 ### Pull-only Xcode versions
 

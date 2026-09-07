@@ -14,6 +14,7 @@
  *   node index.js expire             # Expire builds from closed PRs
  *   node index.js trigger            # Trigger a configured build purpose
  *   node index.js notes              # Refresh TestFlight notes after a PR body edit
+ *   node index.js release-notes      # Refresh notes for a submitted App Store release
  *   node index.js release-pr         # Create or update the beta-to-production release PR
  *   node index.js rebase-prs         # Rebase open PRs after the beta branch advances
  *   node index.js --config profiles/my-app.env
@@ -104,6 +105,7 @@ import {
 } from './lib/trigger.js';
 import {
   publishTestFlightNotesForRun,
+  refreshAppStoreReleaseNotes,
   refreshTestFlightNotes,
 } from './lib/refresh-notes.js';
 import { reconcileReleasePullRequest } from './lib/release-pr.js';
@@ -223,6 +225,24 @@ async function main() {
       if (!policy.enabled) throw new Error('release pull request automation is disabled');
       const github = new GitHubAPI(CONFIG.repoOwner, CONFIG.repoName, CONFIG.productionBranch);
       reconcileReleasePullRequest(github, policy, DRY_RUN);
+    }
+
+    if (mode === 'release-notes') {
+      if (!repositoryProfile) throw new Error('release-notes mode requires --profile');
+      for (const name of ['BUILD_COMMIT_SHA', 'BUILD_PULL_REQUEST']) {
+        if (!process.env[name]) throw new Error(`release-notes mode requires ${name}`);
+      }
+      const automation = selectAutomation('deploy');
+      if (automation.enabled) {
+        const { asc, github } = createClients();
+        await refreshAppStoreReleaseNotes(asc, github, {
+          workflowId: automation.workflowId,
+          commitSha: process.env.BUILD_COMMIT_SHA,
+          pullRequest: process.env.BUILD_PULL_REQUEST,
+          metadataPath: automation.metadataPath,
+          dryRun: DRY_RUN,
+        });
+      }
     }
 
     if (mode === 'notes') {

@@ -229,6 +229,79 @@ test('refreshes beta build notes when an automated release pull request body cha
   }]);
 });
 
+test('refreshes App Store release notes when a merged automated release pull request title changes', () => {
+  const pull_request = {
+    number: 65,
+    merged: true,
+    merge_commit_sha: 'production123',
+    base: { ref: 'main' },
+    head: { ref: 'develop', sha: 'release123' },
+  };
+  const repository = { full_name: 'example/ios' };
+  const releaseProfile = { ...profile, release_pull_request: true };
+
+  assert.deepEqual(jobsForGitHubEvent(releaseProfile, 'pull_request', {
+    action: 'edited', pull_request, repository, changes: { title: { from: 'Old title' } },
+  }, 'release-title-edit'), [{
+    mode: 'release-notes',
+    commitSha: 'production123',
+    pullRequest: '65',
+    deliveryId: 'release-title-edit',
+  }]);
+
+  assert.deepEqual(jobsForGitHubEvent(releaseProfile, 'pull_request', {
+    action: 'edited',
+    pull_request,
+    repository,
+    changes: {
+      body: { from: 'Old release notes' },
+      title: { from: 'Old title' },
+    },
+  }, 'release-body-title-edit'), [{
+    mode: 'notes',
+    purpose: 'beta',
+    commitSha: 'release123',
+    branch: 'develop',
+    pullRequest: '65',
+    deliveryId: 'release-body-title-edit',
+  }, {
+    mode: 'release-notes',
+    commitSha: 'production123',
+    pullRequest: '65',
+    deliveryId: 'release-body-title-edit',
+  }]);
+});
+
+test('does not refresh App Store release notes for an unmerged or unconfigured release pull request', () => {
+  const pull_request = {
+    number: 65,
+    merged: false,
+    merge_commit_sha: 'production123',
+    base: { ref: 'main' },
+    head: { ref: 'develop', sha: 'release123' },
+  };
+  const repository = { full_name: 'example/ios' };
+  const releaseProfile = { ...profile, release_pull_request: true };
+
+  assert.deepEqual(jobsForGitHubEvent(releaseProfile, 'pull_request', {
+    action: 'edited', pull_request, repository, changes: { title: { from: 'Old title' } },
+  }, 'unmerged-release-title-edit'), []);
+
+  assert.deepEqual(jobsForGitHubEvent(releaseProfile, 'pull_request', {
+    action: 'edited',
+    pull_request: { ...pull_request, merged: true, merge_commit_sha: null },
+    repository,
+    changes: { title: { from: 'Old title' } },
+  }, 'missing-merge-sha-title-edit'), []);
+
+  assert.deepEqual(jobsForGitHubEvent(profile, 'pull_request', {
+    action: 'edited',
+    pull_request: { ...pull_request, merged: true },
+    repository,
+    changes: { title: { from: 'Old title' } },
+  }, 'disabled-release-title-edit'), []);
+});
+
 test('evaluates base changes against the configured release track', () => {
   const pull_request = {
     number: 65,
@@ -546,6 +619,35 @@ test('passes metadata reconciliation intent only to its deploy process', async (
 
   assert.equal(await result, 0);
   assert.equal(environment.RECONCILE_METADATA, 'true');
+});
+
+test('passes release-note attribution to its dedicated process', async () => {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  let args;
+  let environment;
+  const result = runJob(
+    { profile, profilePath: '/tmp/example.yml' },
+    {
+      mode: 'release-notes',
+      commitSha: 'production123',
+      pullRequest: '65',
+      deliveryId: 'release-title-edit',
+    },
+    (_executable, receivedArgs, options) => {
+      args = receivedArgs;
+      environment = options.env;
+      queueMicrotask(() => child.emit('exit', 0));
+      return child;
+    },
+  );
+
+  assert.equal(await result, 0);
+  assert.equal(args[1], 'release-notes');
+  assert.equal(environment.BUILD_COMMIT_SHA, 'production123');
+  assert.equal(environment.BUILD_PULL_REQUEST, '65');
+  assert.equal(environment.BUILD_SOURCE_DELIVERY_ID, 'release-title-edit');
 });
 
 test('forces a shadow trigger child into dry-run mode', async () => {

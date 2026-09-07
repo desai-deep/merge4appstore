@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   discoverLocalizedMetadata,
+  getManagedWhatsNewLocales,
   imageDimensions,
   inferScreenshotDisplayType,
   syncLocalizedMetadata,
@@ -362,6 +363,44 @@ test('omitted media directories and release notes remain unmanaged', async () =>
     metadataPath: 'AppStore', ref: 'abc', versionId: 'version-1',
   });
   assert.deepEqual([...result.managedWhatsNewLocales], []);
+});
+
+test('detects explicit and primary-locale release-note ownership without reading blobs', async () => {
+  const github = {
+    getRepositoryTree: () => ([
+      { path: 'AppStore', type: 'tree', sha: 'root' },
+      { path: 'AppStore/whats_new.txt', type: 'blob', sha: 'default-notes' },
+      { path: 'AppStore/de-DE/whats_new.txt', type: 'blob', sha: 'german-notes' },
+      { path: 'AppStore/fr-FR/description.txt', type: 'blob', sha: 'description' },
+    ]),
+    getRepositoryBlob: () => assert.fail('ownership inspection must not read metadata contents'),
+  };
+  const asc = { getAppPrimaryLocale: async () => 'en-US' };
+
+  assert.deepEqual(
+    [...await getManagedWhatsNewLocales(asc, github, {
+      metadataPath: 'AppStore',
+      ref: 'production-head',
+    })].sort(),
+    ['de-DE', 'en-US'],
+  );
+});
+
+test('release-note ownership inspection leaves omitted whats_new unmanaged', async () => {
+  const github = repository([
+    { path: 'AppStore/en-US/description.txt', type: 'blob', sha: 'description' },
+  ], { description: 'Description' });
+  const asc = {
+    getAppPrimaryLocale: async () => assert.fail('no default release notes need locale resolution'),
+  };
+
+  assert.deepEqual(
+    [...await getManagedWhatsNewLocales(asc, github, {
+      metadataPath: 'AppStore',
+      ref: 'production-head',
+    })],
+    [],
+  );
 });
 
 test('fails clearly when the configured metadata root is missing or is a file', async () => {
