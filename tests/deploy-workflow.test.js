@@ -2199,6 +2199,11 @@ test('standalone mirror preparation bounds each repository and reserves retry he
 });
 
 test('publishes deploy failures and monitors public health out of band', () => {
+  assert.equal(parsedWorkflow.name, 'VPS deployment and service monitoring');
+  assert.match(
+    parsedWorkflow['run-name'],
+    /^\$\{\{ github\.event_name == 'schedule' && 'Monitor deployed webhook service'/,
+  );
   assert.deepEqual(parsedWorkflow.on.schedule, [{ cron: '*/5 * * * *' }]);
   assert.deepEqual(parsedWorkflow.permissions, {});
   assert.deepEqual(parsedWorkflow.jobs.test.permissions, { contents: 'read' });

@@ -1,6 +1,7 @@
-name: Deploy to VPS
+name: VPS deployment and service monitoring
 run-name: >-
-  ${{ github.event_name == 'workflow_dispatch' && inputs.inspect_only && 'Inspect VPS webhook readiness'
+  ${{ github.event_name == 'schedule' && 'Monitor deployed webhook service'
+      || github.event_name == 'workflow_dispatch' && inputs.inspect_only && 'Inspect VPS webhook readiness'
       || github.event_name == 'workflow_dispatch' && 'Deploy merge4appstore to VPS'
       || github.event.pull_request.title
       || github.event.head_commit.message

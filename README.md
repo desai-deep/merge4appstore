@@ -412,14 +412,37 @@ newer status, and a newer successful build closes the alert. Deployment,
 service-health, and Xcode Cloud failure issues are best-effort assigned to the
 repository owner so GitHub can deliver an assignment notification. A failed
 deployment's issue also records a bounded, sanitized public-health snapshot, which confirms
-whether the previous release remained available after recovery. To inspect and
-requeue durable failures on the VPS:
+whether the previous release remained available after recovery. To inspect
+durable failures on the VPS without changing the queue:
 
 ```bash
 curl --fail-with-body https://api.runningorder.app/merge4appstore/health
 cd /srv/merge4appstore.state/current
 MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state npm run retry:deliveries
 ```
+
+The inspection lists each failed receipt hash, repository instance, unfinished
+job, cursor, attempt count, last error, and update time. Review that output
+before retrying: a job can complete its external side effect before its receipt
+cursor is durably advanced, so replaying it can repeat that side effect. Requeue
+only the reviewed receipts whenever possible:
+
+```bash
+MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state \
+  npm run retry:deliveries -- --receipt RECEIPT_HASH
+```
+
+Multiple `--receipt` options can be supplied. A deliberate full-backlog retry
+also requires the exact count from the immediately preceding inspection, and
+is refused if that count changes:
+
+```bash
+MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state \
+  npm run retry:deliveries -- --all --confirm-count FAILED_COUNT
+```
+
+Requeueing resumes at the first unfinished job, resets its attempt counter, and
+preserves the previous failure details in the receipt's recovery history.
 
 For proxy failures, inspect the private sanitized upstream log and the rotation
 contract. The JSON records contain only a request ID, method, response status,
@@ -441,9 +464,8 @@ logrotate --debug \
 crontab -l | grep -F '# merge4appstore-logrotate'
 ```
 
-The retry command requeues every readable failed receipt from its first
-unfinished job. If it exits `2`, inspect the preserved corrupt evidence and
-then quarantine it explicitly:
+If inspection exits `2`, corrupt receipts block all retry operations. Inspect
+the preserved evidence and then quarantine it explicitly as a separate action:
 
 ```bash
 MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state \
