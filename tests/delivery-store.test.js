@@ -267,9 +267,13 @@ test('inspects and selectively requeues reviewed dead letters with recovery hist
   assert.deepEqual(inspection.corrupt, []);
   assert.equal(inspection.failed.length, 2);
   assert.deepEqual(
-    inspection.failed.find(receipt => receipt.hash === first.receiptHash),
+    {
+      ...inspection.failed.find(receipt => receipt.hash === first.receiptHash),
+      revision: undefined,
+    },
     {
       hash: first.receiptHash,
+      revision: undefined,
       instance: 'example-ios',
       cursor: 1,
       next_job: {
@@ -407,6 +411,297 @@ test('memory delivery recovery rejects a receipt released across its inspection 
     error => error.code === 'ENOTFAILED',
   );
   assert.deepEqual(await store.queueStatus(), { pending: 0, failed: 0, corrupt: 0 });
+});
+
+test('retires one reviewed dead letter as an indefinite audited tombstone', async t => {
+  const stateDirectory = await temporaryState(t);
+  let now = 10_000;
+  const store = new FileDeliveryStore({ stateDirectory, retentionMs: 10, now: () => now });
+  const key = 'github:example:reviewed-retirement';
+  const intent = {
+    instance: 'example-ios',
+    jobs: [{ mode: 'notes' }, { mode: 'deploy', purpose: 'production' }],
+  };
+  const first = await store.claim(key, intent);
+  await store.advance(first, 1);
+  await store.fail(first, new Error('first failure'));
+  now = 11_000;
+  await store.requeueFailed({ receiptHashes: [first.receiptHash] });
+  const [recovered] = await store.claimPending();
+  await store.fail(recovered, new Error('external result is ambiguous'));
+
+  const [inspection] = (await store.inspectFailedReceipts()).failed;
+  assert.equal(inspection.hash, first.receiptHash);
+  assert.match(inspection.revision, /^[0-9a-f]{64}$/);
+  assert.equal('token' in inspection, false);
+  const failedReceipt = JSON.parse(await fs.readFile(
+    store.receiptFileForHash(first.receiptHash, 'failed'),
+    'utf8',
+  ));
+
+  now = 12_000;
+  assert.equal(await store.retireFailed({
+    receiptHash: inspection.hash,
+    revision: inspection.revision,
+    reasonCode: 'side-effect-confirmed',
+    reference: 'https://github.com/example/repository/actions/runs/123',
+    actor: 'test-operator',
+  }), true);
+  assert.deepEqual(await store.queueStatus(), { pending: 0, failed: 0, corrupt: 0 });
+  assert.deepEqual(await store.inspectFailedReceipts(), { failed: [], corrupt: [] });
+
+  const tombstone = JSON.parse(await fs.readFile(
+    store.receiptFileForHash(first.receiptHash, 'retired'),
+    'utf8',
+  ));
+  assert.equal(tombstone.state, 'retired');
+  assert.notEqual(tombstone.token, failedReceipt.token);
+  assert.deepEqual(tombstone.intent, failedReceipt.intent);
+  assert.equal(tombstone.cursor, failedReceipt.cursor);
+  assert.equal(tombstone.attempts, failedReceipt.attempts);
+  assert.equal(tombstone.lastError, failedReceipt.lastError);
+  assert.deepEqual(tombstone.recoveryHistory, failedReceipt.recoveryHistory);
+  assert.equal('expiresAt' in tombstone, false);
+  assert.deepEqual(tombstone.retirement, {
+    retiredAt: 12_000,
+    reasonCode: 'side-effect-confirmed',
+    reference: 'https://github.com/example/repository/actions/runs/123',
+    actor: 'test-operator',
+    reviewedRevision: inspection.revision,
+    failedAt: 11_000,
+    attempts: failedReceipt.attempts,
+    cursor: 1,
+    lastError: 'external result is ambiguous',
+  });
+
+  // The rotated token makes every mutation from the old worker fail closed.
+  assert.equal(await store.advance(recovered, 2), false);
+  assert.equal(await store.retry(recovered, new Error('late retry')), false);
+  assert.equal(await store.fail(recovered, new Error('late failure')), false);
+  assert.equal(await store.complete(recovered), false);
+  assert.equal(await store.release(recovered), false);
+
+  // Unlike an ordinary completion, a retired receipt never expires into replay.
+  now = 1_000_000;
+  assert.equal(await store.claim(key, intent), null);
+  assert.deepEqual(await store.claimPending(), []);
+  await fs.access(store.receiptFileForHash(first.receiptHash, 'retired'));
+});
+
+test('refuses a stale inspection revision without changing the failed receipt', async t => {
+  const stateDirectory = await temporaryState(t);
+  let now = 10_000;
+  const store = new FileDeliveryStore({ stateDirectory, now: () => now });
+  const failed = await store.claim('github:example:stale-retirement', {
+    instance: 'example-ios', jobs: [{ mode: 'deploy' }],
+  });
+  await store.fail(failed, new Error('first failure'));
+  const staleRevision = (await store.inspectFailedReceipts()).failed[0].revision;
+
+  now = 11_000;
+  await store.requeueFailed({ receiptHashes: [failed.receiptHash] });
+  const [retried] = await store.claimPending();
+  await store.fail(retried, new Error('new failure evidence'));
+  await assert.rejects(store.retireFailed({
+    receiptHash: failed.receiptHash,
+    revision: staleRevision,
+    reasonCode: 'side-effect-confirmed',
+    reference: 'run:123',
+    actor: 'test-operator',
+  }), error => error.code === 'ESTALEREVISION');
+  assert.deepEqual(await store.queueStatus(), { pending: 0, failed: 1, corrupt: 0 });
+  await fs.access(store.receiptFileForHash(failed.receiptHash, 'failed'));
+});
+
+test('serializes retirement and requeue under one manual-operation lock', async t => {
+  const stateDirectory = await temporaryState(t);
+  const retiringStore = new FileDeliveryStore({ stateDirectory });
+  const competingStore = new FileDeliveryStore({ stateDirectory });
+  const failed = await retiringStore.claim('github:example:retire-requeue-race', {
+    instance: 'example-ios', jobs: [{ mode: 'deploy' }],
+  });
+  await retiringStore.fail(failed, new Error('ambiguous external result'));
+  const revision = (await retiringStore.inspectFailedReceipts()).failed[0].revision;
+
+  const writeReceipt = retiringStore.writeReceipt.bind(retiringStore);
+  let releaseWrite;
+  let retirementStarted;
+  const started = new Promise(resolve => { retirementStarted = resolve; });
+  retiringStore.writeReceipt = async (file, receipt, options) => {
+    if (receipt.state === 'retired') {
+      retirementStarted();
+      await new Promise(resolve => { releaseWrite = resolve; });
+    }
+    return writeReceipt(file, receipt, options);
+  };
+
+  const retirement = retiringStore.retireFailed({
+    receiptHash: failed.receiptHash,
+    revision,
+    reasonCode: 'obsolete',
+    reference: 'issue:59',
+    actor: 'test-operator',
+  });
+  await started;
+  let requeueSettled = false;
+  const requeue = competingStore.requeueFailed({ receiptHashes: [failed.receiptHash] })
+    .then(value => {
+      requeueSettled = true;
+      return value;
+    }, error => {
+      requeueSettled = true;
+      throw error;
+    });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(requeueSettled, false);
+  releaseWrite();
+  assert.equal(await retirement, true);
+  await assert.rejects(requeue, error => error.code === 'ENOTFAILED');
+  assert.deepEqual(await competingStore.queueStatus(), { pending: 0, failed: 0, corrupt: 0 });
+});
+
+test('keeps a retirement committed by an interrupted atomic tombstone write', async t => {
+  const stateDirectory = await temporaryState(t);
+  const store = new FileDeliveryStore({ stateDirectory });
+  const key = 'github:example:interrupted-retirement';
+  const intent = { instance: 'example-ios', jobs: [{ mode: 'deploy' }] };
+  const failed = await store.claim(key, intent);
+  await store.fail(failed, new Error('ambiguous result'));
+  const revision = (await store.inspectFailedReceipts()).failed[0].revision;
+
+  const writeReceipt = store.writeReceipt.bind(store);
+  let interrupted = false;
+  store.writeReceipt = async (file, receipt, options) => {
+    await writeReceipt(file, receipt, options);
+    if (!interrupted && receipt.state === 'retired') {
+      interrupted = true;
+      throw Object.assign(new Error('simulated crash after retirement write'), { code: 'EIO' });
+    }
+  };
+  await assert.rejects(store.retireFailed({
+    receiptHash: failed.receiptHash,
+    revision,
+    reasonCode: 'obsolete',
+    reference: 'issue:59',
+    actor: 'test-operator',
+  }), /simulated crash/);
+
+  const recoveredStore = new FileDeliveryStore({ stateDirectory });
+  assert.deepEqual(await recoveredStore.queueStatus(), { pending: 0, failed: 0, corrupt: 0 });
+  assert.equal(await recoveredStore.claim(key, intent), null);
+  const tombstone = JSON.parse(await fs.readFile(
+    recoveredStore.receiptFileForHash(failed.receiptHash, 'retired'),
+    'utf8',
+  ));
+  assert.equal(tombstone.state, 'retired');
+  assert.equal(tombstone.retirement.reviewedRevision, revision);
+});
+
+test('keeps a crash-corrupted retirement fail-closed through quarantine and redelivery', async t => {
+  const stateDirectory = await temporaryState(t);
+  const store = new FileDeliveryStore({ stateDirectory });
+  const key = 'github:example:crash-corrupt-retirement';
+  const intent = { instance: 'example-ios', jobs: [{ mode: 'deploy' }] };
+  const failed = await store.claim(key, intent);
+  await store.fail(failed, new Error('ambiguous result'));
+  const revision = (await store.inspectFailedReceipts()).failed[0].revision;
+
+  const writeReceipt = store.writeReceipt.bind(store);
+  store.writeReceipt = async (file, receipt, options) => {
+    await writeReceipt(file, receipt, options);
+    if (receipt.state === 'retired') {
+      throw Object.assign(new Error('simulated crash after retirement commit'), { code: 'EIO' });
+    }
+  };
+  await assert.rejects(store.retireFailed({
+    receiptHash: failed.receiptHash,
+    revision,
+    reasonCode: 'obsolete',
+    reference: 'issue:59',
+    actor: 'test-operator',
+  }), /simulated crash/);
+
+  const tombstoneFile = store.receiptFileForHash(failed.receiptHash, 'retired');
+  await fs.writeFile(tombstoneFile, '{not-json', { mode: 0o600 });
+  const recoveredStore = new FileDeliveryStore({ stateDirectory });
+  assert.deepEqual(await recoveredStore.queueStatus(), { pending: 0, failed: 1, corrupt: 1 });
+  assert.deepEqual(await recoveredStore.quarantineCorrupt(), []);
+  await fs.access(tombstoneFile);
+  assert.equal(await recoveredStore.claim(key, intent), null);
+  assert.deepEqual(await recoveredStore.queueStatus(), { pending: 0, failed: 1, corrupt: 1 });
+});
+
+test('surfaces corrupt and duplicate retired tombstones in queue health', async t => {
+  const stateDirectory = await temporaryState(t);
+  const store = new FileDeliveryStore({ stateDirectory });
+  const first = await store.claim('github:example:corrupt-retired', {
+    instance: 'example-ios', jobs: [{ mode: 'deploy' }],
+  });
+  await store.fail(first, new Error('failed'));
+  const firstInspection = (await store.inspectFailedReceipts()).failed[0];
+  await store.retireFailed({
+    receiptHash: first.receiptHash,
+    revision: firstInspection.revision,
+    reasonCode: 'obsolete',
+    reference: 'issue:59',
+    actor: 'test-operator',
+  });
+  await fs.writeFile(
+    store.receiptFileForHash(first.receiptHash, 'retired'),
+    '{not-json',
+    { mode: 0o600 },
+  );
+  assert.deepEqual(await store.queueStatus(), { pending: 0, failed: 1, corrupt: 1 });
+  assert.deepEqual((await store.inspectFailedReceipts()).corrupt, [first.receiptHash]);
+  assert.deepEqual(await store.quarantineCorrupt(), []);
+  await fs.access(store.receiptFileForHash(first.receiptHash, 'retired'));
+  assert.deepEqual(await store.queueStatus(), { pending: 0, failed: 1, corrupt: 1 });
+
+  const second = await store.claim('github:example:duplicate-retired', {
+    instance: 'example-ios', jobs: [{ mode: 'deploy' }],
+  });
+  await store.fail(second, new Error('failed'));
+  const secondInspection = (await store.inspectFailedReceipts()).failed
+    .find(receipt => receipt.hash === second.receiptHash);
+  await store.retireFailed({
+    receiptHash: second.receiptHash,
+    revision: secondInspection.revision,
+    reasonCode: 'obsolete',
+    reference: 'issue:59',
+    actor: 'test-operator',
+  });
+  const tombstone = await fs.readFile(
+    store.receiptFileForHash(second.receiptHash, 'retired'),
+    'utf8',
+  );
+  await fs.writeFile(
+    store.receiptFileForHash(second.receiptHash, 'failed'),
+    tombstone,
+    { mode: 0o600 },
+  );
+  assert.deepEqual(await store.queueStatus(), { pending: 0, failed: 2, corrupt: 2 });
+});
+
+test('memory retirement uses the same revision, audit, and indefinite dedupe contract', async () => {
+  let now = 10_000;
+  const store = new MemoryDeliveryStore({ retentionMs: 10, now: () => now });
+  const key = 'github:example:memory-retired';
+  const intent = { instance: 'example-ios', jobs: [{ mode: 'deploy' }] };
+  const failed = await store.claim(key, intent);
+  await store.fail(failed, new Error('ambiguous'));
+  const inspection = (await store.inspectFailedReceipts()).failed[0];
+  now = 11_000;
+  assert.equal(await store.retireFailed({
+    receiptHash: inspection.hash,
+    revision: inspection.revision,
+    reasonCode: 'side-effect-confirmed',
+    reference: 'run:123',
+    actor: 'test-operator',
+  }), true);
+  assert.deepEqual(await store.queueStatus(), { pending: 0, failed: 0, corrupt: 0 });
+  assert.equal(await store.release(failed), false);
+  now = 1_000_000;
+  assert.equal(await store.claim(key, intent), null);
 });
 
 test('recovery scans pending work without locking the failed backlog', async t => {
