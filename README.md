@@ -426,11 +426,11 @@ cd /srv/merge4appstore.state/current
 MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state npm run retry:deliveries
 ```
 
-The inspection lists each failed receipt hash, repository instance, unfinished
-job, cursor, attempt count, last error, and update time. Review that output
-before retrying: a job can complete its external side effect before its receipt
-cursor is durably advanced, so replaying it can repeat that side effect. Requeue
-only the reviewed receipts whenever possible:
+The inspection lists each failed receipt hash and opaque revision, repository
+instance, unfinished job, cursor, attempt count, last error, and update time.
+Review that output before retrying: a job can complete its external side effect
+before its receipt cursor is durably advanced, so replaying it can repeat that
+side effect. Requeue only the reviewed receipts whenever possible:
 
 ```bash
 MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state \
@@ -448,6 +448,36 @@ MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state \
 
 Requeueing resumes at the first unfinished job, resets its attempt counter, and
 preserves the previous failure details in the receipt's recovery history.
+
+If external evidence shows that a failed receipt's unfinished job already took
+effect, or that the job is intentionally obsolete, retire that one explicitly
+reviewed receipt instead of replaying it. Copy both its hash and opaque revision
+from a fresh inspection. Retirement does not execute any jobs: it preserves the
+intent, cursor, attempt count, last error, and recovery history in a dedicated
+terminal tombstone with the operator's reason code, evidence reference, and
+identity derived from `SUDO_USER`, then `USER`, then the numeric process UID.
+
+```bash
+MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state \
+  npm run retry:deliveries -- \
+  --retire RECEIPT_HASH \
+  --revision INSPECTED_REVISION \
+  --reason-code side-effect-confirmed \
+  --reference "https://github.com/OWNER/REPOSITORY/actions/runs/RUN_ID"
+```
+
+Only one receipt can be retired per command. Reason codes are limited to 64
+machine-readable characters, references to 500 characters, and the derived
+operator identity to 128 characters. The operation is refused if the hash is
+unavailable or corrupt, if its revision changed since inspection, or if any
+required audit field is absent or over its bound. Treat it as an audited
+acknowledgement, not a repair: the tombstone suppresses duplicate provider
+deliveries indefinitely. A valid retired receipt does not degrade queue health,
+while corruption or duplicate state involving a tombstone does.
+Retired tombstones are never removed by `--quarantine-corrupt`; repair and
+preserve a damaged tombstone rather than reopening its delivery to replay.
+The retired-directory marker continues to deduplicate provider redelivery while
+queue health reports the damaged audit payload.
 
 For proxy failures, inspect the private sanitized upstream log and the rotation
 contract. The JSON records contain only a request ID, method, response status,

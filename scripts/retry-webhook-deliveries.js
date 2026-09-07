@@ -1,6 +1,14 @@
 #!/usr/bin/env node
 
 import { createDeliveryStore } from '../lib/delivery-store.js';
+import {
+  MAX_RETIREMENT_ACTOR_LENGTH,
+  MAX_RETIREMENT_REASON_CODE_LENGTH,
+  MAX_RETIREMENT_REFERENCE_LENGTH,
+  normalizeRetirementActor,
+  normalizeRetirementReasonCode,
+  normalizeRetirementReference,
+} from '../lib/delivery-retirement.js';
 
 const HASH = /^[0-9a-f]{64}$/;
 
@@ -9,10 +17,26 @@ function usage() {
   npm run retry:deliveries
   npm run retry:deliveries -- --receipt <sha256> [--receipt <sha256> ...]
   npm run retry:deliveries -- --all --confirm-count <count>
+  npm run retry:deliveries -- --retire <sha256> --revision <sha256> \\
+    --reason-code <code> --reference <text>
   npm run retry:deliveries -- --quarantine-corrupt
 
 Without a mutation flag, the command only lists failed and corrupt receipts.
+Retirement reason codes and references are limited to
+${MAX_RETIREMENT_REASON_CODE_LENGTH} and ${MAX_RETIREMENT_REFERENCE_LENGTH} characters respectively.
+The derived operator identity is limited to ${MAX_RETIREMENT_ACTOR_LENGTH} characters.
 `;
+}
+
+function retirementActor(environment = process.env) {
+  if (environment.SUDO_USER !== undefined && environment.SUDO_USER !== '') {
+    return normalizeRetirementActor(environment.SUDO_USER);
+  }
+  if (environment.USER !== undefined && environment.USER !== '') {
+    return normalizeRetirementActor(environment.USER);
+  }
+  const uid = typeof process.getuid === 'function' ? process.getuid() : 'unavailable';
+  return normalizeRetirementActor(`uid:${uid}`);
 }
 
 function optionValue(args, index, name) {
@@ -33,6 +57,10 @@ function parseArguments(args) {
     all: false,
     quarantineCorrupt: false,
     receiptHashes: [],
+    retireHash: null,
+    revision: null,
+    reasonCode: null,
+    reference: null,
     expectedCount: null,
   };
 
@@ -56,6 +84,33 @@ function parseArguments(args) {
         throw new Error('--receipt must be a 64-character hexadecimal hash');
       }
       options.receiptHashes.push(hash);
+    } else if (argument === '--retire' || argument.startsWith('--retire=')) {
+      if (options.retireHash !== null) throw new Error('--retire may only be specified once');
+      const { value, consumed } = optionValue(args, index, '--retire');
+      index += consumed;
+      const hash = value.toLowerCase();
+      if (!HASH.test(hash)) {
+        throw new Error('--retire must be a 64-character hexadecimal hash');
+      }
+      options.retireHash = hash;
+    } else if (argument === '--revision' || argument.startsWith('--revision=')) {
+      if (options.revision !== null) throw new Error('--revision may only be specified once');
+      const { value, consumed } = optionValue(args, index, '--revision');
+      index += consumed;
+      options.revision = value.toLowerCase();
+      if (!HASH.test(options.revision)) {
+        throw new Error('--revision must be a 64-character hexadecimal hash');
+      }
+    } else if (argument === '--reason-code' || argument.startsWith('--reason-code=')) {
+      if (options.reasonCode !== null) throw new Error('--reason-code may only be specified once');
+      const { value, consumed } = optionValue(args, index, '--reason-code');
+      index += consumed;
+      options.reasonCode = normalizeRetirementReasonCode(value);
+    } else if (argument === '--reference' || argument.startsWith('--reference=')) {
+      if (options.reference !== null) throw new Error('--reference may only be specified once');
+      const { value, consumed } = optionValue(args, index, '--reference');
+      index += consumed;
+      options.reference = normalizeRetirementReference(value);
     } else if (argument === '--confirm-count' || argument.startsWith('--confirm-count=')) {
       if (options.expectedCount !== null) {
         throw new Error('--confirm-count may only be specified once');
@@ -79,6 +134,29 @@ function parseArguments(args) {
   }
   if (options.all && options.receiptHashes.length > 0) {
     throw new Error('--all cannot be combined with --receipt');
+  }
+  const hasRetirementMetadata = options.revision !== null
+    || options.reasonCode !== null
+    || options.reference !== null;
+  if (options.retireHash !== null && (
+    options.all
+    || options.receiptHashes.length > 0
+    || options.quarantineCorrupt
+    || options.expectedCount !== null
+  )) {
+    throw new Error('--retire must be run separately from requeue and quarantine options');
+  }
+  if (options.retireHash !== null && options.revision === null) {
+    throw new Error('--retire requires --revision from the immediately preceding inspection');
+  }
+  if (options.retireHash !== null && options.reasonCode === null) {
+    throw new Error('--retire requires --reason-code');
+  }
+  if (options.retireHash !== null && options.reference === null) {
+    throw new Error('--retire requires --reference');
+  }
+  if (options.retireHash === null && hasRetirementMetadata) {
+    throw new Error('--revision, --reason-code, and --reference are only valid with --retire');
   }
   if (options.quarantineCorrupt && (
     options.all
@@ -121,12 +199,28 @@ async function main() {
 
   const inspection = await store.inspectFailedReceipts();
   const selectingReceipts = options.receiptHashes.length > 0;
-  if (!options.all && !selectingReceipts) {
+  const retiringReceipts = options.retireHash !== null;
+  if (!options.all && !selectingReceipts && !retiringReceipts) {
     console.log(JSON.stringify({ action: 'inspect', queue: before, ...inspection }));
     if (inspection.corrupt.length > 0) {
       console.error('Corrupt receipts block recovery. Preserve and inspect them, then quarantine explicitly.');
       process.exitCode = 2;
     }
+    return;
+  }
+
+  if (retiringReceipts) {
+    const retired = await store.retireFailed({
+      receiptHash: options.retireHash,
+      revision: options.revision,
+      reasonCode: options.reasonCode,
+      reference: options.reference,
+      actor: retirementActor(),
+    });
+    const after = await store.queueStatus();
+    console.log(JSON.stringify({
+      action: 'retire', selected: options.retireHash, retired, before, after,
+    }));
     return;
   }
 
