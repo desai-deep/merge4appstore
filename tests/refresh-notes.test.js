@@ -336,6 +336,17 @@ test('ignores a delayed title edit after the commit maps to another pull request
   );
 });
 
+test('retries when GitHub has not exposed the merge commit association yet', async () => {
+  const { asc, github } = appStoreReleaseNoteFixture();
+  github.findPRFromCommit = () => null;
+  asc.getBuildsForWorkflowCommit = async () => assert.fail('an unresolved PR must stop before App Store lookup');
+
+  await assert.rejects(
+    refreshAppStoreReleaseNotes(asc, github, refreshReleaseOptions()),
+    error => error.statusCode === 503 && /associated production commit/.test(error.message),
+  );
+});
+
 test('preserves repository-managed App Store release notes', async () => {
   const { asc, github } = appStoreReleaseNoteFixture();
   const productionHead = 'b'.repeat(40);

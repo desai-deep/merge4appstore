@@ -258,15 +258,15 @@ test('refreshes App Store release notes when a merged automated release pull req
       title: { from: 'Old title' },
     },
   }, 'release-body-title-edit'), [{
+    mode: 'release-notes',
+    commitSha: 'production123',
+    pullRequest: '65',
+    deliveryId: 'release-body-title-edit',
+  }, {
     mode: 'notes',
     purpose: 'beta',
     commitSha: 'release123',
     branch: 'develop',
-    pullRequest: '65',
-    deliveryId: 'release-body-title-edit',
-  }, {
-    mode: 'release-notes',
-    commitSha: 'production123',
     pullRequest: '65',
     deliveryId: 'release-body-title-edit',
   }]);
