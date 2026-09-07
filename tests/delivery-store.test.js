@@ -240,7 +240,21 @@ test('inspects and selectively requeues reviewed dead letters with recovery hist
     instance: 'example-ios',
     jobs: [
       { mode: 'notes', purpose: 'beta' },
-      { mode: 'deploy', purpose: 'production' },
+      {
+        mode: 'deploy',
+        purpose: 'production',
+        deliveryId: 'delivery-123',
+        commitSha: 'abcdef1234567890',
+        branch: 'main',
+        pullRequest: '65',
+        workflowId: 'workflow-production',
+        runId: 'build-run-42',
+        buildNumber: 42,
+        buildStatus: 'FAILED',
+        completedAt: '2026-09-07T08:00:00Z',
+        reconcileMetadata: true,
+        untrustedDetail: 'must not be exposed',
+      },
     ],
   };
   const first = await store.claim('github:example:selective-first', intent);
@@ -258,7 +272,20 @@ test('inspects and selectively requeues reviewed dead letters with recovery hist
       hash: first.receiptHash,
       instance: 'example-ios',
       cursor: 1,
-      next_job: { mode: 'deploy', purpose: 'production' },
+      next_job: {
+        mode: 'deploy',
+        purpose: 'production',
+        delivery_id: 'delivery-123',
+        commit_sha: 'abcdef1234567890',
+        branch: 'main',
+        pull_request: '65',
+        workflow_id: 'workflow-production',
+        run_id: 'build-run-42',
+        build_number: '42',
+        build_status: 'FAILED',
+        completed_at: '2026-09-07T08:00:00Z',
+        reconcile_metadata: true,
+      },
       attempts: 1,
       last_error: 'first delivery exhausted',
       updated_at: new Date(10_000).toISOString(),
@@ -296,6 +323,14 @@ test('inspects and selectively requeues reviewed dead letters with recovery hist
     (await store.inspectFailedReceipts()).failed.map(receipt => receipt.hash),
     [second.receiptHash],
   );
+  const [recovered] = await store.claimPending();
+  assert.deepEqual(recovered.recoveryHistory, requeuedReceipt.recoveryHistory);
+  await store.fail(recovered, new Error('failed after manual recovery'));
+  const recoveredReceipt = JSON.parse(await fs.readFile(
+    store.receiptFileForHash(first.receiptHash, 'failed'),
+    'utf8',
+  ));
+  assert.deepEqual(recoveredReceipt.recoveryHistory, requeuedReceipt.recoveryHistory);
 });
 
 test('preflights duplicate active state before requeueing any dead letter', async t => {
