@@ -351,6 +351,29 @@ test('memory delivery recovery supports the same selective receipt contract', as
   );
 });
 
+test('memory delivery recovery rejects a receipt released across its inspection boundary', async () => {
+  const store = new MemoryDeliveryStore({ now: () => 10_000 });
+  const claim = await store.claim('github:example:memory-race', {
+    instance: 'example-ios', jobs: [{ mode: 'deploy' }],
+  });
+  await store.fail(claim, new Error('failed before concurrent release'));
+  const hash = crypto.createHash('sha256')
+    .update('github:example:memory-race')
+    .digest('hex');
+  const inspectFailedReceipts = store.inspectFailedReceipts.bind(store);
+  store.inspectFailedReceipts = async () => {
+    const inspection = await inspectFailedReceipts();
+    await store.release(claim);
+    return inspection;
+  };
+
+  await assert.rejects(
+    store.requeueFailed({ receiptHashes: [hash] }),
+    error => error.code === 'ENOTFAILED',
+  );
+  assert.deepEqual(await store.queueStatus(), { pending: 0, failed: 0, corrupt: 0 });
+});
+
 test('recovery scans pending work without locking the failed backlog', async t => {
   const stateDirectory = await temporaryState(t);
   const store = new FileDeliveryStore({ stateDirectory });
