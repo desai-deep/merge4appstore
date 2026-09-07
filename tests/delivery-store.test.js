@@ -8,7 +8,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-import { FileDeliveryStore } from '../lib/delivery-store.js';
+import { FileDeliveryStore, MemoryDeliveryStore } from '../lib/delivery-store.js';
 
 const execFileAsync = promisify(execFile);
 const worker = fileURLToPath(new URL('./fixtures/delivery-worker.js', import.meta.url));
@@ -230,6 +230,183 @@ test('surfaces corrupt receipts and can explicitly requeue dead letters', async 
   assert.match(quarantined[0], /[/\\]corrupt[/\\]pending-/);
   assert.equal(await fs.readFile(quarantined[0], 'utf8'), '{not-json');
   assert.deepEqual(await store.queueStatus(), { pending: 1, failed: 0, corrupt: 0 });
+});
+
+test('inspects and selectively requeues reviewed dead letters with recovery history', async t => {
+  const stateDirectory = await temporaryState(t);
+  let now = 10_000;
+  const store = new FileDeliveryStore({ stateDirectory, now: () => now });
+  const intent = {
+    instance: 'example-ios',
+    jobs: [
+      { mode: 'notes', purpose: 'beta' },
+      {
+        mode: 'deploy',
+        purpose: 'production',
+        deliveryId: 'delivery-123',
+        commitSha: 'abcdef1234567890',
+        branch: 'main',
+        pullRequest: '65',
+        workflowId: 'workflow-production',
+        runId: 'build-run-42',
+        buildNumber: 42,
+        buildStatus: 'FAILED',
+        completedAt: '2026-09-07T08:00:00Z',
+        reconcileMetadata: true,
+        untrustedDetail: 'must not be exposed',
+      },
+    ],
+  };
+  const first = await store.claim('github:example:selective-first', intent);
+  await store.advance(first, 1);
+  await store.fail(first, new Error('first delivery exhausted'));
+  const second = await store.claim('github:example:selective-second', intent);
+  await store.fail(second, new Error('second delivery exhausted'));
+
+  const inspection = await store.inspectFailedReceipts();
+  assert.deepEqual(inspection.corrupt, []);
+  assert.equal(inspection.failed.length, 2);
+  assert.deepEqual(
+    inspection.failed.find(receipt => receipt.hash === first.receiptHash),
+    {
+      hash: first.receiptHash,
+      instance: 'example-ios',
+      cursor: 1,
+      next_job: {
+        mode: 'deploy',
+        purpose: 'production',
+        delivery_id: 'delivery-123',
+        commit_sha: 'abcdef1234567890',
+        branch: 'main',
+        pull_request: '65',
+        workflow_id: 'workflow-production',
+        run_id: 'build-run-42',
+        build_number: '42',
+        build_status: 'FAILED',
+        completed_at: '2026-09-07T08:00:00Z',
+        reconcile_metadata: true,
+      },
+      attempts: 1,
+      last_error: 'first delivery exhausted',
+      updated_at: new Date(10_000).toISOString(),
+    },
+  );
+  assert.equal('intent' in inspection.failed[0], false);
+
+  await assert.rejects(
+    store.requeueFailed({ expectedCount: 3 }),
+    error => error.code === 'ECOUNTMISMATCH',
+  );
+  await assert.rejects(
+    store.requeueFailed({ receiptHashes: [first.receiptHash, first.receiptHash] }),
+    /must be unique/,
+  );
+  assert.deepEqual(await store.queueStatus(), { pending: 0, failed: 2, corrupt: 0 });
+
+  now = 20_000;
+  assert.equal(await store.requeueFailed({ receiptHashes: [first.receiptHash] }), 1);
+  assert.deepEqual(await store.queueStatus(), { pending: 1, failed: 1, corrupt: 0 });
+  const requeuedReceipt = JSON.parse(await fs.readFile(
+    store.receiptFileForHash(first.receiptHash, 'pending'),
+    'utf8',
+  ));
+  assert.equal(requeuedReceipt.cursor, 1);
+  assert.equal(requeuedReceipt.attempts, 0);
+  assert.equal(requeuedReceipt.lastError, 'Manually requeued');
+  assert.deepEqual(requeuedReceipt.recoveryHistory, [{
+    failedAt: 10_000,
+    attempts: 1,
+    lastError: 'first delivery exhausted',
+    requeuedAt: 20_000,
+  }]);
+  assert.deepEqual(
+    (await store.inspectFailedReceipts()).failed.map(receipt => receipt.hash),
+    [second.receiptHash],
+  );
+  const [recovered] = await store.claimPending();
+  assert.deepEqual(recovered.recoveryHistory, requeuedReceipt.recoveryHistory);
+  await store.fail(recovered, new Error('failed after manual recovery'));
+  const recoveredReceipt = JSON.parse(await fs.readFile(
+    store.receiptFileForHash(first.receiptHash, 'failed'),
+    'utf8',
+  ));
+  assert.deepEqual(recoveredReceipt.recoveryHistory, requeuedReceipt.recoveryHistory);
+});
+
+test('preflights duplicate active state before requeueing any dead letter', async t => {
+  const stateDirectory = await temporaryState(t);
+  const store = new FileDeliveryStore({ stateDirectory });
+  const intent = { instance: 'example-ios', jobs: [{ mode: 'deploy' }] };
+  const first = await store.claim('github:example:preflight-first', intent);
+  await store.fail(first, new Error('first failed'));
+  const duplicate = await store.claim('github:example:preflight-duplicate', intent);
+  await store.fail(duplicate, new Error('duplicate failed'));
+  const failedReceipt = JSON.parse(await fs.readFile(
+    store.receiptFileForHash(duplicate.receiptHash, 'failed'),
+    'utf8',
+  ));
+  await fs.writeFile(
+    store.receiptFileForHash(duplicate.receiptHash, 'complete'),
+    `${JSON.stringify({ ...failedReceipt, state: 'complete' })}\n`,
+    { mode: 0o600 },
+  );
+
+  const inspection = await store.inspectFailedReceipts();
+  assert.deepEqual(inspection.corrupt, [duplicate.receiptHash]);
+  await assert.rejects(
+    store.requeueFailed({ expectedCount: 1 }),
+    error => error.code === 'ECORRUPTRECEIPT',
+  );
+  await fs.access(store.receiptFileForHash(first.receiptHash, 'failed'));
+  await fs.access(store.receiptFileForHash(duplicate.receiptHash, 'failed'));
+  await assert.rejects(
+    fs.access(store.receiptFileForHash(first.receiptHash, 'pending')),
+    error => error.code === 'ENOENT',
+  );
+});
+
+test('memory delivery recovery supports the same selective receipt contract', async () => {
+  const store = new MemoryDeliveryStore({ now: () => 10_000 });
+  const intent = { instance: 'example-ios', jobs: [{ mode: 'deploy' }] };
+  const first = await store.claim('github:example:memory-first', intent);
+  await store.fail(first, new Error('first failed'));
+  const second = await store.claim('github:example:memory-second', intent);
+  await store.fail(second, new Error('second failed'));
+  const inspection = await store.inspectFailedReceipts();
+  const firstHash = crypto.createHash('sha256')
+    .update('github:example:memory-first')
+    .digest('hex');
+
+  assert.equal(inspection.failed.length, 2);
+  assert.equal(await store.requeueFailed({ receiptHashes: [firstHash] }), 1);
+  assert.deepEqual(await store.queueStatus(), { pending: 1, failed: 1, corrupt: 0 });
+  assert.deepEqual(
+    (await store.inspectFailedReceipts()).failed.map(receipt => receipt.last_error),
+    ['second failed'],
+  );
+});
+
+test('memory delivery recovery rejects a receipt released across its inspection boundary', async () => {
+  const store = new MemoryDeliveryStore({ now: () => 10_000 });
+  const claim = await store.claim('github:example:memory-race', {
+    instance: 'example-ios', jobs: [{ mode: 'deploy' }],
+  });
+  await store.fail(claim, new Error('failed before concurrent release'));
+  const hash = crypto.createHash('sha256')
+    .update('github:example:memory-race')
+    .digest('hex');
+  const inspectFailedReceipts = store.inspectFailedReceipts.bind(store);
+  store.inspectFailedReceipts = async () => {
+    const inspection = await inspectFailedReceipts();
+    await store.release(claim);
+    return inspection;
+  };
+
+  await assert.rejects(
+    store.requeueFailed({ receiptHashes: [hash] }),
+    error => error.code === 'ENOTFAILED',
+  );
+  assert.deepEqual(await store.queueStatus(), { pending: 0, failed: 0, corrupt: 0 });
 });
 
 test('recovery scans pending work without locking the failed backlog', async t => {
