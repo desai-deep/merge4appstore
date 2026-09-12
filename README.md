@@ -813,9 +813,10 @@ and observed but do not dispatch work; the classic per-repository hooks remain
 active. Move to `managed`/`false` only after shadow delivery has been verified.
 The deployer rejects a first-time move directly to managed mode. During the
 shadow-to-managed handoff it keeps execution behind the durable gate and lets
-both classic and App copies claim the same provider-neutral event receipt.
-Whichever signed copy arrives first owns the work; its paired copy is a durable
-duplicate. The idempotent hook reconciler disables each classic hook before the
+classic copies and App copies received by managed workers claim the same
+provider-neutral event receipt. Whichever executable copy arrives first owns
+the work; its paired copy is a durable duplicate. Shadow workers only record
+App observations, even while the gate is present. The idempotent hook reconciler disables each classic hook before the
 gate is released, so mixed PM2 generations and hook delivery ordering cannot
 lose or double-dispatch the event. A post-commit reconciliation failure leaves
 the healthy runtime, queued receipts, gate, and journal in place; correct the

@@ -1909,3 +1909,14 @@ test('does not retain an ancestry result larger than the weighted cache budget',
   assert.equal(mirror.rangeCache.size, 0);
   assert.equal(mirror.rangeCacheBytes, 0);
 });
+
+test('repository rename gives an ID-keyed registry mirror the current default origin', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge4appstore-mirror-rename-'));
+  t.after(async () => { clearGitMirrorRegistry(); await fs.rm(root, { recursive: true, force: true }); });
+  const options = { stateDirectory: root, repositoryId: 11 };
+  const original = getGitMirror('example', 'old-name', options);
+  const renamed = getGitMirror('example', 'new-name', options);
+  assert.notEqual(original, renamed);
+  assert.equal(renamed.remoteUrl, 'https://github.com/example/new-name.git');
+  assert.equal(getGitMirror('example', 'new-name', options), renamed);
+});

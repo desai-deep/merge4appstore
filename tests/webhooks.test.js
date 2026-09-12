@@ -1419,7 +1419,7 @@ test('deduplicates both mixed-generation GitHub cutover handler orderings', asyn
     'classic-on-managed',
     first,
   );
-  assert.deepEqual([appOnShadow.status, classicOnManaged.status], [202, 200]);
+  assert.deepEqual([appOnShadow.status, classicOnManaged.status], [202, 202]);
 
   const second = payload('c'.repeat(40));
   const classicOnShadow = await signedClassicGitHubRequest(
@@ -2414,4 +2414,33 @@ build:
   const profiles = loadProfiles(directory);
   assert.equal(Object.getPrototypeOf(profiles), null);
   assert.equal(profiles.__proto__.profile.instance, '__proto__');
+});
+
+test('shadow App delivery remains observational after an ordinary deployment gate clears', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'merge4appstore-shadow-gate-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const pauseFile = path.join(directory, 'delivery.pause');
+  fs.writeFileSync(pauseFile, 'deployment');
+  const store = new MemoryDeliveryStore();
+  let dispatches = 0;
+  const server = createTestWebhookServer({
+    profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
+    deliveryStore: store, authenticator: matchingAuthenticator,
+    githubAppMode: 'shadow', classicGitHubWebhooksEnabled: true,
+    githubAppSecret: 'shadow-secret', deliveryPauseFile: pauseFile,
+    recoveryIntervalMs: 1,
+    dispatch: async () => { dispatches += 1; return 0; },
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const response = await signedGitHubAppRequest(server, 'shadow-secret', 'push', 'shadow-gated', {
+    installation: { id: 456 }, repository: { id: 11, full_name: 'example/ios' },
+    ref: 'refs/heads/develop', before: 'a'.repeat(40), after: 'b'.repeat(40),
+  });
+  assert.equal(response.status, 202);
+  fs.unlinkSync(pauseFile);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  await server.waitForBackground();
+  assert.equal(dispatches, 0);
+  assert.deepEqual(await store.queueStatus(), { pending: 0, failed: 0, corrupt: 0 });
 });

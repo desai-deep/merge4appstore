@@ -1077,7 +1077,10 @@ export function createWebhookServer({
           });
         }
         for (const target of planned) {
-          const jobs = configuredAppMode === 'managed' || deliveryPaused ? target.jobs : [];
+          // A deployment pause must not promote shadow observations to work.
+          // Classic hooks remain active until only managed workers serve, so
+          // their copy durably owns events during the mixed-generation drain.
+          const jobs = configuredAppMode === 'managed' ? target.jobs : [];
           // Installation lifecycle state is owned once per installation, not
           // once per repository. Empty shadow receipts remain useful for
           // observing and deduplicating ordinary App deliveries.

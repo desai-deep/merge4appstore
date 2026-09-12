@@ -493,3 +493,34 @@ test('strict environment providers preserve PAT fallback and reject missing cred
     repositoryId: 0,
   }), /positive integer/);
 });
+
+test('shares token recovery with callers arriving after installation rediscovery', async () => {
+  let discoveries = 0;
+  let replacementMints = 0;
+  let releaseMint;
+  let signalMint;
+  const started = new Promise(resolve => { signalMint = resolve; });
+  const gate = new Promise(resolve => { releaseMint = resolve; });
+  const auth = new GitHubAppAuthenticator({
+    appId: '123', privateKey: privateKeyPem,
+    now: () => Date.parse('2026-08-30T00:00:00Z'),
+    fetchImpl: async url => {
+      if (url.endsWith('/repositories/11/installation')) {
+        return jsonResponse({ id: ++discoveries === 1 ? 111 : 222 });
+      }
+      if (url.includes('/111/access_tokens')) return jsonResponse({ message: 'Not Found' }, 404);
+      replacementMints += 1;
+      signalMint();
+      await gate;
+      return jsonResponse({ token: 'recovered', expires_at: '2026-08-30T01:00:00Z' });
+    },
+  });
+  const first = auth.installationToken('example', 'ios', { repositoryId: 11 });
+  await started;
+  const second = auth.installationToken('example', 'ios', { repositoryId: 11 });
+  await new Promise(resolve => setImmediate(resolve));
+  releaseMint();
+  const results = await Promise.all([first, second]);
+  assert.equal(replacementMints, 1);
+  assert.equal(results[0], results[1]);
+});
