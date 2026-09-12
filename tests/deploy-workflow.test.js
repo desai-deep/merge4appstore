@@ -383,7 +383,7 @@ test('inspection verifies both private blobless mirrors without lazy fetching', 
   assert.match(inspectRun, /gzip -cd -- "\$instance_archive"/);
 });
 
-test('mirror inspection accepts migration states and rejects duplicate or partial identities', () => {
+test('mirror inspection accepts independent migration states and rejects duplicate or missing identities', () => {
   const validation = extractMirrorIdentityValidation();
   const runValidation = ({ jams, runningorder, legacyJams, legacyRunningorder }) => runBash([
     'set -Eeuo pipefail',
@@ -428,8 +428,12 @@ test('mirror inspection accepts migration states and rejects duplicate or partia
     legacyJams: 0,
     legacyRunningorder: 1,
   });
-  assert.notEqual(partialMigration.status, 0);
-  assert.match(partialMigration.stdout, /Expected exactly one ready mirror for each configured repository/);
+  assert.equal(partialMigration.status, 0, partialMigration.stderr || partialMigration.stdout);
+  const missingRepository = runValidation({
+    jams: 1, runningorder: 0, legacyJams: 1, legacyRunningorder: 0,
+  });
+  assert.notEqual(missingRepository.status, 0);
+  assert.match(missingRepository.stdout, /Expected exactly one ready mirror for each configured repository/);
 });
 
 test('inspection fails closed for corrupt current release pointers and markers', t => {

@@ -311,11 +311,13 @@ jobs:
               [ "$jams_mirrors" -le 1 ] && [ "$runningorder_mirrors" -le 1 ] \
                 && [ "$legacy_jams_mirrors" -le 1 ] && [ "$legacy_runningorder_mirrors" -le 1 ] \
                 || { echo "Duplicate Git mirrors are present"; exit 1; }
-              if [ "$jams_mirrors" -eq 1 ] && [ "$runningorder_mirrors" -eq 1 ]; then
-                : # ID-keyed mirrors are ready; one legacy mirror per repository may remain during migration.
-              elif [ "$jams_mirrors" -eq 0 ] && [ "$runningorder_mirrors" -eq 0 ] \
-                && [ "$legacy_jams_mirrors" -eq 1 ] && [ "$legacy_runningorder_mirrors" -eq 1 ]; then
-                echo "git_mirrors=legacy-identities-ready"
+              # Mirrors migrate on demand now that deployment no longer prewarms them.
+              # Each repository may independently have its legacy or ID-keyed mirror.
+              if [ "$((jams_mirrors + legacy_jams_mirrors))" -ge 1 ] \
+                && [ "$((runningorder_mirrors + legacy_runningorder_mirrors))" -ge 1 ]; then
+                if [ "$jams_mirrors" -eq 0 ] || [ "$runningorder_mirrors" -eq 0 ]; then
+                  echo "git_mirrors=legacy-identities-ready"
+                fi
               else
                 echo "Expected exactly one ready mirror for each configured repository"
                 exit 1
