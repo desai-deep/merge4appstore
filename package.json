@@ -23,7 +23,8 @@
     "test": "node --test tests/*.test.js",
     "validate:profiles": "node scripts/validate-profiles.js",
     "verify:github-app": "node scripts/verify-github-app.js",
-    "demo:github-app": "node scripts/demo-github-app.js"
+    "demo:github-app": "node scripts/demo-github-app.js",
+    "bootstrap:deployment": "node scripts/bootstrap-deployment.js"
   },
   "keywords": [
     "ios",
