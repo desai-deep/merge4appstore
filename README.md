@@ -654,6 +654,8 @@ workflow for its head commit, using the contents of its `Release Notes` section.
 
 ## Automatic VPS Deploy
 
+For a dedicated domain or replacement host, start with the [deployment bootstrap guide](docs/deployment-bootstrap.md). Generate a configuration bundle with `npm run bootstrap:deployment`; it does not change live infrastructure. The proposed [secret storage plan](docs/secret-storage.md) covers our own credentials and eventual customer isolation.
+
 This repo can deploy itself to the VPS on every push to `main` using `.github/workflows/deploy.yml`.
 
 Required GitHub Actions secrets:
