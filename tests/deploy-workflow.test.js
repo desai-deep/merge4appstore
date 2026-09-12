@@ -1460,8 +1460,7 @@ test('loads secrets from private files without persisting their values in PM2', 
   assert.doesNotMatch(workflow, /write-webhook-env|STAGED_WEBHOOK_ENV/);
   assert.match(deployScript, /readEnvironmentFile/);
   assert.match(deployScript, /module\.validateWebhookEnvironment\(parsed\)/);
-  assert.match(deployScript, /export MERGE4APPSTORE_WEBHOOK_ENV="\$candidate_secret"[\s\S]*npm run prepare:mirrors/);
-  assert.match(deployScript, /MERGE4APPSTORE_WEBHOOK_ENV="\$candidate_secret"[\s\S]*DRY_RUN=true/);
+  assert.match(deployScript, /export MERGE4APPSTORE_WEBHOOK_ENV="\$candidate_secret"[\s\S]*start_release "\$CANDIDATE_RELEASE" "\$candidate_secret"/);
   assert.match(deployScript, /MERGE4APPSTORE_WEBHOOK_ENV="\$secret"[\s\S]*node index\.js deploy/);
   assert.doesNotMatch(workflow, /secrets\.GITHUB_APP_|secrets\.GH_WEBHOOK_SECRET/);
   assert.match(deployScript, /access_log .*NGINX_ACCESS_LOG.*merge4appstore_upstream_v1/);

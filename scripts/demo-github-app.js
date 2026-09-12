@@ -4,7 +4,6 @@ import crypto from 'node:crypto';
 import { once } from 'node:events';
 import { createWebhookServer } from '../webhook-server.js';
 import { MemoryDeliveryStore } from '../lib/delivery-store.js';
-import { MemoryPrepareCache } from '../lib/prepare-cache.js';
 
 // Synthetic events exercise the real HTTP receiver without GitHub credentials.
 const secret = crypto.randomBytes(32).toString('hex');
@@ -24,13 +23,12 @@ let dispatches = 0;
 const server = createWebhookServer({
   profiles: { 'demo-ios': { profile, profilePath: null } },
   deliveryStore: new MemoryDeliveryStore(),
-  prepareCache: new MemoryPrepareCache(),
   authenticator: null,
   githubAppMode: 'shadow',
   githubAppSecret: secret,
   classicGitHubWebhooksEnabled: true,
   dispatch: async () => { dispatches += 1; return 0; },
-  prepare: async () => { throw new Error('Build preparation is disabled in the demo'); },
+  version: async () => { throw new Error('Version allocation is disabled in the demo'); },
 });
 
 try {

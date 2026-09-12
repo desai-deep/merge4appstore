@@ -824,9 +824,8 @@ GitHub/PAT failure and rerun the failed deployment to finish the cutover.
 `GH_TOKEN` remains required on the VPS during this migration. Application and
 mirror operations use refreshable repository-scoped App installation tokens
 when the App group is configured, but the deployment script still uses the PAT
-for its bounded branch-head preparation smoke and for listing, creating,
-enabling, or disabling classic repository hooks. Removing the PAT requires a
-separate migration of both paths; App-based hook reconciliation would require
+for listing, creating, enabling, or disabling classic repository hooks.
+Removing the PAT requires migrating that reconciler; App-based hook reconciliation would require
 GitHub's **Webhooks: write** repository permission.
 
 Pull requests run the test job in the deployment workflow and validate every

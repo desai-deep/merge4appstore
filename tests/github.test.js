@@ -515,6 +515,48 @@ test('resolves production recovery inputs through bounded GitHub HTTP requests',
   assert.equal(calls.every(call => call.options.headers.accept === 'application/vnd.github+json'), true);
 });
 
+test('refreshes repository-scoped tokens independently for HTTP recovery requests', async () => {
+  const requests = [];
+  const client = repository => {
+    let generation = 0;
+    return new GitHubAPI('example', repository, 'main', {
+      mirror: null,
+      environment: { GH_TOKEN: 'stale-token' },
+      environmentProvider: async () => ({ GH_TOKEN: `${repository}-${++generation}` }),
+      fetchImpl: async (url, options) => {
+        requests.push([url, options.headers.authorization]);
+        return new Response(JSON.stringify({ sha: 'a'.repeat(40) }));
+      },
+    });
+  };
+  const first = client('first');
+  const second = client('second');
+  await first.getProductionHeadAsync({ strict: true });
+  await second.getProductionHeadAsync({ strict: true });
+  await first.getProductionHeadAsync({ strict: true });
+  assert.deepEqual(requests, [
+    ['https://api.github.com/repos/example/first/commits/main', 'Bearer first-1'],
+    ['https://api.github.com/repos/example/second/commits/main', 'Bearer second-1'],
+    ['https://api.github.com/repos/example/first/commits/main', 'Bearer first-2'],
+  ]);
+});
+
+test('bounds App token acquisition by the HTTP request deadline', async () => {
+  let fetched = false;
+  const github = new GitHubAPI('example', 'ios', 'main', {
+    mirror: null,
+    environmentProvider: async ({ signal }) => new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }),
+    fetchImpl: async () => { fetched = true; return new Response('{}'); },
+  });
+  await assert.rejects(
+    github.requestJson('/repos/example/ios', { timeoutMs: 10 }),
+    error => error.name === 'TimeoutError' && error.statusCode === 503,
+  );
+  assert.equal(fetched, false);
+});
+
 test('aborts a stalled GitHub HTTP request at its deadline', async () => {
   const github = new GitHubAPI('example', 'ios', 'main', {
     mirror: null,
