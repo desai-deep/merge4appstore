@@ -149,6 +149,44 @@ test('serializes aliases of the same physical lock directory', {
   await releaseSecond();
 });
 
+test('does not expose service credentials to the process-lock helper', {
+  skip: process.platform === 'win32' ? 'Windows uses socket locks' : false,
+}, async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge4appstore-process-lock-env-'));
+  const environmentSnapshot = path.join(root, 'holder.env');
+  const secretNames = [
+    'APP_STORE_CONNECT_API_KEY_CONTENT',
+    'GH_TOKEN',
+    'GITHUB_APP_PRIVATE_KEY_BASE64',
+    'GITHUB_APP_WEBHOOK_SECRET',
+    'MERGE4APPSTORE_BUILD_TOKEN_EXAMPLE_IOS',
+  ];
+  const previousSecrets = new Map(secretNames.map(name => [name, process.env[name]]));
+  for (const name of secretNames) process.env[name] = `sentinel-${name}`;
+  t.after(async () => {
+    for (const name of secretNames) {
+      const previous = previousSecrets.get(name);
+      if (previous === undefined) delete process.env[name];
+      else process.env[name] = previous;
+    }
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  const release = await tryAcquireProcessLock(root, 'credential-isolation', {
+    fileLockHolderCommand: [
+      '/bin/sh',
+      '-c',
+      'env > "$1"; printf "acquired\\n"; while IFS= read -r line; do :; done',
+      'process-lock-holder',
+      environmentSnapshot,
+    ],
+  });
+  assert.equal(typeof release, 'function');
+  const holderEnvironment = await fs.readFile(environmentSnapshot, 'utf8');
+  for (const name of secretNames) assert.doesNotMatch(holderEnvironment, new RegExp(`^${name}=`, 'm'));
+  await release();
+});
+
 test('retries only process-lock helper startup timeouts before acquiring', {
   skip: process.platform === 'win32' ? 'Windows uses socket locks' : false,
 }, async t => {

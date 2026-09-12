@@ -320,6 +320,22 @@ test('accepts only the version-token CI configuration', () => {
   assert.throws(() => validateRepositoryProfile(profile), /ci\.version\.response_file is not supported/);
 });
 
+test('requires an immutable GitHub repository id to be a positive safe integer', () => {
+  const profile = profileFixture();
+  profile.repository.github_id = '789442740';
+  assert.throws(() => validateRepositoryProfile(profile), /repository.github_id/);
+  profile.repository.github_id = 789442740;
+  const validated = validateRepositoryProfile(profile);
+  assert.equal(validated.repository.github_id, 789442740);
+  const environment = {};
+  applyRepositoryProfile(validated, environment);
+  assert.equal(environment.GITHUB_REPOSITORY_ID, '789442740');
+  assert.throws(
+    () => applyRepositoryProfile(validated, { GITHUB_REPOSITORY_ID: '11' }),
+    /does not match profile repository.github_id/,
+  );
+});
+
 test('rejects webhook keys unsupported by their provider', () => {
   const profile = profileFixture();
   profile.webhooks = { github: { token_env: 'WRONG' } };

@@ -4,6 +4,7 @@ instance: runningorder-ios
 repository:
   owner: desai-deep
   name: runningorder-ios
+  github_id: 789442740
   production_branch: main
   beta_branch: develop
 
