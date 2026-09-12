@@ -67,3 +67,20 @@ test('fails closed for a writable or corrupt installation state file', async t =
     error => error.code === 'ECORRUPTINSTALLATIONSTATE',
   );
 });
+
+test('restart ignores incomplete atomic writes and preserves committed suspension', async t => {
+  const stateDirectory = temporaryState(t);
+  const state = new FileGitHubInstallationState({ stateDirectory });
+  await state.initialize();
+  await state.setSuspended(456, true);
+  const directory = path.join(stateDirectory, 'github-installations');
+  const temporary = path.join(directory, '.456.json-12345678-1234-1234-1234-123456789abc.tmp');
+  fs.writeFileSync(temporary, '{"status":', { mode: 0o600 });
+  const restarted = new FileGitHubInstallationState({ stateDirectory });
+  await restarted.initialize();
+  assert.equal(await restarted.isSuspended(456), true);
+  // A temporary write may still belong to another worker; do not delete it.
+  assert.equal(fs.existsSync(temporary), true);
+  fs.writeFileSync(path.join(directory, 'unexpected.tmp'), '{}', { mode: 0o600 });
+  await assert.rejects(() => restarted.initialize(), /Unsafe GitHub installation state entry/);
+});
