@@ -106,6 +106,12 @@ install -m 600 /dev/null /srv/merge4appstore/.webhook.env
 node scripts/write-webhook-env.js /srv/merge4appstore/.webhook.env
 ```
 
+For a local demo without credentials, run `npm run demo:github-app`. It sends
+synthetic signed events through the real loopback HTTP receiver in shadow mode,
+checks beta-build routing, duplicate detection, and invalid-signature rejection,
+then exits. It uses memory-only state and dispatches no build or release jobs.
+This demonstrates webhook handling; it does not verify live GitHub authentication.
+
 To validate App installation access without exposing a token, use the same
 explicit file paths:
 
