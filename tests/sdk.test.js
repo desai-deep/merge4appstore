@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ReleaseClient } from '../lib/sdk.js';
+import { ReleaseClient, AppStoreConnectAPI } from '../lib/sdk.js';
 function client({ repository = 'https://github.com/example/ios', workflow = 'workflow', ref = 'abc' } = {}) {
   const asc = {
     request: async endpoint => {
@@ -33,4 +33,15 @@ test('SDK refuses to start a different commit after the source changes', async (
   const c = client();
   c.provider.trigger = async () => { assert.fail('must not start'); };
   await assert.rejects(c.trigger({ ...selection, commitSha: 'old' }), { code: 'SOURCE_CHANGED' });
+});
+
+test('Apple workflow discovery follows all pages', async () => {
+  const api = new AppStoreConnectAPI('', '', '');
+  const paths = [];
+  api.request = async endpoint => {
+    paths.push(endpoint);
+    return endpoint.includes('cursor=next') ? { data: [{id:'second'}] } : { data: [{id:'first'}], links: {next:'https://api.appstoreconnect.apple.com/v1/ciProducts/product/workflows?cursor=next'} };
+  };
+  assert.deepEqual((await api.getWorkflows('product')).map(w=>w.id), ['first','second']);
+  assert.equal(paths.length, 2);
 });
