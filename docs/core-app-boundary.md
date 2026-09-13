@@ -63,3 +63,5 @@ on it. The PR stays unmerged until that deployment handoff is ready.
 The bootstrap work from PR #73 is included in this PR and need not be merged
 separately. Managed secret storage remains a future service concern. File-based
 credentials continue to work for self-hosters.
+
+The service app now includes its own public-health/queue monitor. Activate and verify it before merging this split. Apple starts builds from mutable Git references: if the source changes during the provider call, SDK status marks the result SOURCE_MISMATCH instead of reporting success for the validated selection.

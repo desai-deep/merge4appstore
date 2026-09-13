@@ -62,7 +62,7 @@ This bundle has not provisioned or deployed anything. Follow docs/deployment-boo
 5. Replace that site's HTTP configuration with nginx-tls.conf, then nginx -t and reload. There must be exactly one enabled TLS server block for ${domain}.
 6. Provision private runtime credentials on the host, outside the checkout history. See docs/secret-storage.md.
 7. Configure Actions deployment secrets and the public URL in actions-variables.json. Remove a stale MERGE4APPSTORE_HEALTH_URL override.
-8. Follow the migration checklist before dispatching deployment. The production workflow runs main and all tracked profiles; this environment label does not isolate UAT execution.
+8. Follow the migration checklist before dispatching deployment. Define the deployed core revision and profile selection in your own deployment workflow. The environment label does not isolate UAT execution.
 `);
   console.log(`Created deployment bootstrap bundle: ${directory}`);
 } catch (error) {

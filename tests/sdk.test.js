@@ -61,3 +61,12 @@ test('provider classifies failures before starting separately from uncertain POS
   c.asc.startWorkflowBuild=async()=>{throw new Error('Network timeout');};
   await assert.rejects(c.provider.trigger(selection),error=>error.beforeBuildStart===false);
 });
+
+test('status flags a build of a different source instead of reporting selected-source success', async () => {
+  const c=client(); const request=c.asc.request;
+  c.asc.request=async endpoint=>{const r=await request(endpoint);if(endpoint.includes('?include=workflow'))Object.assign(r.data.attributes,{sourceCommit:'other',completionStatus:'SUCCEEDED'});return r;};
+  const run=await c.status('run',{...selection,commitSha:'expected'});
+  assert.equal(run.completionStatus,'SOURCE_MISMATCH');
+  assert.equal(run.providerCompletionStatus,'SUCCEEDED');
+  assert.equal((await c.source({...selection,branch:' main '})).branch,'main');
+});

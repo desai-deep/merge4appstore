@@ -1,3 +1,5 @@
+> This document describes the compatibility bootstrap and historical hosted migration. The active production workflow has moved out of the core; workflow inputs, secrets and profile selection below must be implemented in your own pipeline or adapted in the service repository.
+
 # Deployment bootstrap and domain migration
 
 This prepares configuration for a dedicated domain on the existing host or a replacement Linux VPS. It does not purchase a domain, change DNS, provision a server, install credentials, or deploy. No domain has been selected yet.
@@ -46,6 +48,6 @@ Treat the move as a stateful migration, not a fresh parallel deployment. Drain a
 
 The existing development GitHub App may be promoted to production, preserving its installation, or retained as UAT. Its name is not a security boundary. Once promoted, use a separate App/key/webhook secret for experiments. UAT must use test repositories, separate Apple workflows or apps and credentials, and an independent state directory.
 
-The generator's `--environment` value labels the bundle only. Current Actions deploy main and all tracked profiles. This PR does not add UAT deployment scheduling or profile selection. Service port, PM2/legacy process names, cron markers, logrotate and Nginx snippet names still assume one service installation per host. Use a separate host for an eventual second runtime; same-host dual production/UAT needs additional namespacing first. Never point this production workflow at an isolated UAT host and assume the environment label prevents production jobs.
+The generator's `--environment` value labels the bundle only. The archived hosted Actions workflow deployed main and all tracked profiles; the core now ships only test CI. This PR does not add UAT deployment scheduling or profile selection. Service port, PM2/legacy process names, cron markers, logrotate and Nginx snippet names still assume one service installation per host. Use a separate host for an eventual second runtime; same-host dual production/UAT needs additional namespacing first. Never point this production workflow at an isolated UAT host and assume the environment label prevents production jobs.
 
 See [secret-storage.md](secret-storage.md) for the SOPS/age proposal for our credentials and OpenBao plan for customer secrets.
