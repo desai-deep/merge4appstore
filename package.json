@@ -57,6 +57,7 @@
     "README.md",
     "LICENSE",
     "docs",
-    "profiles"
+    "profiles",
+    ".env.example"
   ]
 }

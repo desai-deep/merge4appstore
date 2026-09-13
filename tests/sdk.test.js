@@ -45,3 +45,19 @@ test('Apple workflow discovery follows all pages', async () => {
   assert.deepEqual((await api.getWorkflows('product')).map(w=>w.id), ['first','second']);
   assert.equal(paths.length, 2);
 });
+test('SDK status verifies app and repository ownership and normalizes string commits', async () => {
+  await assert.rejects(client().status('run', {...selection,appId:'other'}), /belonging/);
+  await assert.rejects(client().status('run', {...selection,repository:'other/ios'}), /does not match/);
+  const c=client(); const request=c.asc.request;
+  c.asc.request=async endpoint=>{const r=await request(endpoint);if(endpoint.includes('?include=workflow'))r.data.attributes.sourceCommit='abc';return r;};
+  assert.equal((await c.status('run',selection)).commitSha,'abc');
+});
+test('provider classifies failures before starting separately from uncertain POST results', async () => {
+  const c=client();
+  c.asc.getWorkflowBranchReference=async()=>null;
+  c.asc.getWorkflowRunStatus=async()=>({found:false});
+  await assert.rejects(c.provider.trigger(selection),error=>error.beforeBuildStart===true && error.code==='SOURCE_REFERENCE_NOT_FOUND');
+  c.asc.getWorkflowBranchReference=async()=>({id:'ref'});
+  c.asc.startWorkflowBuild=async()=>{throw new Error('Network timeout');};
+  await assert.rejects(c.provider.trigger(selection),error=>error.beforeBuildStart===false);
+});
