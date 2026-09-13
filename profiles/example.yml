@@ -35,9 +35,9 @@ apps:
     bundle_id: com.example.app
     name: Example App
     workflows:
-      pull_requests: 00000000-0000-0000-0000-000000000000
-      beta: 00000000-0000-0000-0000-000000000000
-      production: 00000000-0000-0000-0000-000000000000
+      pull_requests: 00000000-0000-0000-0000-000000000001
+      beta: 00000000-0000-0000-0000-000000000002
+      production: 00000000-0000-0000-0000-000000000003
 
 build:
   provider: xcode_cloud

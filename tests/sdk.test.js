@@ -28,3 +28,9 @@ test('SDK rejects closed or fork pull request sources', async () => {
   c.github.request = async () => ({ data: { state: 'open', head: { repo: { full_name: 'fork/ios' }, sha: 'abc' } } });
   await assert.rejects(c.source({ ...selection, pullRequest: '1' }), /this repository/);
 });
+
+test('SDK refuses to start a different commit after the source changes', async () => {
+  const c = client();
+  c.provider.trigger = async () => { assert.fail('must not start'); };
+  await assert.rejects(c.trigger({ ...selection, commitSha: 'old' }), { code: 'SOURCE_CHANGED' });
+});
