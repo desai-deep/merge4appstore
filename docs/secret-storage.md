@@ -1,3 +1,5 @@
+> Historical service proposal from the deployment bootstrap. Hosted credential storage now belongs to `merge2fly-app`; OpenBao has not been implemented or selected as a requirement for the core. Local self-hosting may continue to use restricted environment files.
+
 # Secret storage plan
 
 Status: proposed architecture. The bootstrap PR does not migrate or rotate live credentials.

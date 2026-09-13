@@ -1,3 +1,10 @@
+> **Repository split MVP:** This is the MIT-licensed release engine. The local
+> onboarding UI and hosted-service configuration live in
+> [merge2fly-app](https://github.com/desai-deep/merge2fly-app). See the
+> [SDK and migration boundary](docs/core-app-boundary.md). Production-specific
+> profiles mentioned below are now historical test fixtures; start from
+> `profiles/example.yml` for self-hosting.
+
 # merge4appstore
 
 Automated iOS App Store deployment and release sync. Monitors TestFlight builds from Xcode Cloud, submits them for App Store review, and tags releases when they go live.

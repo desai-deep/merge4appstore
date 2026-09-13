@@ -42,13 +42,13 @@ test('bootstrap renders a private review bundle without overwriting existing fil
 });
 
 test('workflow transports a validated endpoint and derives every health check from it', () => {
-  const workflow = YAML.parse(fs.readFileSync('.github/workflows/deploy.yml', 'utf8'));
+  const workflow = YAML.parse(fs.readFileSync('tests/fixtures/hosted/deploy.yml', 'utf8'));
   const deploy = workflow.jobs.deploy.steps.find(step => step.name === 'Deploy to VPS');
   assert.match(deploy.env.MERGE4APPSTORE_PUBLIC_BASE_URL, /vars.MERGE4APPSTORE_PUBLIC_BASE_URL/);
   assert.match(deploy.run, /endpoint_json="\$\(node scripts\/deployment-endpoint.js\)"/);
   assert.match(deploy.run, /DEPLOYMENT_ENDPOINT_B64='\$endpoint_b64'/);
   assert.match(deploy.run, /export MERGE4APPSTORE_PUBLIC_BASE_URL MERGE4APPSTORE_NGINX_SERVER_NAME/);
-  const source = fs.readFileSync('.github/workflows/deploy.yml', 'utf8');
+  const source = fs.readFileSync('tests/fixtures/hosted/deploy.yml', 'utf8');
   const healthLines = source.split('\n').filter(line => line.includes('HEALTH_URL:'));
   assert.equal(healthLines.length, 2);
   for (const line of healthLines) assert.match(line, /vars.MERGE4APPSTORE_PUBLIC_BASE_URL/);

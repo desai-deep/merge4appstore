@@ -42,5 +42,21 @@
   },
   "engines": {
     "node": ">=20.0.0"
-  }
+  },
+  "exports": {
+    ".": "./lib/sdk.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "scripts",
+    "index.js",
+    "webhook-server.js",
+    "ecosystem.config.cjs",
+    ".merge4appstore-worker-health-v1",
+    "README.md",
+    "LICENSE",
+    "docs",
+    "profiles"
+  ]
 }

@@ -15,10 +15,10 @@ import {
 
 test('tracked profiles seed the next marketing-version trains', () => {
   const jamsOnToast = loadRepositoryProfile(
-    new URL('../profiles/jamsontoast.yml', import.meta.url),
+    new URL('./fixtures/hosted/jamsontoast.yml', import.meta.url),
   );
   const runningOrder = loadRepositoryProfile(
-    new URL('../profiles/runningorder.yml', import.meta.url),
+    new URL('./fixtures/hosted/runningorder.yml', import.meta.url),
   );
 
   assert.equal(jamsOnToast.versioning.initial_version, '1.4');

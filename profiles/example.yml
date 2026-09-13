@@ -1,0 +1,63 @@
+# Copy and replace all identifiers before enabling automation.
+version: 1
+instance: example
+
+repository:
+  owner: your-account
+  name: your-ios-app
+  github_id: 123456789
+  production_branch: main
+  beta_branch: develop
+  ios_repo_path: ""
+
+versioning:
+  initial_version: "1.4"
+
+release_pull_request: true
+auto_rebase_pull_requests: true
+
+metadata:
+  path: AppStore
+
+webhooks:
+  github:
+    secret_env: GH_WEBHOOK_SECRET
+  xcode_cloud:
+    token_env: XCODE_CLOUD_WEBHOOK_TOKEN
+
+ci:
+  version:
+    token_env: MERGE4APPSTORE_BUILD_TOKEN_EXAMPLE
+
+apps:
+  prod:
+    app_id: "1234567890"
+    bundle_id: com.example.app
+    name: Example App
+    workflows:
+      pull_requests: 00000000-0000-0000-0000-000000000000
+      beta: 00000000-0000-0000-0000-000000000000
+      production: 00000000-0000-0000-0000-000000000000
+
+build:
+  provider: xcode_cloud
+  trigger_mode: managed
+  purposes:
+    pull_request:
+      workflow: pull_requests
+      include_commits: true
+    beta:
+      workflow: beta
+      include_commits: false
+    production:
+      workflow: production
+
+automation:
+  deploy:
+    workflow: production
+    recover_missed_builds: true
+
+  sync: true
+
+  expire:
+    workflow: pull_requests
