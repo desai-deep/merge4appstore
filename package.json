@@ -23,7 +23,8 @@
     "test": "node --test tests/*.test.js",
     "validate:profiles": "node scripts/validate-profiles.js",
     "verify:github-app": "node scripts/verify-github-app.js",
-    "demo:github-app": "node scripts/demo-github-app.js"
+    "demo:github-app": "node scripts/demo-github-app.js",
+    "bootstrap:deployment": "node scripts/bootstrap-deployment.js"
   },
   "keywords": [
     "ios",
@@ -41,5 +42,22 @@
   },
   "engines": {
     "node": ">=20.0.0"
-  }
+  },
+  "exports": {
+    ".": "./lib/sdk.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "scripts",
+    "index.js",
+    "webhook-server.js",
+    "ecosystem.config.cjs",
+    ".merge4appstore-worker-health-v1",
+    "README.md",
+    "LICENSE",
+    "docs",
+    "profiles",
+    ".env.example"
+  ]
 }

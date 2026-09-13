@@ -11,7 +11,7 @@ import {
   WEBHOOK_SECRET_NAMES,
 } from '../lib/secret-environment.js';
 
-const workflow = fs.readFileSync(new URL('../.github/workflows/deploy.yml', import.meta.url), 'utf8');
+const workflow = fs.readFileSync(new URL('./fixtures/hosted/deploy.yml', import.meta.url), 'utf8');
 const dependabot = fs.readFileSync(new URL('../.github/dependabot.yml', import.meta.url), 'utf8');
 const deployScript = fs.readFileSync(new URL('../scripts/deploy-vps.sh', import.meta.url), 'utf8');
 const prepareMirrorsScript = fs.readFileSync(new URL('../scripts/prepare-git-mirrors.js', import.meta.url), 'utf8');
@@ -1306,6 +1306,12 @@ test('fails closed when GitHub returns duplicate exact webhook URLs', t => {
 
 test('keeps classic hooks active in shadow mode and disables them in managed mode', t => {
   const directory = temporaryDirectory(t, 'merge4appstore-hook-cutover-');
+  const release = path.join(directory, 'release');
+  fs.mkdirSync(release);
+  fs.mkdirSync(path.join(release, 'profiles'));
+  for (const name of ['jamsontoast.yml', 'runningorder.yml']) fs.copyFileSync(path.join(repositoryRoot, 'tests/fixtures/hosted', name), path.join(release, 'profiles', name));
+  fs.symlinkSync(path.join(repositoryRoot, 'scripts'), path.join(release, 'scripts'));
+  fs.symlinkSync(path.join(repositoryRoot, 'lib'), path.join(release, 'lib'));
   const secret = path.join(directory, 'webhook.env');
   const events = path.join(directory, 'events');
   const required = Object.fromEntries(WEBHOOK_SECRET_NAMES.map(name => [name, `${name}-value`]));
@@ -1345,7 +1351,7 @@ test('keeps classic hooks active in shadow mode and disables them in managed mod
   ].join('\n'), {
     TEST_DIRECTORY: directory,
     TEST_EVENTS: events,
-    TEST_RELEASE: repositoryRoot,
+    TEST_RELEASE: release,
     TEST_SECRET: secret,
   });
   assert.equal(shadow.status, 0, shadow.stderr || shadow.stdout);
@@ -1383,7 +1389,7 @@ test('keeps classic hooks active in shadow mode and disables them in managed mod
   ].join('\n'), {
     TEST_DIRECTORY: directory,
     TEST_EVENTS: events,
-    TEST_RELEASE: repositoryRoot,
+    TEST_RELEASE: release,
     TEST_SECRET: secret,
   });
   assert.equal(managed.status, 0, managed.stderr || managed.stdout);

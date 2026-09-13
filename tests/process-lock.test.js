@@ -104,7 +104,7 @@ test('declares and deploy-checks the supported minimum Node version', async () =
   const packageJson = JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8'));
   const packageLock = JSON.parse(await fs.readFile(new URL('../package-lock.json', import.meta.url), 'utf8'));
   const deployScript = await fs.readFile(new URL('../scripts/deploy-vps.sh', import.meta.url), 'utf8');
-  const workflow = await fs.readFile(new URL('../.github/workflows/deploy.yml', import.meta.url), 'utf8');
+  const workflow = await fs.readFile(new URL('./fixtures/hosted/deploy.yml', import.meta.url), 'utf8');
 
   assert.equal(packageJson.engines.node, '>=20.0.0');
   assert.equal(packageLock.packages[''].engines.node, '>=20.0.0');

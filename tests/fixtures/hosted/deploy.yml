@@ -599,6 +599,7 @@ jobs:
           DEPLOY_DIR: ${{ secrets.SERVER_DIR }}
           DEPLOY_SHA: ${{ github.sha }}
           DEPLOY_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          MERGE4APPSTORE_PUBLIC_BASE_URL: ${{ vars.MERGE4APPSTORE_PUBLIC_BASE_URL }}
           PAUSE_CRON: ${{ github.event_name == 'workflow_dispatch' && inputs.pause_cron }}
           RECONCILE_PROFILE: ${{ inputs.reconcile_profile || 'none' }}
         run: |
@@ -609,6 +610,8 @@ jobs:
           [ "${#DEPLOY_SHA}" -eq 40 ] || { echo "Deployment commit must be a full SHA-1"; exit 1; }
           case "$DEPLOY_DIR" in /|''|*[\$\`\"\'\!\;\&\|\<\>\(\)\{\}%]*) echo "Unsafe SERVER_DIR"; exit 1 ;; /*) ;; *) echo "SERVER_DIR must be absolute"; exit 1 ;; esac
 
+          endpoint_json="$(node scripts/deployment-endpoint.js)"
+          endpoint_b64="$(printf '%s' "$endpoint_json" | base64 -w 0)"
           deploy_dir_b64="$(printf '%s' "$DEPLOY_DIR" | base64 -w 0)"
           deployment_log="$(mktemp)"
           trap 'rm -f -- "$deployment_log"' EXIT
@@ -618,10 +621,13 @@ jobs:
             -o HostKeyAlgorithms=ssh-ed25519 -o UpdateHostKeys=no -o IdentitiesOnly=yes \
             -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
             -i ~/.ssh/deploy_key "$VPS_USER@$VPS_HOST" \
-            "DEPLOY_DIR_B64='$deploy_dir_b64' DEPLOY_SHA='$DEPLOY_SHA' DEPLOY_RUN_ID='$DEPLOY_RUN_ID' PAUSE_CRON='$PAUSE_CRON' RECONCILE_PROFILE='$RECONCILE_PROFILE' bash -s" <<'ENDSSH' | tee "$deployment_log"
+            "DEPLOY_DIR_B64='$deploy_dir_b64' DEPLOY_SHA='$DEPLOY_SHA' DEPLOY_RUN_ID='$DEPLOY_RUN_ID' DEPLOYMENT_ENDPOINT_B64='$endpoint_b64' PAUSE_CRON='$PAUSE_CRON' RECONCILE_PROFILE='$RECONCILE_PROFILE' bash -s" <<'ENDSSH' | tee "$deployment_log"
             set -Eeuo pipefail
             umask 077
             DEPLOY_DIR="$(printf '%s' "$DEPLOY_DIR_B64" | base64 --decode)"
+            MERGE4APPSTORE_PUBLIC_BASE_URL="$(node -e 'process.stdout.write(JSON.parse(Buffer.from(process.env.DEPLOYMENT_ENDPOINT_B64, "base64")).baseUrl)')"
+            MERGE4APPSTORE_NGINX_SERVER_NAME="$(node -e 'process.stdout.write(JSON.parse(Buffer.from(process.env.DEPLOYMENT_ENDPOINT_B64, "base64")).hostname)')"
+            export MERGE4APPSTORE_PUBLIC_BASE_URL MERGE4APPSTORE_NGINX_SERVER_NAME
             while [ "${DEPLOY_DIR%/}" != "$DEPLOY_DIR" ]; do DEPLOY_DIR="${DEPLOY_DIR%/}"; done
             case "$DEPLOY_DIR" in /|"") echo "SERVER_DIR cannot be empty or root"; exit 1 ;; /*) ;; *) echo "SERVER_DIR must be absolute"; exit 1 ;; esac
             [ -d "$DEPLOY_DIR" ] && [ ! -L "$DEPLOY_DIR" ] && [ -O "$DEPLOY_DIR" ] || { echo "SERVER_DIR must be an owned, real checkout directory"; exit 1; }
@@ -799,7 +805,7 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
           DEPLOY_RESULT: ${{ needs.deploy.result }}
           DEPLOY_OUTCOME: ${{ needs.deploy.outputs.outcome }}
-          HEALTH_URL: ${{ vars.MERGE4APPSTORE_HEALTH_URL || 'https://api.runningorder.app/merge4appstore/health' }}
+          HEALTH_URL: ${{ vars.MERGE4APPSTORE_HEALTH_URL || format('{0}/health', vars.MERGE4APPSTORE_PUBLIC_BASE_URL || 'https://api.runningorder.app/merge4appstore') }}
         with:
           script: |
             const marker = '<!-- merge4appstore:deployment-failure -->';
@@ -934,7 +940,7 @@ jobs:
       contents: read
       issues: write
     env:
-      HEALTH_URL: ${{ vars.MERGE4APPSTORE_HEALTH_URL || 'https://api.runningorder.app/merge4appstore/health' }}
+      HEALTH_URL: ${{ vars.MERGE4APPSTORE_HEALTH_URL || format('{0}/health', vars.MERGE4APPSTORE_PUBLIC_BASE_URL || 'https://api.runningorder.app/merge4appstore') }}
     steps:
       - name: Resolve expected main deployment
         id: expected

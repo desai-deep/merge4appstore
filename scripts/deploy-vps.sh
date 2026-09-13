@@ -50,10 +50,16 @@ case "$DEPLOY_RUN_ID" in
   ''|*[!0-9-]*) fail "DEPLOY_RUN_ID is invalid" ;;
 esac
 case "$PAUSE_CRON" in true|false) ;; *) fail "PAUSE_CRON must be true or false" ;; esac
-case "$RECONCILE_PROFILE" in none|jamsontoast|runningorder) ;; *) fail "Unsupported reconciliation profile: $RECONCILE_PROFILE" ;; esac
+case "$RECONCILE_PROFILE" in ''|*[!A-Za-z0-9_-]*) fail "Invalid reconciliation profile: $RECONCILE_PROFILE" ;; esac
 case "$NGINX_SERVER_NAME" in
   ''|.*|*.|*[!A-Za-z0-9.-]*) fail "MERGE4APPSTORE_NGINX_SERVER_NAME must be one DNS hostname" ;;
 esac
+# Validate before any deployment state or host configuration is mutated.
+MERGE4APPSTORE_PUBLIC_BASE_URL="$PUBLIC_BASE_URL" \
+  MERGE4APPSTORE_NGINX_SERVER_NAME="$NGINX_SERVER_NAME" \
+  node "$(dirname -- "${BASH_SOURCE[0]}")/deployment-endpoint.js" >/dev/null \
+  || fail "Invalid public deployment endpoint"
+
 case "$DRAIN_TIMEOUT_MS" in ''|*[!0-9]*) fail "MERGE4APPSTORE_DRAIN_TIMEOUT_MS must be an integer" ;; esac
 case "$LEGACY_DRAIN_QUIET_SECONDS" in ''|*[!0-9]*) fail "MERGE4APPSTORE_LEGACY_DRAIN_QUIET_SECONDS must be an integer" ;; esac
 case "$MIN_FREE_BYTES" in ''|*[!0-9]*) fail "MERGE4APPSTORE_MIN_FREE_BYTES must be an integer" ;; esac
@@ -2145,7 +2151,7 @@ validate_interrupted_transaction() {
       reconcile_profile_snapshot="$(read_transaction_value "$source" reconcile-profile)"
       case "$had_v2_snapshot:$had_legacy_snapshot" in 1:0|0:1) ;; *) return 1 ;; esac
       case "$pause_cron_snapshot" in true|false) ;; *) return 1 ;; esac
-      case "$reconcile_profile_snapshot" in none|jamsontoast|runningorder) ;; *) return 1 ;; esac
+      case "$reconcile_profile_snapshot" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
       if [ "$had_v2_snapshot" = "1" ]; then
         [ -n "$old_release" ] && [ -n "$old_secret" ] || return 1
         [ -d "$old_release" ] && [ ! -L "$old_release" ] && [ -O "$old_release" ] || return 1
@@ -2308,7 +2314,7 @@ finish_committed_transaction() {
   reconcile_profile="$(read_transaction_value "$source" reconcile-profile)"
   phase="$(read_transaction_value "$source" phase)"
   case "$pause_cron" in true|false) ;; *) return 1 ;; esac
-  case "$reconcile_profile" in none|jamsontoast|runningorder) ;; *) return 1 ;; esac
+  case "$reconcile_profile" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
 
   # Older releases cleared the gate between cron-configured and
   # hooks-configured. Re-own it for every committed phase that can still

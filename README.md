@@ -1,3 +1,10 @@
+> **Repository split MVP:** This is the MIT-licensed release engine. The local
+> onboarding UI and hosted-service configuration live in
+> [merge2fly-app](https://github.com/desai-deep/merge2fly-app). See the
+> [SDK and migration boundary](docs/core-app-boundary.md). Production-specific
+> profiles mentioned below are now historical test fixtures; start from
+> `profiles/example.yml` for self-hosting.
+
 # merge4appstore
 
 Automated iOS App Store deployment and release sync. Monitors TestFlight builds from Xcode Cloud, submits them for App Store review, and tags releases when they go live.
@@ -68,11 +75,10 @@ Copy `.env.example` to `.env` and add the shared App Store Connect and GitHub cr
 cp .env.example .env
 ```
 
-Then select one of the tracked repository profiles:
+Edit `profiles/example.yml` with your repository, Apple app and workflow identifiers before running it:
 
 ```bash
-node index.js --profile profiles/runningorder.yml
-node index.js --profile profiles/jamsontoast.yml
+node index.js --profile profiles/example.yml
 ```
 
 When a profile is supplied, `.env` is optional if the required shared
@@ -86,7 +92,7 @@ path is supplied explicitly:
 ```bash
 MERGE4APPSTORE_ENV=/srv/merge4appstore/.env \
 MERGE4APPSTORE_WEBHOOK_ENV=/srv/merge4appstore.state/current-webhook.env \
-node index.js --profile profiles/runningorder.yml
+node index.js --profile profiles/example.yml
 ```
 
 The encoded webhook file always contains the four receiver/build secrets. The
@@ -322,16 +328,16 @@ BUILD_PURPOSE=pull_request \
 BUILD_BRANCH=feature/example \
 BUILD_COMMIT_SHA=abcdef1234567890 \
 BUILD_SOURCE_DELIVERY_ID=github-delivery-id \
-node index.js trigger --profile profiles/runningorder.yml
+node index.js trigger --profile profiles/example.yml
 
 # Refresh App Store notes for the matching submitted release
 BUILD_COMMIT_SHA=abcdef1234567890abcdef1234567890abcdef12 \
 BUILD_PULL_REQUEST=65 \
-node index.js release-notes --profile profiles/runningorder.yml
+node index.js release-notes --profile profiles/example.yml
 
 # Run one repository profile
-node index.js --profile profiles/jamsontoast.yml
-node index.js deploy --profile profiles/jamsontoast.yml
+node index.js --profile profiles/example.yml
+node index.js deploy --profile profiles/example.yml
 
 # Dry run modes
 DRY_RUN=true node index.js
@@ -378,8 +384,7 @@ Pull-request workflows use **Manual Start - Branch, Pull Request**.
 
 ```bash
 # Run every repository every 5 minutes
-*/5 * * * * umask 077; cd /srv/merge4appstore.state/current && PATH='/absolute/node/bin:/absolute/gh/bin:/absolute/git/bin:/absolute/flock/bin:/absolute/logrotate/bin:/usr/bin:/bin' MERGE4APPSTORE_ENV=/srv/merge4appstore/.env MERGE4APPSTORE_WEBHOOK_ENV=/srv/merge4appstore.state/current-webhook.env MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state DRY_RUN=false RECONCILE_METADATA=false /absolute/node/bin/node index.js --profile profiles/runningorder.yml >> /srv/merge4appstore.state/logs/cron.log 2>&1
-*/5 * * * * umask 077; cd /srv/merge4appstore.state/current && PATH='/absolute/node/bin:/absolute/gh/bin:/absolute/git/bin:/absolute/flock/bin:/absolute/logrotate/bin:/usr/bin:/bin' MERGE4APPSTORE_ENV=/srv/merge4appstore/.env MERGE4APPSTORE_WEBHOOK_ENV=/srv/merge4appstore.state/current-webhook.env MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state DRY_RUN=false RECONCILE_METADATA=false /absolute/node/bin/node index.js --profile profiles/jamsontoast.yml >> /srv/merge4appstore.state/logs/cron.log 2>&1
+*/5 * * * * umask 077; cd /srv/merge4appstore.state/current && PATH='/absolute/node/bin:/absolute/gh/bin:/absolute/git/bin:/absolute/flock/bin:/absolute/logrotate/bin:/usr/bin:/bin' MERGE4APPSTORE_ENV=/srv/merge4appstore/.env MERGE4APPSTORE_WEBHOOK_ENV=/srv/merge4appstore.state/current-webhook.env MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state DRY_RUN=false RECONCILE_METADATA=false /absolute/node/bin/node index.js --profile profiles/example.yml >> /srv/merge4appstore.state/logs/cron.log 2>&1
 ```
 
 Every CLI, cron, and webhook process for the same installation must use the
@@ -652,186 +657,20 @@ rebuild is required. Feature PRs refresh builds from the pull-request workflow.
 The configured `develop`-to-`main` release PR refreshes builds from the beta
 workflow for its head commit, using the contents of its `Release Notes` section.
 
-## Automatic VPS Deploy
+## Self-hosted deployment
 
-This repo can deploy itself to the VPS on every push to `main` using `.github/workflows/deploy.yml`.
+The core no longer automatically deploys our hosted service on pushes to main.
+Run the CLI and webhook server using your own process supervisor and deployment
+pipeline. Keep runtime state and credentials outside the checkout, configure
+`MERGE4APPSTORE_STATE_DIR`, and start with `profiles/example.yml`.
 
-Required GitHub Actions secrets:
-
-| Secret | Description |
-|--------|-------------|
-| `VPS_HOST` | VPS hostname or IP |
-| `VPS_USER` | SSH user |
-| `VPS_SSH_KEY` | Private SSH key for deployment |
-| `VPS_SSH_HOST_ED25519_SHA256` | Pinned VPS ed25519 host-key fingerprint (`SHA256:...`), obtained from the provider console or an already trusted session |
-| `SERVER_DIR` | Absolute path to this repo on the VPS |
-
-The checkout at `SERVER_DIR` is a control repository: deployments fetch into
-its Git object database but never reset its working tree. A deployment extracts
-the requested commit with `git archive` into the private sibling state root at
-`${SERVER_DIR}.state/releases/<sha>-<run>`. The required Node 20 Actions job runs
-the complete test suite and validates every profile on that exact commit before
-the deployment job can start. The VPS then installs the lockfile with a bounded
-deadline, validates the packaged profiles, dry-runs each profile, and warms the
-shared bare mirrors. It does not rerun source-layout unit tests inside the live
-production state or from the `.git`-free archive. Only a fully verified immutable
-release is started by PM2. `current` and `previous` symlinks identify the retained
-releases; cron always runs `current` and writes locks and logs below the state
-root.
-
-The state root must be a real, deployment-user-owned directory with mode
-`0700`, under a non-writable real parent. The workflow creates it only when the
-exact path is absent and empty, then installs a private ownership marker before
-opening its deployment lock. It refuses symlinks, foreign ownership, permissive
-modes, and an unmarked nonempty directory. A first deployment may migrate owned
-regular `.env` and `.webhook.env` control files that are owner-readable and
-neither writable by another user nor executable; it tightens them to `0600`
-before reading any secret. Unsafe legacy modes fail closed. After migration,
-`.webhook.env` is a validated symlink to the active private release credential.
-
-PM2 runs the permanent `merge4appstore-webhooks-v2` app as two cluster workers
-on loopback port 8788. Workers receive only non-secret settings and paths to the
-control `.env` and a release-specific `0600` webhook environment file; they load
-those files themselves. Secret values are filtered from PM2's environment and
-validated as absent before `pm2 save`. PM2's kill timeout stays ten seconds
-above `MERGE4APPSTORE_DRAIN_TIMEOUT_MS`, so acknowledged background jobs get the
-same graceful-shutdown window as the application. Deployment and inspect mode
-both require the deployment user's enabled, active `pm2-<user>.service` startup
-unit to own the live PM2 daemon, resurrect the saved dump with the same
-`PM2_HOME`, and run both the daemon and managed apps on Node.js 20 or newer.
-PM2's merged stdout and stderr, profile logs, cron output, and the sanitized
-Nginx upstream log all live below the private state root. The PM2 daemon's
-`pm2.log` and optional `agent.log` remain below the deployment user's private
-`PM2_HOME` and are covered by the same rotation policy. A deployment-user
-`logrotate` job checks them every five minutes, rotates daily or at 10 MiB,
-keeps seven rotations for at most fourteen days, and compresses old files. Its
-configuration, state file, and execution lock are owned by that user with mode
-`0600`; deployment runs one serialized rootless rotation pass before commit.
-Rotation uses `copytruncate` so neither Nginx nor PM2 needs privileged reopen
-commands; a few lines can be lost in the narrow copy/truncate window. The
-private rotation configuration is never installed under `/etc/logrotate.d`,
-where an application-writable file would otherwise be executed by root.
-
-Every rollout snapshots the exact crontab and removes all managed
-`merge4appstore` entries before starting the candidate. The first
-migration does not disturb the legacy app on port 8787; it starts and
-authenticates the new app on 8788 after cron is quiesced. A private, durable gate
-file lets the new listener acknowledge arrivals into its queue but prevents
-their execution throughout the candidate startup and validation window.
-The deployment persists both PM2 apps for reboot safety, switches nginx
-transactionally, verifies public health, commits the release pointers, and
-verifies that the legacy PM2 process has no descendant jobs or live legacy lock
-holders for a continuous quiet window. It then removes the legacy app, installs v2 cron, and
-clears the gate. If observable quiescence is not reached before the drain
-deadline, the committed v2 service and transaction are preserved with delivery
-paused for a safe rerun; the legacy process is not killed. A crash leaves the
-gate closed and health
-degraded until journal recovery safely finishes or restores the legacy service.
-Later releases use a verified PM2 generation handoff on the permanent port.
-The deployer starts two candidate workers alongside the captured previous
-worker IDs, verifies their immutable paths, runtime contract, and individual
-health identities, and only then deletes the previous IDs. A partial start or
-failed health proof leaves the known-good generation in place and triggers the
-same convergent handoff back to the retained release. Older retained releases
-without worker identities remain recoverable through exact-SHA health plus a
-strict PM2 ready-timeout check. The PM2 start command also has an independent
-75-second wall-clock cap, so a stalled PM2 control connection returns to the
-transaction rollback path instead of holding the delivery gate indefinitely.
-
-Before the release pointers are committed, any error or termination restores
-the prior PM2 release, nginx files, secret pointer, `current`/`previous` links,
-and the exact saved crontab. A failure after commit (for example, while
-reconciling GitHub hooks or cron) intentionally leaves the already healthy
-release serving traffic; fix the external or transient cause and rerun the
-failed jobs so the transaction journal can finish idempotently. If the deployed
-main commit itself is bad, revert that commit on `main` and let the resulting
-push deploy the revert. Do not switch release pointers manually: PM2, nginx,
-credentials, cron, and pointers move as one transaction. The retained previous
-release and webhook file are recovery evidence and transaction inputs, not a
-standalone pointer-only rollback mechanism; do not delete them until a later
-deployment has succeeded.
-
-Every switch phase is fsynced to a private transaction journal. A later
-deployment detects an interrupted nginx/pointer switch and either rolls forward
-to the still-healthy candidate or retains the healthy previous service; the
-first migration can restore the saved legacy nginx route. Automatic rollback
-deletes candidate code and credentials only after PM2, nginx, pointers, and
-cron are positively restored. Otherwise it preserves the release, secret, and
-journal paths in the failed run log for manual recovery.
-
-The Nginx log format and private rotation configuration are part of that same
-transactional snapshot. A pre-commit failure restores or removes them exactly;
-a committed rollout retains and revalidates them before cron resumes. Before
-dependency installation and again before proxy cutover, deployment requires at
-least 1 GiB and 10% of the state filesystem to remain available. This leaves
-room for the journal, mirrors, delivery receipts, dependencies, and bounded
-logs instead of discovering a full disk during cutover.
-
-The workflow retries idempotent GitHub, authenticated version, and public
-health probes with bounded exponential backoff. Deployment deliberately does
-not prewarm Git mirrors or execute release-operation dry runs: transient Git or
-App Store availability must not prevent a candidate from serving durable work
-and its already-cached marketing versions. The exact candidate still has to
-pass the complete CI suite, packaged-profile validation, process health, and
-authenticated version smokes before cutover.
-
-`npm run prepare:mirrors` remains available as an explicit maintenance command.
-It prepares every configured mirror sequentially with longer Git-command,
-fetch, and clone budgets; each repository has a nine-minute deadline and one
-retry after a transient `503`. Runtime mirror lock contention falls back after
-five seconds, while maintenance prewarming can wait up to 60 seconds for an
-active mutation to finish. Runtime requests retain the shorter mirror-command
-budget and safe provider fallback, and failed release work remains in the
-durable delivery queue for retry.
-A persistent test/deploy failure opens a marked GitHub issue containing the
-Actions run and rerun instructions, without masking the failed job; a later
-successful deployment closes it. A separate five-minute workflow checks public
-health and reconciles the latest completed main-branch deployment result even
-when no deployment is running. Set repository variable
-`MERGE4APPSTORE_HEALTH_URL` only when the public endpoint differs from the
-documented default.
-
-Webhook credentials never transit GitHub Actions during a normal deployment.
-The deployer copies the VPS's existing control `.webhook.env` into a private
-candidate credential before changing any pointers, validates its encoded schema, and compares
-the four established receiver/build secrets with the active rollback
-credentials. App credentials can therefore be introduced as a staged schema
-extension without rewriting the older retained credential file. Credential
-rotation is still a separate coordinated maintenance operation: rotate the
-active and retained rollback files together,
-reload and authenticate the service, update GitHub/Xcode Cloud senders, and
-only then resume normal deployment. This prevents a code rollback from silently
-restoring credentials that senders no longer use.
-
-Deploy the schema-aware code once while the active webhook file still contains
-only the four mandatory secrets. After that healthy deployment, add the complete
-App authentication group to the now-compatible active credential and deploy
-again. Configure the GitHub App webhook URL as
-`https://api.runningorder.app/merge4appstore/webhooks/github-app`, then add the
-complete cutover group in `shadow`/`true`. Shadow deliveries are authenticated
-and observed but do not dispatch work; the classic per-repository hooks remain
-active. Move to `managed`/`false` only after shadow delivery has been verified.
-The deployer rejects a first-time move directly to managed mode. During the
-shadow-to-managed handoff it keeps execution behind the durable gate and lets
-classic copies and App copies received by managed workers claim the same
-provider-neutral event receipt. Whichever executable copy arrives first owns
-the work; its paired copy is a durable duplicate. Shadow workers only record
-App observations, even while the gate is present. The idempotent hook reconciler disables each classic hook before the
-gate is released, so mixed PM2 generations and hook delivery ordering cannot
-lose or double-dispatch the event. A post-commit reconciliation failure leaves
-the healthy runtime, queued receipts, gate, and journal in place; correct the
-GitHub/PAT failure and rerun the failed deployment to finish the cutover.
-
-`GH_TOKEN` remains required on the VPS during this migration. Application and
-mirror operations use refreshable repository-scoped App installation tokens
-when the App group is configured, but the deployment script still uses the PAT
-for listing, creating, enabling, or disabling classic repository hooks.
-Removing the PAT requires migrating that reconciler; App-based hook reconciliation would require
-GitHub's **Webhooks: write** repository permission.
-
-Pull requests run the test job in the deployment workflow and validate every
-tracked repository profile without requiring production credentials. The VPS
-deployment job is disabled for pull-request events.
+`npm run bootstrap:deployment -- --domain hooks.example.com --environment production --output /tmp/merge4appstore-bootstrap`
+generates a reviewable nginx and endpoint configuration bundle. See
+[deployment bootstrap](docs/deployment-bootstrap.md) for prerequisites and the
+[supported core/app boundary](docs/core-app-boundary.md) for migration details.
+The compatibility helper `scripts/deploy-vps.sh` remains available; read its
+requirements before using it on an existing host. Our historical deployment
+workflow, profiles and service-specific guide now live in the private app repo.
 
 ## Environment Variables
 
