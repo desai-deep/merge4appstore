@@ -50,6 +50,10 @@ test('combines multiple test notes sections in document order', () => {
   assert.equal(extractTestNotes('# Test notes\nFirst\n# Other\nExcluded\n## Test Notes\nSecond'), 'First\n\nSecond');
 });
 
+test('preserves indentation when a section starts with a code block', () => {
+  assert.equal(extractTestNotes('## Test notes\n\n    first command\n    second command\n\n'), '    first command\n    second command');
+});
+
 test('returns no instructions for absent, empty, or differently named sections', () => {
   for (const body of [undefined, null, '', 'General description', '# Testing\nDetails', '## Test notes\n\n## Other\nDetails', '## Test notes']) {
     assert.equal(extractTestNotes(body), '');

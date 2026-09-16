@@ -479,6 +479,7 @@ test('propagates unexpected App Store release-note failures', async () => {
     error => error === outage,
   );
 });
+
 test('publishes merged PR titles and test instructions through the beta refresh path', async () => {
   const body = releasePullRequestBody([
     {
