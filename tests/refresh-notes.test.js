@@ -487,7 +487,7 @@ test('publishes merged PR titles and test instructions through the beta refresh 
       title: 'Freshen playback controls',
       body: '# Summary\nInternal details.\n# Test notes\nTry pausing.\n## Offline\nTry airplane mode.\n# Checklist\nInternal checklist.',
     },
-    { number: 50, title: 'Improve startup', body: 'No test notes section.' },
+    { number: 50, title: '#123 Improve startup', body: 'No test notes section.' },
   ], { baseBranch: 'main', headBranch: 'develop' });
   const updated = [];
   const asc = {
@@ -505,6 +505,6 @@ test('publishes merged PR titles and test instructions through the beta refresh 
 
   assert.deepEqual(updated, [{
     buildId: 'build-310',
-    notes: '- Freshen playback controls\n\n  Try pausing.\n  ## Offline\n  Try airplane mode.\n- Improve startup',
+    notes: '- Freshen playback controls\n\n  Try pausing.\n  ## Offline\n  Try airplane mode.\n- #123 Improve startup',
   }]);
 });

@@ -27,6 +27,7 @@ test('formats release notes from merged pull requests instead of commits', () =>
 - Improve startup performance
 
 ## Automation
+<!-- merge4appstore:release-notes:v2 -->
 This pull request is maintained automatically from \`develop\` to \`main\`.
 Merging it triggers the configured production release path for this repository.
 `);
