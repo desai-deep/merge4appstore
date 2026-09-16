@@ -99,6 +99,22 @@ test('refreshes safety-windowed credentials before a synchronous GitHub operatio
   )));
 });
 
+test('requests merged PR bodies for external tester instructions', () => {
+  const github = new GitHubAPI('example', 'ios');
+  let args;
+  const pull = { number: 42, title: 'Improve playback', body: '## Test notes\nTry pausing.' };
+  github.exec = received => {
+    args = received;
+    return JSON.stringify([pull]);
+  };
+
+  assert.deepEqual(github.listMergedPullRequests('develop'), [pull]);
+  assert.deepEqual(args, [
+    'pr', 'list', '--repo', 'example/ios', '--state', 'merged', '--base', 'develop',
+    '--limit', '1000', '--json', 'number,title,body,url,mergeCommit,mergedAt',
+  ]);
+});
+
 test('reads whether repository issues are enabled', () => {
   const calls = [];
   const github = new GitHubAPI('example', 'ios', 'main', { mirror: null });
@@ -634,7 +650,7 @@ test('loads the production cutoff and merged timestamps for release notes', () =
   assert.deepEqual(github.listMergedPullRequests('develop'), [
     { number: 12, mergedAt: '2026-09-02T09:00:00Z' },
   ]);
-  assert.equal(calls[1].at(-1), 'number,title,url,mergeCommit,mergedAt');
+  assert.equal(calls[1].at(-1), 'number,title,body,url,mergeCommit,mergedAt');
 });
 
 test('recovers an open pull request only for the exact branch head commit', () => {

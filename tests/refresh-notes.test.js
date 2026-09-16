@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { releasePullRequestBody } from '../lib/release-pr.js';
 import {
   publishTestFlightNotesForRun,
   refreshAppStoreReleaseNotes,
@@ -477,4 +478,33 @@ test('propagates unexpected App Store release-note failures', async () => {
     refreshAppStoreReleaseNotes(asc, github, refreshReleaseOptions()),
     error => error === outage,
   );
+});
+
+test('publishes merged PR titles and test instructions through the beta refresh path', async () => {
+  const body = releasePullRequestBody([
+    {
+      number: 49,
+      title: 'Freshen playback controls',
+      body: '# Summary\nInternal details.\n# Test notes\nTry pausing.\n## Offline\nTry airplane mode.\n# Checklist\nInternal checklist.',
+    },
+    { number: 50, title: '#123 Improve startup', body: 'No test notes section.' },
+  ], { baseBranch: 'main', headBranch: 'develop' });
+  const updated = [];
+  const asc = {
+    getBuildsForWorkflowCommit: async () => [{ buildId: 'build-310', buildNumber: '310' }],
+    updateBetaBuildNotes: async (buildId, notes) => updated.push({ buildId, notes }),
+  };
+  const github = {
+    getCommitSubject: () => 'Merge feature',
+    getPRDetails: () => ({ title: 'Release', body, headRefOid: 'head' }),
+  };
+
+  await refreshTestFlightNotes(asc, github, {
+    purpose: 'beta', appId: 'app-1', workflowId: 'wf-beta', includeCommits: false,
+  }, { commit: 'head', branch: 'develop', pull_request: '65' });
+
+  assert.deepEqual(updated, [{
+    buildId: 'build-310',
+    notes: '- Freshen playback controls\n\n  Try pausing.\n  ## Offline\n  Try airplane mode.\n- #123 Improve startup',
+  }]);
 });

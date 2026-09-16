@@ -23,10 +23,11 @@ test('formats release notes from merged pull requests instead of commits', () =>
   ], { ...policy, compareUrl: 'https://github.com/example/ios/compare/main...develop' });
 
   assert.equal(body, `## Release Notes
-- #61 Add shake gesture for random album navigation
-- #62 Improve startup performance
+- Add shake gesture for random album navigation
+- Improve startup performance
 
 ## Automation
+<!-- merge4appstore:release-notes:v2 -->
 This pull request is maintained automatically from \`develop\` to \`main\`.
 Merging it triggers the configured production release path for this repository.
 `);
@@ -39,9 +40,35 @@ test('limits release notes by pull request count', () => {
     { number: 2, title: 'Two' },
   ], { ...policy, noteLimit: 1, compareUrl: 'https://github.com/example/ios/compare/main...develop' });
 
-  assert.match(body, /- #2 Two/);
-  assert.doesNotMatch(body, /- #1 One/);
+  assert.match(body, /- Two/);
+  assert.doesNotMatch(body, /- One/);
   assert.match(body, /1 more pull requests/);
+});
+
+test('appends only each merged PR test notes section beneath its title', () => {
+  const body = releasePullRequestBody([
+    {
+      number: 61,
+      title: 'Improve playback',
+      body: '## Summary\nImplementation details\n\n## Test Notes\nVerify pause and resume.\n\n### Offline\nTry airplane mode.\n\n## Checklist\nInternal checklist',
+    },
+    { number: 62, title: 'Improve startup', body: '# Test notes\nLaunch from a cold start.' },
+    { number: 63, title: 'Polish controls', body: 'No explicit test notes.' },
+  ], policy);
+
+  assert.equal(body.split('\n\n## Automation')[0], [
+    '## Release Notes',
+    '- Improve playback',
+    '',
+    '  Verify pause and resume.',
+    '',
+    '  ### Offline',
+    '  Try airplane mode.',
+    '- Improve startup',
+    '',
+    '  Launch from a cold start.',
+    '- Polish controls',
+  ].join('\n'));
 });
 
 test('matches merged PRs by merge SHA and GitHub merge subjects in comparison order', () => {
@@ -178,7 +205,7 @@ test('creates a release PR with the default title', () => {
   const result = reconcileReleasePullRequest(github, policy);
   assert.equal(result.action, 'created');
   assert.deepEqual(created.slice(0, 3), ['main', 'develop', 'Bug fixes and performance improvements']);
-  assert.match(created[3], /- #61 Feature/);
+  assert.match(created[3], /- Feature/);
   assert.deepEqual(labeled, [70, RELEASE_PULL_REQUEST_LABEL]);
 });
 
@@ -196,7 +223,7 @@ test('updates the exact open release PR body without replacing its title', () =>
 
   assert.equal(reconcileReleasePullRequest(github, policy).action, 'updated');
   assert.equal(updated[0], 69);
-  assert.match(updated[1], /- #61 Feature/);
+  assert.match(updated[1], /- Feature/);
   assert.equal(updated.length, 2);
   assert.deepEqual(labeled, [69, RELEASE_PULL_REQUEST_LABEL]);
 });

@@ -657,6 +657,22 @@ rebuild is required. Feature PRs refresh builds from the pull-request workflow.
 The configured `develop`-to-`main` release PR refreshes builds from the beta
 workflow for its head commit, using the contents of its `Release Notes` section.
 
+External beta notes list merged PR titles without PR numbers. To add tester
+instructions beneath a PR's title, include a `Test notes` section in that
+feature PR's body:
+
+```markdown
+## Test notes
+Verify playback resumes after receiving a phone call.
+```
+
+The heading is case-insensitive and supports Markdown levels `#` through
+`######`. Instructions include nested subsections and end at the next heading
+of the same or a higher level. Other PR sections are excluded. The release PR
+collects these instructions when it is reconciled; PRs without test notes
+contribute only their titles. Existing TestFlight notes change when refreshed
+or published again.
+
 ## Self-hosted deployment
 
 The core no longer automatically deploys our hosted service on pushes to main.
