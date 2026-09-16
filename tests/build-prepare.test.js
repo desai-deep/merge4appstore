@@ -187,7 +187,7 @@ test('beta notes use the exact release pull request without listing commits', as
   };
   const result = await generateTestFlightNotes({ profile, build, payload, asc, github });
   assert.deepEqual(lookups, [{ commit: COMMIT, base: 'main', head: 'develop' }]);
-  assert.equal(result.text, '- #49 Freshen playback controls UI');
+  assert.equal(result.text, '- Freshen playback controls UI');
 });
 
 test('beta notes fall back to the develop commit instead of an unrelated feature pull request', async () => {
