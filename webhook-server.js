@@ -490,6 +490,7 @@ export function xcodeWebhookLogMetadata(payload, delivery) {
 export function createVersionRequest({
   store = createVersionStateStore(),
 } = {}) {
+  const versions = createVersionsRequest({ store });
   return async (entry, workflowId) => {
     if (!workflowId) {
       const error = new Error('workflow_id is required');
@@ -505,6 +506,20 @@ export function createVersionRequest({
       error.statusCode = 400;
       throw error;
     }
+    const state = await versions(entry);
+    return {
+      generation: state.generation,
+      purpose: build.purpose,
+      version: versionForPurpose(state, build.purpose),
+    };
+  };
+}
+
+// Return one consistent snapshot; version selection belongs to the consumer.
+export function createVersionsRequest({
+  store = createVersionStateStore(),
+} = {}) {
+  return async entry => {
     let state;
     try {
       state = await store.getOrInitialize(
@@ -519,8 +534,8 @@ export function createVersionRequest({
     }
     return {
       generation: state.generation,
-      purpose: build.purpose,
-      version: versionForPurpose(state, build.purpose),
+      productionVersion: state.productionVersion,
+      developmentVersion: state.developmentVersion,
     };
   };
 }
@@ -573,6 +588,7 @@ export function createWebhookServer({
   profiles,
   dispatch = null,
   version = createVersionRequest(),
+  versions = createVersionsRequest(),
   deliveryStore = createDeliveryStore(),
   installationState = deliveryStore?.stateDirectory
     ? createGitHubInstallationState({ stateDirectory: deliveryStore.stateDirectory })
@@ -957,10 +973,10 @@ export function createWebhookServer({
         }, ok ? {} : { 'retry-after': '30' });
       }
 
-      const versionMatch = url.pathname.match(/^\/v1\/builds\/version\/([^/]+)$/);
+      const versionMatch = url.pathname.match(/^\/v1\/builds\/(version|versions)\/([^/]+)$/);
       if (request.method === 'GET' && versionMatch) {
         let instance;
-        try { instance = decodeURIComponent(versionMatch[1]); }
+        try { instance = decodeURIComponent(versionMatch[2]); }
         catch { return send(response, 400, { error: 'Invalid instance' }); }
         const entry = profiles[instance];
         if (!entry) return send(response, 404, { error: 'Unknown instance' });
@@ -976,6 +992,13 @@ export function createWebhookServer({
         }
         if (!safeEqual(bearer, settings.versionToken)) {
           return send(response, 401, { error: 'Invalid version token' });
+        }
+        if (versionMatch[1] === 'versions') {
+          const resolved = await versions(entry);
+          return send(response, 200, {
+            productionVersion: resolved.productionVersion,
+            developmentVersion: resolved.developmentVersion,
+          }, { 'x-merge4appstore-generation': String(resolved.generation) });
         }
         const resolved = await version(entry, url.searchParams.get('workflow_id') || '');
         return sendText(response, 200, resolved.version, {

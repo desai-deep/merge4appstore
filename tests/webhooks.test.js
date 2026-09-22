@@ -28,6 +28,7 @@ import {
   createJobRunner,
   createSerialDispatcher,
   createVersionRequest,
+  createVersionsRequest,
   createWebhookServer,
   githubWebhookLogMetadata,
   entriesForGitHubAppEvent,
@@ -91,6 +92,7 @@ function createTestWebhookServer(options) {
   const server = createWebhookServer({
     deliveryStore: new MemoryDeliveryStore(),
     version: createVersionRequest({ store: new MemoryVersionStateStore() }),
+    versions: createVersionsRequest({ store: new MemoryVersionStateStore() }),
     ...options,
   });
   const close = server.close.bind(server);
@@ -2192,6 +2194,7 @@ test('reports an incomplete durable deployment transaction as degraded', async t
     profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
     deliveryStore: new MemoryDeliveryStore(),
     version: createVersionRequest({ store: new MemoryVersionStateStore() }),
+    versions: createVersionsRequest({ store: new MemoryVersionStateStore() }),
     deploymentProbe: () => inspectDeploymentTransactions(stateDirectory, { staleAfterMs: 0 }),
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -2443,4 +2446,62 @@ test('shadow App delivery remains observational after an ordinary deployment gat
   await server.waitForBackground();
   assert.equal(dispatches, 0);
   assert.deepEqual(await store.queueStatus(), { pending: 0, failed: 0, corrupt: 0 });
+});
+
+test('serves both versions without workflow configuration across release transitions', async t => {
+  const environmentName = 'MERGE4APPSTORE_BUILD_TOKEN_EXAMPLE_IOS';
+  process.env[environmentName] = 'version-secret';
+  t.after(() => delete process.env[environmentName]);
+  const store = new MemoryVersionStateStore();
+  await store.recordSubmitted('example-ios', '1.1', '1.1');
+  const unconfiguredProfile = structuredClone(profile);
+  delete unconfiguredProfile.build;
+  const server = createTestWebhookServer({
+    profiles: { 'example-ios': { profile: unconfiguredProfile } },
+    versions: createVersionsRequest({ store }),
+    version: createVersionRequest({ store }),
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}/v1/builds/versions`;
+  const headers = { authorization: 'Bearer version-secret' };
+  for (const suffix of ['', '?workflow_id=nightly']) {
+    const response = await fetch(`${base}/example-ios${suffix}`, { headers });
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type'), /application\/json/);
+    assert.equal(response.headers.get('x-merge4appstore-generation'), '2');
+    assert.deepEqual(await response.json(), {
+      productionVersion: '1.1', developmentVersion: '1.2',
+    });
+  }
+  for (const authorization of ['', 'Bearer wrong-secret']) {
+    assert.equal((await fetch(`${base}/example-ios`, { headers: { authorization } })).status, 401);
+  }
+  assert.equal((await fetch(`${base}/unknown`, { headers })).status, 404);
+  await store.recordReleased('example-ios', '1.1', '1.1');
+  assert.deepEqual(await (await fetch(`${base}/example-ios`, { headers })).json(), {
+    productionVersion: '1.2', developmentVersion: '1.2',
+  });
+  delete process.env[environmentName];
+  assert.equal((await fetch(`${base}/example-ios`, { headers })).status, 503);
+});
+
+test('versions endpoint returns a retryable error when state is unavailable', async t => {
+  const environmentName = 'MERGE4APPSTORE_BUILD_TOKEN_EXAMPLE_IOS';
+  process.env[environmentName] = 'version-secret';
+  t.after(() => delete process.env[environmentName]);
+  const server = createTestWebhookServer({
+    profiles: { 'example-ios': { profile } },
+    versions: createVersionsRequest({ store: {
+      getOrInitialize: async () => { throw Object.assign(new Error('private detail'), { retryAfter: 9 }); },
+    } }),
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/v1/builds/versions/example-ios`, {
+    headers: { authorization: 'Bearer version-secret' },
+  });
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get('retry-after'), '9');
+  assert.deepEqual(await response.json(), { error: 'Version state is unavailable' });
 });
