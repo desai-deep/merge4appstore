@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseCliArgs } from '../lib/cli.js';
+import { parseCliArgs, expiryScope } from '../lib/cli.js';
 
 test('uses the default config and mode', () => {
   assert.deepEqual(parseCliArgs([], '/srv/merge4appstore', {}), {
@@ -78,4 +78,11 @@ test('rejects unknown modes and options', () => {
 
 test('accepts reconciliation without a full closed-PR expiry sweep', () => {
   assert.equal(parseCliArgs(['--profile', 'profiles/example.yml', 'reconcile'], '/srv', {}).mode, 'reconcile');
+});
+
+
+test('manual all ignores stale webhook scope while explicit expiry preserves it', () => {
+  const environment = { BUILD_RUN_ID: 'run', BUILD_BRANCH: 'feature', BUILD_PULL_REQUEST: '42' };
+  assert.deepEqual(expiryScope('all', environment), {});
+  assert.deepEqual(expiryScope('expire', environment), { runId: 'run', branch: 'feature', pullRequest: '42' });
 });

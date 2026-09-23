@@ -1847,9 +1847,11 @@ install_managed_cron() {
       # Stagger profiles and avoid the top-of-hour scraper/maintenance burst.
       minute=$(( (2 + profile_index * 5) % 15 ))
       expiry_minute=$(( (11 + profile_index * 15) % 60 ))
-      cron_command="umask 077; cd $current_release_quoted && PATH=$cron_path_quoted MERGE4APPSTORE_ENV=$control_env_quoted MERGE4APPSTORE_WEBHOOK_ENV=$webhook_env_quoted MERGE4APPSTORE_STATE_DIR=$state_dir_quoted MERGE4APPSTORE_LOCK_WAIT_MS=0 DRY_RUN=false RECONCILE_METADATA=false $timeout_binary_quoted --verbose --signal=TERM --kill-after=30s ${MANAGED_CRON_JOB_TIMEOUT_SECONDS}s $node_binary_quoted index.js --profile $profile_quoted"
-      cron_line="$minute,$((minute + 15)),$((minute + 30)),$((minute + 45)) * * * * $cron_command reconcile >> $cron_log_quoted 2>&1 $marker"
-      expiry_line="$cron_command expire >> $cron_log_quoted 2>&1 $marker-expire"
+      cron_command="umask 077; cd $current_release_quoted && PATH=$cron_path_quoted MERGE4APPSTORE_ENV=$control_env_quoted MERGE4APPSTORE_WEBHOOK_ENV=$webhook_env_quoted MERGE4APPSTORE_STATE_DIR=$state_dir_quoted DRY_RUN=false RECONCILE_METADATA=false"
+      cron_line="$minute,$((minute + 15)),$((minute + 30)),$((minute + 45)) * * * * $cron_command MERGE4APPSTORE_LOCK_WAIT_MS=0 $timeout_binary_quoted --verbose --signal=TERM --kill-after=30s ${MANAGED_CRON_JOB_TIMEOUT_SECONDS}s $node_binary_quoted index.js --profile $profile_quoted reconcile >> $cron_log_quoted 2>&1 $marker"
+      # Daily recovery can wait for an in-flight webhook; allow ten minutes
+      # for that lock and ten for cleanup, with the same bounded termination.
+      expiry_line="$cron_command MERGE4APPSTORE_LOCK_WAIT_MS=600000 BUILD_RUN_ID= BUILD_BRANCH= BUILD_PULL_REQUEST= $timeout_binary_quoted --verbose --signal=TERM --kill-after=30s 1200s $node_binary_quoted index.js --profile $profile_quoted expire >> $cron_log_quoted 2>&1 $marker-expire"
       current_crontab="$(printf '%s\n%s\n%s\n' "$current_crontab" "$cron_line" "$expiry_minute 3 * * * $expiry_line")"
       profile_index=$((profile_index + 1))
     done

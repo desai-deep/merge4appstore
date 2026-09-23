@@ -2366,6 +2366,8 @@ test('bounds, pauses, restores, and installs managed cron idempotently before un
     'grep -Eq "^7,22,37,52 .* reconcile .*# merge4appstore:two$" "$CRONTAB_STATE" || exit 41',
     'grep -Eq "^11 3 \\* \\* \\* .* expire .*# merge4appstore:one-expire$" "$CRONTAB_STATE" || exit 42',
     'grep -Eq "^26 3 \\* \\* \\* .* expire .*# merge4appstore:two-expire$" "$CRONTAB_STATE" || exit 43',
+    'grep "# merge4appstore:one-expire$" "$CRONTAB_STATE" | grep -Fq "MERGE4APPSTORE_LOCK_WAIT_MS=600000 BUILD_RUN_ID= BUILD_BRANCH= BUILD_PULL_REQUEST=" || exit 44',
+    'grep "# merge4appstore:one-expire$" "$CRONTAB_STATE" | grep -Fq -- "--kill-after=30s 1200s" || exit 45',
     'cp "$CRONTAB_STATE" "$TEST_DIRECTORY/crontab.before"',
     'chmod 600 "$TEST_DIRECTORY/crontab.before"',
     'printf "17 2 * * * /usr/local/bin/unrelated\n" >> "$CRONTAB_STATE"',

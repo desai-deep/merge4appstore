@@ -385,6 +385,8 @@ Pull-request workflows use **Manual Start - Branch, Pull Request**.
 ```bash
 # Reconcile deploy/release state every 15 minutes; stagger each repository
 2,17,32,47 * * * * umask 077; cd /srv/merge4appstore.state/current && PATH='/absolute/node/bin:/absolute/gh/bin:/absolute/git/bin:/absolute/flock/bin:/absolute/logrotate/bin:/usr/bin:/bin' MERGE4APPSTORE_ENV=/srv/merge4appstore/.env MERGE4APPSTORE_WEBHOOK_ENV=/srv/merge4appstore.state/current-webhook.env MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state DRY_RUN=false RECONCILE_METADATA=false /absolute/node/bin/node index.js --profile profiles/example.yml reconcile >> /srv/merge4appstore.state/logs/cron.log 2>&1
+# Daily recovery for missed events; use a different slot for each repository
+11 3 * * * umask 077; cd /srv/merge4appstore.state/current && PATH='/absolute/node/bin:/absolute/gh/bin:/absolute/git/bin:/absolute/flock/bin:/absolute/logrotate/bin:/usr/bin:/bin' MERGE4APPSTORE_ENV=/srv/merge4appstore/.env MERGE4APPSTORE_WEBHOOK_ENV=/srv/merge4appstore.state/current-webhook.env MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state DRY_RUN=false RECONCILE_METADATA=false MERGE4APPSTORE_LOCK_WAIT_MS=600000 BUILD_RUN_ID= BUILD_BRANCH= BUILD_PULL_REQUEST= /absolute/timeout/bin/timeout --signal=TERM --kill-after=30s 1200s /absolute/node/bin/node index.js --profile profiles/example.yml expire >> /srv/merge4appstore.state/logs/cron.log 2>&1
 ```
 
 Every CLI, cron, and webhook process for the same installation must use the
@@ -399,7 +401,9 @@ Cron is the reconciliation fallback. `reconcile` runs deployment and release
 sync (including published-beta cleanup), but **not** closed-PR expiry. Use a
 separate daily `expire` command with the same environment, profile and log path.
 The compatibility deployer installs staggered 15-minute `reconcile` jobs and
-one daily `expire` per profile (starting at 03:11 in the VPS timezone). Manual
+one daily `expire` per profile (starting at 03:11 in the VPS timezone). Daily
+expiry waits up to ten minutes for a profile lock and has a twenty-minute
+overall deadline; busy frequent reconciliation still skips immediately. Manual
 `all` retains the full sweep for recovery and installations without webhooks.
 
 Closing a PR queues expiry scoped to that PR. Successful PR build completion
