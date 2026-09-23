@@ -45,6 +45,7 @@ const profile = {
   instance: 'example-ios',
   repository: { owner: 'example', name: 'ios', github_id: 11, beta_branch: 'develop', production_branch: 'main' },
   versioning: { initial_version: '1.1' },
+  automation: { expire: { workflow: 'pr' } },
   apps: { prod: { app_id: '1', bundle_id: 'com.example', name: 'Example', workflows: { pr: 'wf-pr', beta: 'wf-beta', production: 'wf-prod' } } },
   build: {
     trigger_mode: 'managed',
@@ -2488,4 +2489,17 @@ test('late-build expiry failure resumes at expiry without repeating successful n
   await server.waitForBackground();
   assert.deepEqual(calls, ['build-status', 'notes', 'expire', 'expire']);
   assert.deepEqual(await deliveryStore.queueStatus(), { pending: 0, failed: 0, corrupt: 0 });
+});
+
+
+test('completion expiry respects disabled or separately scoped expiry automation', () => {
+  const payload = {
+    metadata: { attributes: { eventType: 'BUILD_COMPLETED' } },
+    ciWorkflow: { id: 'wf-pr' },
+    ciBuildRun: { id: 'run', attributes: { completionStatus: 'SUCCEEDED' } },
+  };
+  for (const expire of [false, { workflow: 'beta' }, { workflow: 'pr', app_id: 'other-app' }]) {
+    const configured = { ...profile, automation: { expire } };
+    assert.deepEqual(jobsForXcodeCloudEvent(configured, payload).map(job => job.mode), ['build-status', 'notes']);
+  }
 });
