@@ -1924,3 +1924,36 @@ test('aborts a stalled preview upload and removes its reservation', async t => {
     && call.options.method === 'DELETE'
   )));
 });
+
+test('run-scoped cleanup fetches only exact builds and retains App Store selection protection', async () => {
+  const asc = createASCWithVersions({ data: [], included: [] });
+  asc.getAppId = async () => 'app';
+  const requests = [];
+  asc.request = async endpoint => {
+    requests.push(endpoint);
+    const id = endpoint.split('/')[2].split('?')[0];
+    return { data: {
+      id, attributes: { version: '42', processingState: 'VALID', expired: id === 'expired' },
+      relationships: { app: { data: { id: id === 'foreign' ? 'other' : 'app' } },
+        appStoreVersion: { data: id === 'selected' ? { id: 'version' } : null } },
+    } };
+  };
+  assert.deepEqual(await asc.getTestFlightCleanupCandidates({ buildIds: [] }), []);
+  assert.equal(requests.length, 0);
+  assert.deepEqual((await asc.getTestFlightCleanupCandidates({ buildIds: ['eligible', 'selected', 'expired'] })).map(b => b.buildId), ['eligible']);
+  assert.equal(requests.length, 3);
+  assert.ok(requests.every(url => url.startsWith('/builds/') && !url.includes('filter[')));
+  await assert.rejects(asc.getTestFlightCleanupCandidates({ buildIds: ['foreign'] }), /configured app/);
+});
+
+test('recovery cleanup follows all build pages and rejects unsafe pagination', async () => {
+  const asc = createASCWithVersions({ data: [], included: [] });
+  asc.getAppId = async () => 'app';
+  const item = id => ({ id, attributes: { processingState: 'VALID' } });
+  asc.request = async url => url.includes('cursor=2')
+    ? { data: [item('second')] }
+    : { data: [item('first')], links: { next: 'https://api.appstoreconnect.apple.com/v1/builds?cursor=2' } };
+  assert.deepEqual((await asc.getTestFlightCleanupCandidates()).map(b => b.buildId), ['first', 'second']);
+  asc.request = async () => ({ data: [], links: { next: 'https://attacker.invalid/v1/builds' } });
+  await assert.rejects(asc.getTestFlightCleanupCandidates(), /Invalid Apple cleanup pagination/);
+});
