@@ -277,7 +277,7 @@ test('maps pull request lifecycle events to trigger and expiry jobs', () => {
   assert.deepEqual(jobsForGitHubEvent(profile, 'pull_request', { action: 'opened', pull_request, repository }, 'one'), [{
     mode: 'trigger', purpose: 'pull_request', commitSha: 'abc123', branch: 'feature', pullRequest: '42', deliveryId: 'one',
   }]);
-  assert.deepEqual(jobsForGitHubEvent(profile, 'pull_request', { action: 'closed', pull_request, repository }, 'two'), [{ mode: 'expire', deliveryId: 'two' }]);
+  assert.deepEqual(jobsForGitHubEvent(profile, 'pull_request', { action: 'closed', pull_request, repository }, 'two'), [{ mode: 'expire', branch: 'feature', pullRequest: '42', deliveryId: 'two' }]);
   assert.deepEqual(jobsForGitHubEvent(profile, 'pull_request', {
     action: 'edited', pull_request, repository, changes: { body: { from: 'Old notes' } },
   }, 'three'), [{
@@ -322,7 +322,7 @@ test('builds ordinary pull requests targeting any branch', () => {
   }]);
   assert.deepEqual(jobsForGitHubEvent(profile, 'pull_request', {
     action: 'closed', pull_request, repository,
-  }, 'closed'), [{ mode: 'expire', deliveryId: 'closed' }]);
+  }, 'closed'), [{ mode: 'expire', branch: 'feature', pullRequest: '75', deliveryId: 'closed' }]);
 });
 
 test('does not treat the configured release pull request as an ordinary production-target pull request', () => {
@@ -2443,4 +2443,49 @@ test('shadow App delivery remains observational after an ordinary deployment gat
   await server.waitForBackground();
   assert.equal(dispatches, 0);
   assert.deepEqual(await store.queueStatus(), { pending: 0, failed: 0, corrupt: 0 });
+});
+
+test('successful PR completion queues run-scoped expiry after upload readiness/notes', () => {
+  const payload = {
+    metadata: { attributes: { eventType: 'BUILD_COMPLETED' } },
+    ciWorkflow: { id: 'wf-pr' },
+    ciBuildRun: { id: 'late-run', attributes: { completionStatus: 'SUCCEEDED' } },
+  };
+  const jobs = jobsForXcodeCloudEvent(profile, payload);
+  assert.deepEqual(jobs.map(job => job.mode), ['build-status', 'notes', 'expire']);
+  assert.deepEqual(jobs.at(-1), { mode: 'expire', runId: 'late-run', deliveryId: 'late-run' });
+  payload.ciBuildRun.attributes.completionStatus = 'FAILED';
+  assert.deepEqual(jobsForXcodeCloudEvent(profile, payload).map(job => job.mode), ['build-status']);
+});
+
+test('late-build expiry failure resumes at expiry without repeating successful notes', async t => {
+  process.env.XCODE_CLOUD_WEBHOOK_TOKEN = 'xcode-secret';
+  t.after(() => delete process.env.XCODE_CLOUD_WEBHOOK_TOKEN);
+  const calls = [];
+  const deliveryStore = new MemoryDeliveryStore();
+  const server = createTestWebhookServer({
+    profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
+    deliveryStore, recoveryIntervalMs: 1, retryDelayMs: 1, maxDeliveryAttempts: 3,
+    dispatch: async (_entry, job) => {
+      calls.push(job.mode);
+      return job.mode === 'expire' && calls.filter(mode => mode === 'expire').length === 1 ? 1 : 0;
+    },
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/webhooks/xcode-cloud/example-ios/xcode-secret`, {
+    method: 'POST', body: JSON.stringify({
+      metadata: { attributes: { eventType: 'BUILD_COMPLETED' } },
+      ciWorkflow: { id: 'wf-pr' },
+      ciBuildRun: { id: 'late-expiry-retry', attributes: { completionStatus: 'SUCCEEDED' } },
+    }),
+  });
+  assert.equal(response.status, 202);
+  const deadline = Date.now() + 2_000;
+  while (calls.filter(mode => mode === 'expire').length < 2 && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  await server.waitForBackground();
+  assert.deepEqual(calls, ['build-status', 'notes', 'expire', 'expire']);
+  assert.deepEqual(await deliveryStore.queueStatus(), { pending: 0, failed: 0, corrupt: 0 });
 });

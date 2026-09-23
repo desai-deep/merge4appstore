@@ -75,3 +75,7 @@ test('rejects unknown modes and options', () => {
   assert.throws(() => parseCliArgs(['publish'], '/srv', {}), /Unknown mode/);
   assert.throws(() => parseCliArgs(['--wat'], '/srv', {}), /Unknown option/);
 });
+
+test('accepts reconciliation without a full closed-PR expiry sweep', () => {
+  assert.equal(parseCliArgs(['--profile', 'profiles/example.yml', 'reconcile'], '/srv', {}).mode, 'reconcile');
+});

@@ -383,8 +383,8 @@ Pull-request workflows use **Manual Start - Branch, Pull Request**.
 ### 4. Schedule (cron)
 
 ```bash
-# Run every repository every 5 minutes
-*/5 * * * * umask 077; cd /srv/merge4appstore.state/current && PATH='/absolute/node/bin:/absolute/gh/bin:/absolute/git/bin:/absolute/flock/bin:/absolute/logrotate/bin:/usr/bin:/bin' MERGE4APPSTORE_ENV=/srv/merge4appstore/.env MERGE4APPSTORE_WEBHOOK_ENV=/srv/merge4appstore.state/current-webhook.env MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state DRY_RUN=false RECONCILE_METADATA=false /absolute/node/bin/node index.js --profile profiles/example.yml >> /srv/merge4appstore.state/logs/cron.log 2>&1
+# Reconcile deploy/release state every 15 minutes; stagger each repository
+2,17,32,47 * * * * umask 077; cd /srv/merge4appstore.state/current && PATH='/absolute/node/bin:/absolute/gh/bin:/absolute/git/bin:/absolute/flock/bin:/absolute/logrotate/bin:/usr/bin:/bin' MERGE4APPSTORE_ENV=/srv/merge4appstore/.env MERGE4APPSTORE_WEBHOOK_ENV=/srv/merge4appstore.state/current-webhook.env MERGE4APPSTORE_STATE_DIR=/srv/merge4appstore.state DRY_RUN=false RECONCILE_METADATA=false /absolute/node/bin/node index.js --profile profiles/example.yml reconcile >> /srv/merge4appstore.state/logs/cron.log 2>&1
 ```
 
 Every CLI, cron, and webhook process for the same installation must use the
@@ -395,8 +395,28 @@ Process locks are kernel-held and disappear with their owner: Linux uses GNU
 mode-`0700` directory. Windows uses an exclusive named pipe. Other operating
 systems are rejected instead of falling back to an unsafe stale lock file.
 
-Cron is the reconciliation fallback. The primary event path is `npm run
-webhooks`, exposed behind HTTPS:
+Cron is the reconciliation fallback. `reconcile` runs deployment and release
+sync (including published-beta cleanup), but **not** closed-PR expiry. Use a
+separate daily `expire` command with the same environment, profile and log path.
+The compatibility deployer installs staggered 15-minute `reconcile` jobs and
+one daily `expire` per profile (starting at 03:11 in the VPS timezone). Manual
+`all` retains the full sweep for recovery and installations without webhooks.
+
+Closing a PR queues expiry scoped to that PR. Successful PR build completion
+queues exact-run expiry after upload readiness and notes, covering builds that
+finish after their PR closes. Both paths recheck current GitHub state before
+expiring anything; reopened/ambiguous PRs and App Store-selected builds stay.
+GitHub API failures fail the job so durable delivery can retry.
+
+A daily recovery sweep is still needed: the queue protects accepted deliveries,
+but [GitHub does not automatically redeliver failed deliveries](https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries).
+It cannot recover an event that never reached this server. Apple's delayed or
+missing build/source metadata and exhausted delivery retries also require
+reconciliation. Retiring the sweep requires upstream delivery reconciliation
+and coverage of those states, not just durable local receipt storage. App Store
+release-state changes also still need the release-sync poll.
+
+The primary event path is `npm run webhooks`, exposed behind HTTPS:
 
 - `POST /webhooks/github/:instance` verifies GitHub's raw-body HMAC SHA-256
   signature and handles PR open/update/close plus beta and production pushes.
