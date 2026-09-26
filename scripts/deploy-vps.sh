@@ -2702,10 +2702,14 @@ if [ "$v2_processes" -gt 0 ]; then
   old_sha="$(cat "$old_current/.merge4appstore-deployment-sha" 2>/dev/null || true)"
   case "$old_sha" in ''|*[!0-9a-fA-F]*) fail "Current rollback release SHA is invalid" ;; esac
   [ "${#old_sha}" -eq 40 ] || fail "Current rollback release SHA is not full length"
-  verify_health_url "http://$SERVICE_HOST:$SERVICE_PORT/health" "$old_sha" "Current local service" \
-    || fail "Current v2 service is not a verified rollback target"
-  verify_health_url "$PUBLIC_BASE_URL/health" "$old_sha" "Current public service" \
-    || fail "Current public service is not a verified rollback target"
+  if [ "${MERGE4APPSTORE_MAINTENANCE_DEPLOY:-false}" = true ]; then
+    echo "Maintenance deployment: validated rollback release and credentials; previous service may be unavailable."
+  else
+    verify_health_url "http://$SERVICE_HOST:$SERVICE_PORT/health" "$old_sha" "Current local service" \
+      || fail "Current v2 service is not a verified rollback target"
+    verify_health_url "$PUBLIC_BASE_URL/health" "$old_sha" "Current public service" \
+      || fail "Current public service is not a verified rollback target"
+  fi
 else
   [ -z "$old_current" ] && [ -z "$old_current_secret" ] \
     || fail "State has a current release but $SERVICE_NAME is not running"

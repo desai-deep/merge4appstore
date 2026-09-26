@@ -2930,3 +2930,37 @@ test('reconciles manual recovery, excludes inspections, and fails closed on satu
     assert.ok(warnings.some(value => /saturated/.test(value)));
   });
 });
+
+test('maintenance cutover accepts an unavailable source but still validates rollback artifacts', t => {
+  const directory = temporaryDirectory(t, 'merge4appstore-maintenance-source-');
+  const release = path.join(directory, 'release');
+  fs.mkdirSync(release);
+  const sha = 'a'.repeat(40);
+  fs.writeFileSync(path.join(release, '.merge4appstore-release'), 'merge4appstore-release-v1\n');
+  fs.writeFileSync(path.join(release, '.merge4appstore-deployment-sha'), `${sha}\n`);
+  const secret = path.join(directory, 'secret');
+  fs.writeFileSync(secret, 'private', { mode: 0o600 });
+  const section = shellSection('v2_processes="$(pm2_app_count', '\nwrite_transaction_value had-v2');
+  const source = [
+    'set -Eeuo pipefail',
+    'fail() { echo "$*" >&2; exit 1; }',
+    'pm2_app_count() { echo 2; }',
+    'validate_private_file() { [ -f "$1" ] && [ ! -L "$1" ]; }',
+    'verify_health_url() { echo health-probed >&2; return 1; }',
+    'SERVICE_NAME=v2 SERVICE_HOST=127.0.0.1 SERVICE_PORT=8788 PUBLIC_BASE_URL=https://example.test',
+    section,
+  ].join('\n');
+  const environment = { old_current: release, old_current_secret: secret };
+  const ordinary = runBash(source, environment);
+  assert.notEqual(ordinary.status, 0);
+  assert.match(ordinary.stderr, /health-probed/);
+  const maintenanceEnv = { ...environment, MERGE4APPSTORE_MAINTENANCE_DEPLOY: 'true' };
+  const maintenance = runBash(source, maintenanceEnv);
+  assert.equal(maintenance.status, 0, maintenance.stderr);
+  assert.doesNotMatch(maintenance.stderr, /health-probed/);
+  fs.unlinkSync(secret);
+  assert.notEqual(runBash(source, maintenanceEnv).status, 0);
+  fs.writeFileSync(secret, 'private');
+  fs.writeFileSync(path.join(release, '.merge4appstore-release'), 'invalid');
+  assert.notEqual(runBash(source, maintenanceEnv).status, 0);
+});
