@@ -47,7 +47,7 @@ process.env.DOTENV_CONFIG_QUIET = 'true';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import { parseCliArgs } from './lib/cli.js';
+import { parseCliArgs, expiryScope } from './lib/cli.js';
 import { loadWebhookEnvironment } from './lib/secret-environment.js';
 import {
   applyAutomationProfile,
@@ -352,7 +352,7 @@ async function main() {
     }
 
     // Run deploy check
-    if (mode === 'deploy' || mode === 'all') {
+    if (['deploy', 'all', 'reconcile'].includes(mode)) {
       const automation = selectAutomation('deploy');
       if (automation.enabled) {
         const { asc, github } = await createClients();
@@ -365,7 +365,7 @@ async function main() {
     }
 
     // Run release sync
-    if (mode === 'sync' || mode === 'all') {
+    if (['sync', 'all', 'reconcile'].includes(mode)) {
       const automation = selectAutomation('sync');
       if (automation.enabled) {
         const { asc, tags, github } = await createClients();
@@ -392,7 +392,7 @@ async function main() {
       const automation = selectAutomation('expire');
       if (automation.enabled) {
         const { asc, github } = await createClients();
-        await runClosedPRBuildExpiry(asc, github, DRY_RUN);
+        await runClosedPRBuildExpiry(asc, github, DRY_RUN, expiryScope(mode));
       }
     }
 

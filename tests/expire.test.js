@@ -292,3 +292,76 @@ test('keeps a source-less build when no exact PR workflow is configured', async 
     });
   }));
 });
+
+test('PR-close expiry only looks up the affected branch and requires the same PR', async () => {
+  await withBranches(async () => {
+    const lookedUp = [];
+    const expired = [];
+    const asc = {
+      getTestFlightCleanupCandidates: async () => ['ours', 'unrelated', 'reused'].map(buildId => ({ buildId })),
+      getBuildSource: async id => ({ found: true, commitSha: id, sourceBranch: id === 'unrelated' ? 'other' : 'feature' }),
+      expireBuild: async id => expired.push(id),
+    };
+    const github = { findClosedPRForBuild: (commit, _base, _branch, options) => {
+      assert.equal(options.strict, true);
+      lookedUp.push(commit);
+      return { number: commit === 'ours' ? 42 : 43 };
+    } };
+    await runClosedPRBuildExpiry(asc, github, false, { branch: 'feature', pullRequest: '42' });
+    assert.deepEqual(lookedUp, ['ours', 'reused']);
+    assert.deepEqual(expired, ['ours']);
+  });
+});
+
+test('late completed build uses exact run uploads and current PR state, including dry run', async () => {
+  await withExpiryWorkflow('pr-workflow', async () => {
+    const expired = [];
+    let closed = false;
+    const asc = {
+      getBuildRunNotesContext: async () => ({
+        workflowId: 'pr-workflow', completionStatus: 'SUCCEEDED', commitSha: 'abc', branch: 'feature',
+        builds: [{ buildId: 'late', processingState: 'VALID' }],
+      }),
+      getTestFlightCleanupCandidates: async options => {
+        assert.deepEqual(options, { buildIds: ['late'] });
+        return [{ buildId: 'late' }];
+      },
+      getBuildSource: async () => { throw new Error('must not scan workflow history'); },
+      expireBuild: async id => expired.push(id),
+    };
+    const github = { findClosedPRForBuild: () => closed ? { number: 42 } : null };
+    assert.equal((await runClosedPRBuildExpiry(asc, github, false, { runId: 'run' })).expired, 0);
+    closed = true;
+    assert.equal((await runClosedPRBuildExpiry(asc, github, true, { runId: 'run' })).expired, 1);
+    assert.deepEqual(expired, []);
+    await runClosedPRBuildExpiry(asc, github, false, { runId: 'run' });
+    assert.deepEqual(expired, ['late']);
+  });
+});
+
+test('late-build expiry retries unavailable uploads and rejects another workflow', async () => {
+  await withExpiryWorkflow('pr-workflow', async () => {
+    for (const run of [
+      { workflowId: 'wrong', completionStatus: 'SUCCEEDED', commitSha: 'abc', builds: [{ processingState: 'VALID' }] },
+      { workflowId: 'pr-workflow', completionStatus: 'SUCCEEDED', commitSha: 'abc', builds: [] },
+      { workflowId: 'pr-workflow', completionStatus: 'SUCCEEDED', commitSha: 'abc', builds: [{ processingState: 'PROCESSING' }] },
+    ]) {
+      const asc = {
+        getBuildRunNotesContext: async () => run,
+        getTestFlightCleanupCandidates: async () => assert.fail('must not scan unrelated builds'),
+      };
+      await assert.rejects(runClosedPRBuildExpiry(asc, {}, false, { runId: 'run' }), /Expiry run/);
+    }
+  });
+});
+
+test('GitHub failure fails expiry so the durable delivery retries instead of acknowledging a no-op', async () => {
+  const asc = {
+    getTestFlightCleanupCandidates: async () => [{ buildId: 'b' }],
+    getBuildSource: async () => ({ found: true, commitSha: 'abc', sourceBranch: 'feature' }),
+    expireBuild: async () => assert.fail('must not expire on GitHub failure'),
+  };
+  await assert.rejects(runClosedPRBuildExpiry(asc, {
+    findClosedPRForBuild: () => { throw new Error('GitHub unavailable'); },
+  }, false), /GitHub unavailable/);
+});

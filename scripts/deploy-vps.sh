@@ -1811,6 +1811,7 @@ install_managed_cron() {
   local current_release_quoted control_env_quoted webhook_env_quoted state_dir_quoted cron_log_quoted node_binary_quoted timeout_binary_quoted cron_path_quoted verification
   local flock_binary_quoted logrotate_binary_quoted logrotate_config_quoted logrotate_state_quoted logrotate_lock_quoted
   local logrotate_log_quoted rotation_line
+  local profile_index=0 minute expiry_minute expiry_line cron_command
   local profiles=("$release"/profiles/*.yml "$release"/profiles/*.yaml)
   [ "${#profiles[@]}" -gt 0 ] || return 1
   current_crontab="$(crontab -l 2>/dev/null || true)"
@@ -1843,8 +1844,16 @@ install_managed_cron() {
       profile_relative="profiles/$(basename "$profile_file")"
       profile_quoted="$(shell_quote "$profile_relative")"
       marker="# merge4appstore:$profile_name"
-      cron_line="*/5 * * * * umask 077; cd $current_release_quoted && PATH=$cron_path_quoted MERGE4APPSTORE_ENV=$control_env_quoted MERGE4APPSTORE_WEBHOOK_ENV=$webhook_env_quoted MERGE4APPSTORE_STATE_DIR=$state_dir_quoted MERGE4APPSTORE_LOCK_WAIT_MS=0 DRY_RUN=false RECONCILE_METADATA=false $timeout_binary_quoted --verbose --signal=TERM --kill-after=30s ${MANAGED_CRON_JOB_TIMEOUT_SECONDS}s $node_binary_quoted index.js --profile $profile_quoted >> $cron_log_quoted 2>&1 $marker"
-      current_crontab="$(printf '%s\n%s\n' "$current_crontab" "$cron_line")"
+      # Stagger profiles and avoid the top-of-hour scraper/maintenance burst.
+      minute=$(( (2 + profile_index * 5) % 15 ))
+      expiry_minute=$(( (11 + profile_index * 15) % 60 ))
+      cron_command="umask 077; cd $current_release_quoted && PATH=$cron_path_quoted MERGE4APPSTORE_ENV=$control_env_quoted MERGE4APPSTORE_WEBHOOK_ENV=$webhook_env_quoted MERGE4APPSTORE_STATE_DIR=$state_dir_quoted DRY_RUN=false RECONCILE_METADATA=false"
+      cron_line="$minute,$((minute + 15)),$((minute + 30)),$((minute + 45)) * * * * $cron_command MERGE4APPSTORE_LOCK_WAIT_MS=0 $timeout_binary_quoted --verbose --signal=TERM --kill-after=30s ${MANAGED_CRON_JOB_TIMEOUT_SECONDS}s $node_binary_quoted index.js --profile $profile_quoted reconcile >> $cron_log_quoted 2>&1 $marker"
+      # Daily recovery can wait for an in-flight webhook; allow ten minutes
+      # for that lock and ten for cleanup, with the same bounded termination.
+      expiry_line="$cron_command MERGE4APPSTORE_LOCK_WAIT_MS=600000 BUILD_RUN_ID= BUILD_BRANCH= BUILD_PULL_REQUEST= $timeout_binary_quoted --verbose --signal=TERM --kill-after=30s 1200s $node_binary_quoted index.js --profile $profile_quoted expire >> $cron_log_quoted 2>&1 $marker-expire"
+      current_crontab="$(printf '%s\n%s\n%s\n' "$current_crontab" "$cron_line" "$expiry_minute 3 * * * $expiry_line")"
+      profile_index=$((profile_index + 1))
     done
   fi
   printf '%s\n' "$current_crontab" | sed '/^[[:space:]]*$/d' | crontab - || return 1
@@ -1858,14 +1867,15 @@ install_managed_cron() {
   if [ "$pause_cron" = "true" ]; then
     [ -z "$managed_cron" ] || return 1
   else
-    [ "$(printf '%s\n' "$verification" | grep -Fc '# merge4appstore:' || true)" -eq "${#profiles[@]}" ] || return 1
+    [ "$(printf '%s\n' "$verification" | grep -Fc '# merge4appstore:' || true)" -eq "$(( ${#profiles[@]} * 2 ))" ] || return 1
     [ -z "$(printf '%s\n' "$managed_cron" | grep -v 'MERGE4APPSTORE_STATE_DIR=' || true)" ] || return 1
     [ -z "$(printf '%s\n' "$managed_cron" | grep -v 'MERGE4APPSTORE_ENV=' || true)" ] || return 1
     [ -z "$(printf '%s\n' "$managed_cron" | grep -v 'MERGE4APPSTORE_WEBHOOK_ENV=' || true)" ] || return 1
     for profile_file in "${profiles[@]}"; do
       profile_name="$(basename "$profile_file")"
       profile_name="${profile_name%.*}"
-      [ "$(printf '%s\n' "$managed_cron" | grep -Fc "# merge4appstore:$profile_name" || true)" -eq 1 ] || return 1
+      [ "$(printf '%s\n' "$managed_cron" | grep -F "# merge4appstore:$profile_name" | grep -c ' reconcile >>' || true)" -eq 1 ] || return 1
+      [ "$(printf '%s\n' "$managed_cron" | grep -F "# merge4appstore:$profile_name-expire" | grep -c ' expire >>' || true)" -eq 1 ] || return 1
     done
   fi
 }

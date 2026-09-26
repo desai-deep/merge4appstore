@@ -848,3 +848,10 @@ test('keeps a source-less build when its commit association is ambiguous', () =>
 
   assert.equal(github.findClosedPRForBuild('abc123', 'develop', null), null);
 });
+
+test('strict expiry lookup propagates GitHub failures for durable retry', () => {
+  const github = new GitHubAPI('example', 'ios');
+  github.exec = () => { throw new Error('rate limit'); };
+  assert.throws(() => github.findClosedPRForBuild('abc', null, 'feature', { strict: true }), /rate limit/);
+  assert.equal(github.findClosedPRForBuild('abc', null, 'feature'), null);
+});
