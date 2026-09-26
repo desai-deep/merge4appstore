@@ -821,6 +821,10 @@ MIT
 
 ### Deploying on memory-constrained hosts
 
+Maintenance mode validates the previous release and credentials on disk without
+requiring its stopped or unavailable workers to answer health probes. Target
+startup checks and rollback verification still apply.
+
 Set `MERGE4APPSTORE_MAINTENANCE_DEPLOY=true` in the deployment environment to
 accept a service interruption instead of overlapping PM2 generations. Once
 scheduled work is quiescent and durable delivery is paused, the deployer stops
