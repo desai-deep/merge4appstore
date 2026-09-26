@@ -1912,6 +1912,29 @@ test('hands PM2 releases over only after the new immutable generation validates'
     && health < deletion && deletion < finalValidation, result.stdout);
 
   fs.rmSync(eventLog);
+  const pauseFile = path.join(directory, 'delivery.pause');
+  fs.writeFileSync(pauseFile, 'maintenance-test');
+  const maintenance = runBash(source, {
+    ...environment,
+    MERGE4APPSTORE_MAINTENANCE_DEPLOY: 'true',
+    DELIVERY_PAUSE_FILE: pauseFile,
+  });
+  assert.equal(maintenance.status, 0, maintenance.stderr || maintenance.stdout);
+  const maintenanceEvents = fs.readFileSync(eventLog, 'utf8');
+  assert.ok(maintenanceEvents.indexOf('delete:v2:7,8') < maintenanceEvents.indexOf('pm2:<start>'));
+  assert.match(maintenanceEvents, /validate:9,10/);
+  assert.match(maintenanceEvents, new RegExp(`health:9,10:${environment.TEST_SHA}:true`));
+
+  fs.rmSync(eventLog);
+  const ungated = runBash(source, {
+    ...environment, MERGE4APPSTORE_MAINTENANCE_DEPLOY: 'true',
+    DELIVERY_PAUSE_FILE: path.join(directory, 'missing.pause'),
+  });
+  assert.notEqual(ungated.status, 0);
+  assert.match(ungated.stderr, /requires the delivery pause gate/);
+  assert.doesNotMatch(fs.readFileSync(eventLog, 'utf8'), /delete:v2:7,8|pm2:<start>/);
+
+  fs.rmSync(eventLog);
   const reused = runBash([
     'REUSABLE_IDS=15,16',
     'RETIRING_IDS=17,18',

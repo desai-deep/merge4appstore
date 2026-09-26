@@ -818,3 +818,14 @@ node index.js expire --profile ...` to preview every decision.
 ## License
 
 MIT
+
+### Deploying on memory-constrained hosts
+
+Set `MERGE4APPSTORE_MAINTENANCE_DEPLOY=true` in the deployment environment to
+accept a service interruption instead of overlapping PM2 generations. Once
+scheduled work is quiescent and durable delivery is paused, the deployer stops
+the previous workers before starting the target generation. Requests can fail
+during this interval; webhook providers must retry them. Persisted deliveries
+remain on disk. Startup validation and transactional rollback still apply.
+The default remains an overlapping rollout. Use the same setting when recovering
+an interrupted maintenance rollout.
