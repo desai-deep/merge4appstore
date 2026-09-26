@@ -50,6 +50,10 @@ case "$DEPLOY_RUN_ID" in
   ''|*[!0-9-]*) fail "DEPLOY_RUN_ID is invalid" ;;
 esac
 case "$PAUSE_CRON" in true|false) ;; *) fail "PAUSE_CRON must be true or false" ;; esac
+case "${MERGE4APPSTORE_MAINTENANCE_DEPLOY:-false}" in
+  true|false) ;;
+  *) fail "MERGE4APPSTORE_MAINTENANCE_DEPLOY must be true or false" ;;
+esac
 case "$RECONCILE_PROFILE" in ''|*[!A-Za-z0-9_-]*) fail "Invalid reconciliation profile: $RECONCILE_PROFILE" ;; esac
 case "$NGINX_SERVER_NAME" in
   ''|.*|*.|*[!A-Za-z0-9.-]*) fail "MERGE4APPSTORE_NGINX_SERVER_NAME must be one DNS hostname" ;;
@@ -993,6 +997,17 @@ start_release() {
   unhealthy_target_ids="$(pm2_unhealthy_target_ids "$SERVICE_NAME" "$release/webhook-server.js")" || return 1
   delete_pm2_ids "$SERVICE_NAME" "$unhealthy_target_ids" || return 1
   existing_ids="$(pm2_app_ids "$SERVICE_NAME")" || return 1
+
+  # Small hosts may not have room for overlapping generations. The operator
+  # explicitly accepts downtime; the durable gate and rollback journal still
+  # protect queued work and retain the previous release for recovery.
+  if [ "${MERGE4APPSTORE_MAINTENANCE_DEPLOY:-false}" = true ]; then
+    [ -f "${DELIVERY_PAUSE_FILE:-}" ] && [ ! -L "$DELIVERY_PAUSE_FILE" ] \
+      || { echo "ERROR: Maintenance deployment requires the delivery pause gate" >&2; return 1; }
+    echo "Maintenance deployment: stopping previous workers before starting the target generation"
+    delete_pm2_ids "$SERVICE_NAME" "$existing_ids" || return 1
+    existing_ids=""
+  fi
 
   # PM2 startOrReload retains pm_cwd and pm_exec_path from the old generation
   # when an ecosystem file changes cwd. Start a complete target generation
