@@ -2564,3 +2564,41 @@ test('completion expiry respects disabled or separately scoped expiry automation
     assert.deepEqual(jobsForXcodeCloudEvent(configured, payload).map(job => job.mode), ['build-status', 'notes']);
   }
 });
+
+test('recovery waits for its current receipt before claiming more work', async t => {
+  const deliveryStore = new MemoryDeliveryStore();
+  for (let index = 0; index < 3; index += 1) {
+    const claim = await deliveryStore.claim(`bounded:${index}`, {
+      instance: 'example-ios', jobs: [{ mode: 'trigger' }],
+    });
+    await deliveryStore.retry(claim, new Error('recover later'), { delayMs: 0 });
+  }
+  let releaseJob;
+  const held = new Promise(resolve => { releaseJob = resolve; });
+  let started;
+  const firstStarted = new Promise(resolve => { started = resolve; });
+  let dispatched = 0;
+  const server = createTestWebhookServer({
+    profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
+    deliveryStore,
+    recoveryIntervalMs: 1,
+    dispatch: async () => { dispatched += 1; started(); await held; return 0; },
+  });
+  t.after(async () => {
+    server.stopBackgroundRecovery();
+    releaseJob();
+    await server.waitForBackground();
+    server.close();
+  });
+  await firstStarted;
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(dispatched, 1);
+  assert.equal([...deliveryStore.receipts.values()].filter(receipt => receipt.ownerPid).length, 1);
+  releaseJob();
+  const deadline = Date.now() + 1_000;
+  while ((await deliveryStore.queueStatus()).pending && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.equal(dispatched, 3);
+  assert.equal((await deliveryStore.queueStatus()).pending, 0);
+});

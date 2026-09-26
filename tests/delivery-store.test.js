@@ -936,3 +936,22 @@ test('initialization does not block serving readiness on retention maintenance',
   await store.initialize();
   assert.equal(pruned, false);
 });
+
+test('bounded recovery leaves unclaimed receipts available to another worker', async t => {
+  for (const store of [
+    new MemoryDeliveryStore(),
+    new FileDeliveryStore({ stateDirectory: await temporaryState(t) }),
+  ]) {
+    for (let index = 0; index < 3; index += 1) {
+      const claim = await store.claim(`bounded:${index}`, { instance: 'example-ios', jobs: [] });
+      await store.retry(claim, new Error('recover later'), { delayMs: 0 });
+    }
+    await assert.rejects(store.claimPending({ limit: 0 }), RangeError);
+    const first = await store.claimPending({ limit: 1 });
+    assert.equal(first.length, 1);
+    const second = await store.claimPending({ limit: 1 });
+    assert.equal(second.length, 1);
+    assert.notEqual(first[0].token, second[0].token);
+    assert.equal((await store.claimPending()).length, 1);
+  }
+});

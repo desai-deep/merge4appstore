@@ -857,7 +857,7 @@ export function createWebhookServer({
         throw error;
       }
     })();
-    track(background).catch(error => {
+    return track(background).catch(error => {
       const disposition = error.deadLettered
         ? `failed ${maxDeliveryAttempts} times and requires manual recovery`
         : error.deliveryStorageFatal
@@ -886,13 +886,16 @@ export function createWebhookServer({
       }
     }
   };
-  const recoverPending = async () => {
-    if (recoveryStopped || recovering || isDeliveryPaused() || typeof deliveryStore.claimPending !== 'function') return;
+  const recoverPending = async (releaseInstallationId = null) => {
+    if (recoveryStopped || recovering || deliveryRuntimeError || isDeliveryPaused()
+      || typeof deliveryStore.claimPending !== 'function') return;
     recovering = true;
     try {
       await deliveryReady;
-      const claims = await deliveryStore.claimPending();
-      for (const claim of claims) runDelivery(claim, claim.intent);
+      // Claim one receipt at a time and keep the recovery slot until it settles.
+      // Otherwise every timer tick can enqueue the entire durable backlog.
+      const claims = await deliveryStore.claimPending({ releaseInstallationId, limit: 1 });
+      for (const claim of claims) await runDelivery(claim, claim.intent);
     } catch (error) {
       markDeliveryStoreFatal(error);
       console.error(`${new Date().toISOString()} could not recover pending webhook deliveries: ${error.stack || error.message}`);
@@ -900,23 +903,8 @@ export function createWebhookServer({
       recovering = false;
     }
   };
-  const recoverInstallation = async installationId => {
-    if (recoveryStopped || isDeliveryPaused() || typeof deliveryStore.claimPending !== 'function') return;
-    try {
-      await deliveryReady;
-      const claims = await deliveryStore.claimPending({
-        releaseInstallationId: installationId,
-      });
-      for (const claim of claims) runDelivery(claim, claim.intent);
-    } catch (error) {
-      markDeliveryStoreFatal(error);
-      console.error(`${new Date().toISOString()} could not release webhook deliveries for GitHub installation ${installationId}: ${error.stack || error.message}`);
-    }
-  };
   const triggerRecovery = (installationId = null) => {
-    const recovery = installationId === null
-      ? recoverPending()
-      : recoverInstallation(installationId);
+    const recovery = recoverPending(installationId);
     track(recovery).catch(error => {
       console.error(`${new Date().toISOString()} recovery scan failed: ${error.stack || error.message}`);
     });
