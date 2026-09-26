@@ -781,7 +781,7 @@ requires `APP_BUNDLE_ID`, `APP_NAME`, `GITHUB_REPO_OWNER`, and
 | `MERGE4APPSTORE_MIN_FREE_BYTES` | Absolute free-space floor enforced by VPS deployment (default and minimum `1073741824`, 1 GiB) |
 | `MERGE4APPSTORE_MIN_FREE_PERCENT` | Percentage free-space floor enforced in addition to the byte floor (default and minimum `10`) |
 | `MERGE4APPSTORE_DELIVERY_PAUSE_FILE` | Private regular file whose presence durably pauses execution while continuing to accept and persist deliveries; deployment manages it during release and webhook-provider handoffs |
-| `MERGE4APPSTORE_RECOVERY_INTERVAL_MS` | Pending-delivery recovery scan interval (default `5000`) |
+| `MERGE4APPSTORE_RECOVERY_INTERVAL_MS` | Pending-delivery recovery scan interval (default `5000`); each worker claims one receipt and finishes it before scanning again |
 | `MERGE4APPSTORE_JOB_RETRY_MS` | Delay before retrying a failed webhook job (default `5000`) |
 | `MERGE4APPSTORE_JOB_MAX_ATTEMPTS` | Attempts before a webhook delivery enters the failed queue (default `8`) |
 | `DRY_RUN` | Set to `true` to run without making changes |
