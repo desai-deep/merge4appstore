@@ -11,14 +11,16 @@ const requiredEnvironment = name => {
   return value;
 };
 const stateDirectory = requiredEnvironment('MERGE4APPSTORE_STATE_DIR');
+const workerCount = Number(process.env.MERGE4APPSTORE_WEBHOOK_WORKERS || 2);
+if (![1, 2].includes(workerCount)) throw new Error('MERGE4APPSTORE_WEBHOOK_WORKERS must be 1 or 2');
 
 module.exports = {
   apps: [{
     name: appName,
     script: 'webhook-server.js',
     cwd: __dirname,
-    exec_mode: 'cluster',
-    instances: 2,
+    exec_mode: workerCount === 1 ? 'fork' : 'cluster',
+    instances: workerCount,
     merge_logs: true,
     out_file: path.join(stateDirectory, 'logs', 'webhook-out.log'),
     error_file: path.join(stateDirectory, 'logs', 'webhook-error.log'),
@@ -49,6 +51,7 @@ module.exports = {
       MERGE4APPSTORE_PM2_NAME: appName,
       MERGE4APPSTORE_STATE_DIR: requiredEnvironment('MERGE4APPSTORE_STATE_DIR'),
       MERGE4APPSTORE_WEBHOOK_ENV: requiredEnvironment('MERGE4APPSTORE_WEBHOOK_ENV'),
+      MERGE2FLY_SERVICE_SHA: process.env.MERGE2FLY_SERVICE_SHA || '',
       NODE_ENV: 'production',
       RECONCILE_METADATA: 'false',
       WEBHOOK_AUTOSTART: 'true',

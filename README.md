@@ -765,6 +765,7 @@ requires `APP_BUNDLE_ID`, `APP_NAME`, `GITHUB_REPO_OWNER`, and
 | `GITHUB_CLASSIC_WEBHOOKS_ENABLED` | Must be `true` with `shadow` and `false` with `managed` |
 | `MERGE4APPSTORE_PROFILE` | Alternative to the `--profile` command-line option |
 | `MERGE4APPSTORE_LOCK_WAIT_MS` | Maximum time to wait for another job for the same repository (default `600000`) |
+| `MERGE4APPSTORE_WEBHOOK_WORKERS` | PM2 ecosystem topology: `1` uses fork mode, `2` (default) uses cluster mode. Set in the PM2 launcher environment; the legacy transactional VPS helper continues managing two workers. |
 | `MERGE4APPSTORE_STATE_DIR` | Absolute private directory for persistent Git mirrors and deployment coordination (default `~/.local/state/merge4appstore`) |
 | `MERGE4APPSTORE_MIRROR_TTL_MS` | Minimum interval between successful mirror refreshes (default `60000`) |
 | `MERGE4APPSTORE_MIRROR_TIMEOUT_MS` | Timeout for each request-time mirror Git command (default `15000`) |
