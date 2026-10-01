@@ -975,6 +975,7 @@ test('reports the running deployment identity from the health endpoint', async t
   const server = createTestWebhookServer({
     profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
     deploymentSha: 'deployed-commit',
+    serviceSha: 'service-commit',
     workerId: 17,
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -990,7 +991,10 @@ test('reports the running deployment identity from the health endpoint', async t
     degraded: false,
     profiles: ['example-ios'],
     deployment_sha: 'deployed-commit',
+    service_sha: 'service-commit',
     worker_id: 17,
+    active_jobs: 0,
+    background_work: 0,
     delivery_queue: {
       pending: 0, failed: 0, corrupt: 0, oldest_pending_age_ms: null,
     },
@@ -1001,6 +1005,61 @@ test('reports the running deployment identity from the health endpoint', async t
     github_app_ready: false,
     github_classic_webhooks_enabled: true,
   });
+});
+
+test('drains active jobs while deferring work already queued before the pause', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'merge4appstore-dispatch-drain-'));
+  const pauseFile = path.join(directory, 'delivery.pause');
+  process.env.GH_WEBHOOK_SECRET = 'drain-secret';
+  t.after(() => {
+    delete process.env.GH_WEBHOOK_SECRET;
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  let releaseFirst;
+  let notifyStarted;
+  const firstStarted = new Promise(resolve => { notifyStarted = resolve; });
+  const firstHeld = new Promise(resolve => { releaseFirst = resolve; });
+  let dispatches = 0;
+  const deliveryStore = new MemoryDeliveryStore();
+  const server = createTestWebhookServer({
+    profiles: { 'example-ios': { profile, profilePath: '/tmp/example.yml' } },
+    deliveryStore,
+    deliveryPauseFile: pauseFile,
+    recoveryIntervalMs: 5,
+    dispatch: async () => {
+      dispatches += 1;
+      if (dispatches === 1) {
+        notifyStarted();
+        await firstHeld;
+      }
+      return 0;
+    },
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { releaseFirst(); server.close(); });
+  const health = async () => (await fetch(`http://127.0.0.1:${server.address().port}/health`)).json();
+  const payload = { repository: { full_name: 'example/ios' }, ref: 'refs/heads/develop', after: COMMIT_SHA };
+  assert.equal((await signedClassicGitHubRequest(server, 'drain-secret', 'example-ios', 'push', 'drain-first', payload)).status, 202);
+  await firstStarted;
+  assert.equal((await health()).active_jobs, 1);
+  assert.equal((await signedClassicGitHubRequest(server, 'drain-secret', 'example-ios', 'push', 'drain-second', {
+    ...payload, before: COMMIT_SHA, after: 'c'.repeat(40),
+  })).status, 202);
+  fs.writeFileSync(pauseFile, 'deployment\n', { mode: 0o600 });
+  releaseFirst();
+  await server.waitForBackground();
+  const paused = await health();
+  assert.equal(paused.delivery_paused, true);
+  assert.equal(paused.active_jobs, 0);
+  assert.equal(paused.background_work, 0);
+  assert.equal(dispatches, 1);
+  assert.equal((await deliveryStore.queueStatus()).pending, 1);
+  fs.unlinkSync(pauseFile);
+  const deadline = Date.now() + 1000;
+  while (dispatches < 2 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+  await server.waitForBackground();
+  assert.equal(dispatches, 2);
+  assert.equal((await deliveryStore.queueStatus()).pending, 0);
 });
 
 test('serves a profile-scoped version without repository or App Store lookups', async t => {
