@@ -600,6 +600,7 @@ export function createWebhookServer({
     githubClassicWebhooksEnabled()
   ),
   deploymentSha = process.env.MERGE4APPSTORE_DEPLOY_SHA || null,
+  serviceSha = process.env.MERGE2FLY_SERVICE_SHA || null,
   workerId = /^(0|[1-9]\d*)$/.test(process.env.pm_id || '')
     && Number.isSafeInteger(Number(process.env.pm_id)) ? Number(process.env.pm_id) : null,
   recoveryIntervalMs = positiveNumber(process.env.MERGE4APPSTORE_RECOVERY_INTERVAL_MS, 5_000),
@@ -647,7 +648,22 @@ export function createWebhookServer({
     && (configuredAppMode !== 'managed' || githubAppReady);
   const classicDispatchEnabled = configuredAppMode !== 'managed' && classicWebhooksConfigured;
   const jobRunner = dispatch || createJobRunner();
-  const enqueue = createSerialDispatcher(jobRunner);
+  let activeJobs = 0;
+  const enqueue = createSerialDispatcher(async (entry, job) => {
+    // A receipt can wait behind an earlier job before the deployment gate is
+    // created. Check again when dispatch actually begins, before any mutation.
+    if (isDeliveryPaused()) {
+      const error = new Error('Deployment migration drain');
+      error.deliveryPaused = true;
+      throw error;
+    }
+    activeJobs += 1;
+    try {
+      return await jobRunner(entry, job);
+    } finally {
+      activeJobs -= 1;
+    }
+  });
   const activeWork = new Set();
   let deliveryInitializationError = null;
   let deliveryRuntimeError = null;
@@ -943,7 +959,10 @@ export function createWebhookServer({
           degraded,
           profiles: Object.keys(profiles),
           deployment_sha: deploymentSha,
+          service_sha: serviceSha,
           worker_id: workerId,
+          active_jobs: activeJobs,
+          background_work: activeWork.size,
           delivery_queue: deliveryQueue,
           deployment_state: deploymentState,
           delivery_paused_until: Number.isFinite(deliveryPausedUntil) && Date.now() < deliveryPausedUntil
