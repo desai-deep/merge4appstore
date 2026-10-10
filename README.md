@@ -202,6 +202,23 @@ build:
 An automation may also set `app_id`, `bundle_id`, or `app_name` directly as an
 override. Prefer app roles when several values travel together.
 
+### Onboard reusable Xcode Cloud workflows
+
+An existing Xcode Cloud product can use reusable PR, beta, and production archive
+workflow templates, with its own scheme, container, branches, and toolchain.
+Configure `workflow_onboarding` in the repository profile, preview the changes,
+then explicitly apply them:
+
+```sh
+npm run onboard:workflows -- --profile profiles/my-new-app.yml
+npm run onboard:workflows -- --profile profiles/my-new-app.yml --apply
+```
+
+Preview is read-only. Apply reconciles workflows and saves Apple's returned IDs
+under `apps.<role>.workflows`; it does not start builds or submit an app.
+See [workflow onboarding](docs/workflow-onboarding.md) for a minimal new-app
+profile, native versus managed triggers, prerequisites, and recovery behavior.
+
 ### Repository-managed App Store metadata
 
 An app repository may opt in by declaring a `metadata.path` directory in its
