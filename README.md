@@ -95,7 +95,9 @@ MERGE4APPSTORE_WEBHOOK_ENV=/srv/merge4appstore.state/current-webhook.env \
 node index.js --profile profiles/example.yml
 ```
 
-The encoded webhook file always contains the four receiver/build secrets. The
+The encoded webhook file always contains the four original receiver/build secrets.
+Additional app tokens named `MERGE4APPSTORE_BUILD_TOKEN_<UPPERCASE_SLUG>` are
+preserved by the writer and accepted by the private environment loader. The
 optional GitHub App authentication group is
 `GITHUB_APP_ID` plus `GITHUB_APP_PRIVATE_KEY_BASE64`; set both or neither.
 `GITHUB_INSTALLATION_ID` is an optional fast path once that pair is present.
@@ -201,6 +203,72 @@ build:
 
 An automation may also set `app_id`, `bundle_id`, or `app_name` directly as an
 override. Prefer app roles when several values travel together.
+
+### Onboard an existing app locally
+
+The onboarding CLI discovers an **existing iOS App Store Connect app** and its
+Xcode Cloud workflows, verifies the GitHub branches and workflow repository,
+and creates a local setup bundle. Use existing shared Apple credentials and
+GitHub App authentication, or your local `gh auth` session. It does not create
+an Apple app, configure signing, start builds, submit releases, or change hooks.
+
+```bash
+npm run onboard -- --repo example/existing-ios --bundle-id com.example.app
+```
+
+On a terminal, the CLI prompts for missing repository/bundle ID, workflow
+mapping, and initial marketing version. For scripts, provide explicit values:
+
+```bash
+npm run onboard -- \
+  --repo example/existing-ios \
+  --bundle-id com.example.app \
+  --initial-version 2.10 \
+  --production-workflow PROD-WORKFLOW-ID \
+  --beta-workflow BETA-WORKFLOW-ID \
+  --pr-workflow PR-WORKFLOW-ID \
+  --production-branch main \
+  --beta-branch develop \
+  --service-url https://example.com/merge4appstore \
+  --dry-run
+```
+
+Remove `--dry-run` to write `.merge4appstore-onboarding/<instance>/`:
+
+- `profile.yml`: validated profile with immutable GitHub repository ID and exact
+  app/workflow mappings. Native build triggers remain selected. Deploy, sync,
+  expiry, release PRs, rebasing, and metadata management start disabled.
+- `secrets.env`: a fresh per-app build token, mode `0600`, ignored by Git. This
+  is a **partial addition** to the server environment, not a replacement file;
+  preserve its existing shared webhook and provider credentials.
+- `fetch-version.sh`: requires HTTPS at runtime, restricts curl transport to HTTPS,
+  and fetches and validates the marketing version. Integrate
+  it with the app's existing `ci_post_clone.sh` and version-setting method.
+- `README.md`: steps to install the profile/token on the service, connect hooks,
+  integrate CI, verify a native build, and enable individual automations.
+
+`--output` selects a new bundle directory. Existing directories and symlinks
+are refused so reruns cannot rotate tokens accidentally. Existing profiles for
+the same repository or instance are refused; edit that profile instead.
+`--env` selects a shared credential file (default `.env` in the current working
+directory). `MERGE4APPSTORE_WEBHOOK_ENV` can explicitly select the server's
+private GitHub App credential file. `--help` lists all options. After installing
+this package, the same command is available as `merge4appstore onboard`.
+
+The CLI lists existing iOS store versions and requires an explicit initial
+version; a seed below an observed store version is rejected. Compare the seed
+with the app project's version, TestFlight builds, and any in-flight review.
+The current profile format seeds production and development with one value;
+this command does not import separate in-flight version state. Verify the
+service's version responses before switching an existing CI adapter.
+
+This first flow maps one production app with optional beta/PR workflows. Add
+separate `uat` or `internal` apps through the existing profile format. Managed
+trigger cutover and server provisioning remain explicit configuration steps.
+Apple discovery uses the documented [app Xcode Cloud product](https://developer.apple.com/documentation/appstoreconnectapi/get-v1-apps-_id_-ciproduct),
+[product workflows](https://developer.apple.com/documentation/appstoreconnectapi/get-v1-ciproducts-_id_-workflows),
+and [app store versions](https://developer.apple.com/documentation/appstoreconnectapi/get-v1-apps-_id_-appstoreversions)
+read endpoints.
 
 ### Repository-managed App Store metadata
 
