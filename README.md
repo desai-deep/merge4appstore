@@ -241,7 +241,8 @@ Remove `--dry-run` to write `.merge4appstore-onboarding/<instance>/`:
 - `secrets.env`: a fresh per-app build token, mode `0600`, ignored by Git. This
   is a **partial addition** to the server environment, not a replacement file;
   preserve its existing shared webhook and provider credentials.
-- `fetch-version.sh`: fetches and validates the marketing version. Integrate
+- `fetch-version.sh`: requires HTTPS at runtime, restricts curl transport to HTTPS,
+  and fetches and validates the marketing version. Integrate
   it with the app's existing `ci_post_clone.sh` and version-setting method.
 - `README.md`: steps to install the profile/token on the service, connect hooks,
   integrate CI, verify a native build, and enable individual automations.

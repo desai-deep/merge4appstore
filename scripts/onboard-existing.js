@@ -36,6 +36,9 @@ APP_STORE_CONNECT_API_KEY_CONTENT (base64 PEM), and GitHub App access or gh auth
 An explicit MERGE4APPSTORE_WEBHOOK_ENV can load private GitHub App credentials.
 `;
 
+/**
+ * Discover and validate an existing app, then preview its profile or write a private local setup bundle.
+ */
 export async function main(args = process.argv.slice(2)) {
   let options = parseOnboardingArgs(args);
   if (options.help) { console.log(HELP); return; }

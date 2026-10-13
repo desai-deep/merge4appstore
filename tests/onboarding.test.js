@@ -19,6 +19,7 @@ const discovery = {
   workflows: ['production-id', 'beta-id', 'pr-id'].map(id => ({ id, attributes: { name: id, isEnabled: true } })),
   versions: [{ id: 'version-id', attributes: { versionString: '2.9', appStoreState: 'READY_FOR_SALE' } }],
 };
+/** Create an isolated directory that is removed when the test finishes. */
 function temporary(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'onboarding-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -150,12 +151,33 @@ test('version adapter encodes workflow IDs, keeps token out of argv, and rejects
   assert.match(fs.readFileSync(env.CAPTURE_CONFIG, 'utf8'), /Bearer test-secret/);
   const args = fs.readFileSync(env.CAPTURE_ARGS, 'utf8');
   assert.doesNotMatch(args, /test-secret/);
+  assert.match(args, /--disable\n--proto\n=https\n--proto-redir\n=https\n/);
   assert.match(args, /--data-urlencode\nworkflow_id=workflow\/id/);
   assert.match(args, /https:\/\/example.com\/base\/v1\/builds\/version\/existing-ios/);
   for (const value of ['invalid', '2.10\njunk', '2.10\n2.11', '2..10', '2.10;id']) {
     assert.throws(() => execFileSync('sh', [path.join(output, 'fetch-version.sh')], { env: { ...env, MOCK_VERSION: value }, stdio: 'pipe' }));
   }
   assert.throws(() => execFileSync('sh', [path.join(output, 'fetch-version.sh')], { env: { ...env, MERGE4APPSTORE_BUILD_TOKEN: '' }, stdio: 'pipe' }));
+});
+
+test('version adapter rejects insecure runtime URLs before invoking curl', t => {
+  const root = temporary(t);
+  const output = path.join(root, 'bundle');
+  writeOnboardingBundle(output, createOnboardingProfile(options, discovery));
+  const marker = path.join(root, 'curl-called');
+  fs.writeFileSync(path.join(root, 'curl'), '#!/bin/sh\nprintf called > "$CURL_MARKER"\n', { mode: 0o700 });
+  const env = { ...process.env, PATH: `${root}:${process.env.PATH}`, CURL_MARKER: marker,
+    MERGE4APPSTORE_BUILD_TOKEN: 'private-token', CI_WORKFLOW_ID: 'production-id' };
+  for (const url of ['http://example.com', 'ftp://example.com', 'file:///tmp/version', 'https://', 'example.com']) {
+    assert.throws(() => execFileSync('sh', [path.join(output, 'fetch-version.sh')], {
+      env: { ...env, MERGE4APPSTORE_URL: url }, stdio: 'pipe',
+    }), error => {
+      assert.match(error.stderr.toString(), /must use HTTPS/);
+      assert.doesNotMatch(error.stderr.toString(), /private-token/);
+      return true;
+    });
+    assert.equal(fs.existsSync(marker), false);
+  }
 });
 
 test('CLI help works without credentials and invalid input exits unsuccessfully', () => {
