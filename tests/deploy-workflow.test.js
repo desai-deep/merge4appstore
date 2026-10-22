@@ -2012,6 +2012,32 @@ test('hands PM2 releases over only after the new immutable generation validates'
   assert.ok(legacy.stdout.includes(`health:9,10:${environment.TEST_SHA}:false`), legacy.stdout);
 });
 
+test('deployment rejects unpatched Node runtimes and PM2 workers', () => {
+  const startupCheck = deployScript.match(/"\$NODE_BINARY" -e '\n([\s\S]*?)\n'/)[1];
+  const workerCheck = shellSection('        const version = /', '        if (fs.realpathSync(pm2Environment.pm_cwd)');
+  const validateStartup = new Function('process', 'console', startupCheck);
+  const validateWorker = new Function('pm2Environment', 'processInfo', workerCheck);
+  for (const [version, supported] of [
+    ['20.19.2', false], ['22.23.3', false], ['22.23.4', true], ['22.24.0', true],
+    ['23.11.0', false], ['24.22.0', false], ['24.22.1', true], ['24.23.0', true],
+    ['25.9.0', false], ['26.12.0', false], ['26.12.1', true], ['26.13.0', true],
+    ['27.0.0', true], ['', false], ['unknown', false],
+  ]) {
+    const startup = () => validateStartup({
+      versions: { node: version },
+      exit: () => { throw new Error('unsupported runtime'); },
+    }, { error() {} });
+    const worker = () => validateWorker({ node_version: version }, { pm_id: 1 });
+    if (supported) {
+      assert.doesNotThrow(startup, version);
+      assert.doesNotThrow(worker, version);
+    } else {
+      assert.throws(startup, /unsupported runtime/, version);
+      assert.throws(worker, /unsupported Node.js/, version);
+    }
+  }
+});
+
 test('validates a staged PM2 generation without accepting a mixed final topology', t => {
   const directory = temporaryDirectory(t, 'merge4appstore-pm2-validation-');
   const oldRelease = path.join(directory, 'old');
@@ -2050,7 +2076,7 @@ test('validates a staged PM2 generation without accepting a mixed final topology
     pm2_env: {
       status: 'online',
       exec_mode: 'cluster_mode',
-      node_version: '20.19.2',
+      node_version: '26.12.1',
       pm_cwd: cwd,
       pm_exec_path: script,
       pm_out_log_path: outLog,

@@ -64,6 +64,8 @@ Xcode Cloud                          Your VPS
 ```bash
 git clone https://github.com/desai-deep/merge4appstore.git
 cd merge4appstore
+nvm install
+nvm use
 npm install
 ```
 
@@ -789,7 +791,7 @@ requires `APP_BUNDLE_ID`, `APP_NAME`, `GITHUB_REPO_OWNER`, and
 
 ## Requirements
 
-- Node.js 20 LTS or newer
+- Patched Node.js: 22.23.4+ (22.x), 24.22.1+ (24.x), or 26.12.1+; `.nvmrc` pins 26.12.1 for local setup and CI.
 - Git with reliable `GIT_NO_LAZY_FETCH` support: 2.39.4+, 2.40.2+, 2.41.1+,
   2.42.2+, 2.43.4+, 2.44.1+, or 2.45.1+ on those maintenance branches;
   Git 2.46.0 or newer is also supported

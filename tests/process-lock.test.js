@@ -104,12 +104,11 @@ test('declares and deploy-checks the supported minimum Node version', async () =
   const packageJson = JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8'));
   const packageLock = JSON.parse(await fs.readFile(new URL('../package-lock.json', import.meta.url), 'utf8'));
   const deployScript = await fs.readFile(new URL('../scripts/deploy-vps.sh', import.meta.url), 'utf8');
-  const workflow = await fs.readFile(new URL('./fixtures/hosted/deploy.yml', import.meta.url), 'utf8');
 
-  assert.equal(packageJson.engines.node, '>=20.0.0');
-  assert.equal(packageLock.packages[''].engines.node, '>=20.0.0');
-  assert.match(deployScript, /Node\.js 20\.0\.0 or newer is required/);
-  assert.match(workflow, /Node\.js 20\.0\.0 or newer is required/);
+  assert.equal(packageJson.engines.node, '^22.23.4 || ^24.22.1 || >=26.12.1');
+  assert.equal(packageLock.packages[''].engines.node, '^22.23.4 || ^24.22.1 || >=26.12.1');
+  assert.match(deployScript, /Patched Node\.js 22\.23\.4/);
+  assert.equal((await fs.readFile(new URL('../.nvmrc', import.meta.url), 'utf8')).trim(), '26.12.1');
 });
 
 test('does not share one lock listener between Node cluster workers', async t => {

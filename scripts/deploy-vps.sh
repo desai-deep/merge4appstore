@@ -117,9 +117,11 @@ for command_directory in \
   CRON_COMMAND_PATH="${CRON_COMMAND_PATH:+$CRON_COMMAND_PATH:}$command_directory"
 done
 "$NODE_BINARY" -e '
-  const [major, minor] = process.versions.node.split(".").map(Number);
-  if (major < 20) {
-    console.error(`Node.js 20.0.0 or newer is required; found ${process.versions.node}`);
+  const [major, minor, patch] = process.versions.node.split(".").map(Number);
+  const minimum = { 22: [23, 4], 24: [22, 1], 26: [12, 1] }[major];
+  const supported = major > 26 || (minimum && (minor > minimum[0] || (minor === minimum[0] && patch >= minimum[1])));
+  if (!supported) {
+    console.error(`Patched Node.js 22.23.4, 24.22.1, or 26.12.1 or newer on those release lines is required; found ${process.versions.node}`);
     process.exit(1);
   }
 '
@@ -1146,8 +1148,11 @@ validate_pm2_release() {
           || requiredFilters.some(filter => !pm2Environment.filter_env.includes(filter))) {
           throw new Error(`PM2 worker ${processInfo.pm_id} has an invalid runtime configuration`);
         }
-        const workerNodeMajor = Number(String(pm2Environment.node_version || "").split(".")[0]);
-        if (!Number.isSafeInteger(workerNodeMajor) || workerNodeMajor < 20) {
+        const version = /^(\d+)\.(\d+)\.(\d+)$/.exec(pm2Environment.node_version || "");
+        const [major, minor, patch] = version ? version.slice(1).map(Number) : [];
+        const minimum = { 22: [23, 4], 24: [22, 1], 26: [12, 1] }[major];
+        const supported = major > 26 || (minimum && (minor > minimum[0] || (minor === minimum[0] && patch >= minimum[1])));
+        if (!supported) {
           throw new Error(`PM2 worker ${processInfo.pm_id} uses unsupported Node.js ${pm2Environment.node_version || "unknown"}`);
         }
         if (fs.realpathSync(pm2Environment.pm_cwd) !== expectedCwd || fs.realpathSync(pm2Environment.pm_exec_path) !== expectedScript) {
@@ -2603,8 +2608,8 @@ cmp -s -- "$CONTROL_WEBHOOK_ENV" "$candidate_secret" \
 
 echo "Installing and verifying immutable release $DEPLOY_SHA..."
 # The required Actions test job already runs the complete suite and profile
-# validation on this exact DEPLOY_SHA with Node 20. Re-running source-layout
-# tests from a git archive on the production host is both redundant and unsafe:
+# validation on this exact DEPLOY_SHA with the patched Node.js version pinned
+# in .nvmrc. Re-running source-layout tests from a git archive on the production host is both redundant and unsafe:
 # the archive has no .git directory, the deployer intentionally uses umask 077,
 # and the live transaction state must never become a unit-test fixture. Keep
 # host verification bounded to installing the lockfile and validating the
