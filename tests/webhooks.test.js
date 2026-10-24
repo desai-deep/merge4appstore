@@ -523,6 +523,19 @@ test('production pushes rebase beta only when enabled, independently of release 
   }
 });
 
+test('does not rebase beta onto itself when production and beta use the same branch', () => {
+  const jobs = jobsForGitHubEvent({
+    ...profile,
+    repository: { ...profile.repository, production_branch: 'main', beta_branch: 'main' },
+    auto_rebase_pull_requests: true,
+    release_pull_request: false,
+  }, 'push', {
+    ref: 'refs/heads/main', after: 'abc', repository: { full_name: 'example/ios' },
+  }, 'single-branch');
+  assert.equal(jobs.some(job => job.mode === 'rebase-beta'), false);
+  assert.equal(jobs.some(job => job.mode === 'rebase-prs'), true);
+});
+
 test('reconciles a configured release PR on beta and production pushes', () => {
   const releaseProfile = {
     ...profile,
