@@ -608,7 +608,8 @@ label write, release-PR creation and updates still succeed and the service logs
 a warning; a later reconciliation retries the label.
 
 With `auto_rebase_pull_requests: true`, production pushes also rebase the
-configured beta branch onto production, so hotfixes reach development without
+configured beta branch onto production after starting production work, so hotfixes
+reach development without
 merging unfinished development changes into production. This works independently
 of `release_pull_request`. An isolated checkout preserves merge topology and
 pushes with an explicit force-with-lease; concurrent beta updates reject the

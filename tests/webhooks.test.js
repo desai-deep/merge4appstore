@@ -519,6 +519,7 @@ test('production pushes rebase beta only when enabled, independently of release 
     const jobs = jobsForGitHubEvent({ ...profile, auto_rebase_pull_requests: enabled }, 'push', payload, 'hotfix');
     assert.equal(jobs.some(job => job.mode === 'rebase-beta'), enabled);
     assert.equal(jobs.some(job => job.mode === 'trigger' && job.purpose === 'production'), true);
+    if (enabled) assert.ok(jobs.findIndex(job => job.mode === 'trigger') < jobs.findIndex(job => job.mode === 'rebase-beta'));
   }
 });
 
@@ -539,9 +540,9 @@ test('reconciles a configured release PR on beta and production pushes', () => {
   assert.deepEqual(jobsForGitHubEvent(releaseProfile, 'push', {
     ref: 'refs/heads/main', after: 'def', repository,
   }, 'production-push'), [
-    { mode: 'rebase-beta', deliveryId: 'production-push' },
     { mode: 'release-pr', deliveryId: 'production-push' },
     { mode: 'trigger', purpose: 'production', commitSha: 'def', branch: 'main', deliveryId: 'production-push' },
+    { mode: 'rebase-beta', deliveryId: 'production-push' },
   ]);
 });
 
