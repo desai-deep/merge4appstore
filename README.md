@@ -607,6 +607,19 @@ the label. If that permission is unavailable or GitHub temporarily rejects the
 label write, release-PR creation and updates still succeed and the service logs
 a warning; a later reconciliation retries the label.
 
+With `auto_rebase_pull_requests: true`, production pushes also rebase the
+configured beta branch onto production after starting production work, so hotfixes
+reach development without
+merging unfinished development changes into production. This works independently
+of `release_pull_request`. An isolated checkout preserves merge topology and
+pushes with an explicit force-with-lease; concurrent beta updates reject the
+push and retry through the delivery queue. Conflicts leave the remote branch
+unchanged and open or update a GitHub issue for manual resolution. Branch rules
+must permit the automation to update the beta branch with rewritten history.
+The resulting beta push runs the usual beta build and feature-PR rebases.
+Production pushes already contained in beta do nothing. Dry runs check the
+rebase locally without pushing or opening issues.
+
 This policy and its GitHub writes live in merge4appstore; app repositories do
 not need a release-PR workflow or checkout script.
 

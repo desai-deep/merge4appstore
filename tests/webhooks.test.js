@@ -513,6 +513,29 @@ test('allows profiles to enable automatic pull request rebasing', () => {
   ]);
 });
 
+test('production pushes rebase beta only when enabled, independently of release PRs', () => {
+  const payload = { ref: 'refs/heads/main', after: 'def', repository: { full_name: 'example/ios' } };
+  for (const enabled of [false, true]) {
+    const jobs = jobsForGitHubEvent({ ...profile, auto_rebase_pull_requests: enabled }, 'push', payload, 'hotfix');
+    assert.equal(jobs.some(job => job.mode === 'rebase-beta'), enabled);
+    assert.equal(jobs.some(job => job.mode === 'trigger' && job.purpose === 'production'), true);
+    if (enabled) assert.ok(jobs.findIndex(job => job.mode === 'trigger') < jobs.findIndex(job => job.mode === 'rebase-beta'));
+  }
+});
+
+test('does not rebase beta onto itself when production and beta use the same branch', () => {
+  const jobs = jobsForGitHubEvent({
+    ...profile,
+    repository: { ...profile.repository, production_branch: 'main', beta_branch: 'main' },
+    auto_rebase_pull_requests: true,
+    release_pull_request: false,
+  }, 'push', {
+    ref: 'refs/heads/main', after: 'abc', repository: { full_name: 'example/ios' },
+  }, 'single-branch');
+  assert.equal(jobs.some(job => job.mode === 'rebase-beta'), false);
+  assert.equal(jobs.some(job => job.mode === 'rebase-prs'), true);
+});
+
 test('reconciles a configured release PR on beta and production pushes', () => {
   const releaseProfile = {
     ...profile,
@@ -532,6 +555,7 @@ test('reconciles a configured release PR on beta and production pushes', () => {
   }, 'production-push'), [
     { mode: 'release-pr', deliveryId: 'production-push' },
     { mode: 'trigger', purpose: 'production', commitSha: 'def', branch: 'main', deliveryId: 'production-push' },
+    { mode: 'rebase-beta', deliveryId: 'production-push' },
   ]);
 });
 

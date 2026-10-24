@@ -16,6 +16,7 @@
  *   node index.js notes              # Refresh TestFlight notes after a PR body edit
  *   node index.js release-notes      # Refresh notes for a submitted App Store release
  *   node index.js release-pr         # Create or update the beta-to-production release PR
+ *   node index.js rebase-beta        # Rebase beta onto production after hotfixes
  *   node index.js rebase-prs         # Rebase open PRs after the beta branch advances
  *   node index.js --config profiles/my-app.env
  *   node index.js --profile profiles/my-repository.yml
@@ -127,6 +128,7 @@ import {
   refreshTestFlightNotes,
 } from './lib/refresh-notes.js';
 import { reconcileReleasePullRequest } from './lib/release-pr.js';
+import { rebaseBetaBranch } from './lib/rebase-beta.js';
 import { rebaseOpenPullRequests } from './lib/rebase-prs.js';
 import { FileBuildStatusStore, reportXcodeBuildStatus } from './lib/build-status.js';
 import { FileVersionStateStore } from './lib/version-state.js';
@@ -165,7 +167,7 @@ async function main() {
 
   // Validate required environment variables
   const requiredSharedVars = ['GITHUB_REPO_OWNER', 'GITHUB_REPO_NAME'];
-  if (!['release-pr', 'rebase-prs', 'build-status'].includes(mode)) requiredSharedVars.push(
+  if (!['release-pr', 'rebase-prs', 'rebase-beta', 'build-status'].includes(mode)) requiredSharedVars.push(
     'APP_STORE_CONNECT_API_KEY_ID',
     'APP_STORE_CONNECT_ISSUER_ID',
     'APP_STORE_CONNECT_API_KEY_CONTENT',
@@ -268,6 +270,14 @@ async function main() {
         commitSha: process.env.BUILD_COMMIT_SHA || null,
         completedAt: process.env.BUILD_COMPLETED_AT || null,
       }, new FileBuildStatusStore());
+    }
+
+    if (mode === 'rebase-beta') {
+      if (!repositoryProfile) throw new Error('rebase-beta mode requires --profile');
+      const policy = resolveAutoRebasePullRequests(repositoryProfile);
+      if (!policy.enabled) throw new Error('automatic pull request rebasing is disabled');
+      const github = await createGitHub();
+      await rebaseBetaBranch(github, CONFIG.productionBranch, policy.baseBranch, DRY_RUN, log);
     }
 
     if (mode === 'rebase-prs') {
