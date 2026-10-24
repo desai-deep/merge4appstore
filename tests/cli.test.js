@@ -86,3 +86,7 @@ test('manual all ignores stale webhook scope while explicit expiry preserves it'
   assert.deepEqual(expiryScope('all', environment), {});
   assert.deepEqual(expiryScope('expire', environment), { runId: 'run', branch: 'feature', pullRequest: '42' });
 });
+
+test('accepts beta branch rebasing mode', () => {
+  assert.equal(parseCliArgs(['rebase-beta'], '/srv/merge4appstore', {}).mode, 'rebase-beta');
+});
