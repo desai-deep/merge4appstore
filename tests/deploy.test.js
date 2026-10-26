@@ -856,3 +856,38 @@ test('merge conflict resolutions cannot promote a preview with different content
     assert.equal(submitted, false);
   });
 });
+
+test('switching to a public workflow cannot resubmit already-live code as a new version', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    let queriedCandidates = false;
+    const asc = createASC({
+      getLiveProductionBuild: async () => ({ live: true, version: '1.11', buildNumber: '1725', buildId: 'live' }),
+      getBuildSource: async id => { assert.equal(id, 'live'); return { found: true, commitSha: 'merge' }; },
+      getTestFlightReadyBuilds: async () => { queriedCandidates = true; return [{ buildId: 'old-beta', version: '1.12', buildNumber: '1723' }]; },
+    });
+    await runDeployCheck(asc, promotionGitHub(), false, { productionPullRequests: true });
+    assert.equal(queriedCandidates, false);
+  });
+});
+
+test('a new production merge can promote a preview while the older merge remains live', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    let submitted = false;
+    const asc = createASC({
+      getLiveProductionBuild: async () => ({ live: true, version: '1.11', buildNumber: '1725', buildId: 'live' }),
+      getBuildSource: async id => ({ found: true, commitSha: id === 'live' ? 'previous-production' : 'preview', workflowId: 'workflow-1' }),
+      getTestFlightReadyBuilds: async () => [{ buildId: 'new-preview', version: '1.12', buildNumber: '1773' }],
+      submitForReview: async () => { submitted = true; },
+    });
+    await runDeployCheck(asc, promotionGitHub(), false, { productionPullRequests: true });
+    assert.equal(submitted, true);
+  });
+});
+
+test('unverifiable live source cannot approve another preview submission', async () => {
+  const asc = createASC({
+    getLiveProductionBuild: async () => ({ live: true, buildNumber: '1725', buildId: 'live' }),
+    getBuildSource: async () => ({ found: false }),
+  });
+  await assert.rejects(runDeployCheck(asc, promotionGitHub(), false, { productionPullRequests: true }), /Could not verify the live production source/);
+});
