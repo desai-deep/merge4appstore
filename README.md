@@ -633,10 +633,13 @@ update while App Store Connect still permits it. Repository-managed
 
 ### Test production builds before merging
 
-Set `build.production_pr_builds: true` to choose builds by PR target. A PR to
-`repository.beta_branch` uses the `pull_request` workflow/app (configure UAT
-there). A PR to `repository.production_branch`, including the automated release
-PR, uses the managed `production` workflow/app and production marketing version.
+Set `build.production_pr_builds: true` to choose builds by PR target. PRs and pushes to
+`repository.beta_branch` use the `pull_request` workflow/app: configure your
+internal-testing workflow there, with or without a separate UAT app. A PR to
+`repository.production_branch`, including the automated release PR, uses the
+managed `production` route and production marketing version. Point that route
+at your public-testing workflow (for example, `workflow: beta`); the purpose
+name does not require a workflow named production.
 Retargeting queues the newly selected workflow. Production pushes reconcile
 submission instead of starting another build.
 
@@ -650,10 +653,12 @@ This gate also applies to scheduled reconciliation and completion callbacks,
 regardless of missed-build recovery settings. Direct production commits need an
 explicit matching build because this mode does not build on production pushes.
 
-The production workflow must upload App Store-eligible builds to TestFlight and
+The workflow selected for the production route must upload App Store-eligible
+builds to TestFlight, distribute them to the intended tester groups, and
 match `automation.deploy`. Disable native push triggers on that workflow if
-configured. Existing profiles keep their previous routing until this setting is
-enabled. TestFlight testers may still need to select the resulting build in
+configured. The app-owned version adapter must select `productionVersion` for this public-
+testing workflow, and `developmentVersion` for internal testing. Existing
+profiles keep their previous routing until this setting is enabled. TestFlight testers may still need to select the resulting build in
 App Store Connect, depending on the workflow's distribution post-actions.
 
 ### Pull-only Xcode versions
