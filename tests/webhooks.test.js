@@ -2719,3 +2719,14 @@ test('closing a production preview PR does not expire the reusable production bu
     pull_request: { number: 147, head: { sha: 'head', ref: 'hotfix' }, base: { ref: 'main' } },
   }, 'close'), []);
 });
+
+
+test('target routing uses internal testing for beta branch pushes too', () => {
+  const jobs = jobsForGitHubEvent(previewProfile(), 'push', {
+    ref: 'refs/heads/develop', after: 'head', repository: { full_name: 'example/ios' },
+  }, 'develop-internal');
+  const trigger = jobs.find(job => job.mode === 'trigger');
+  assert.equal(trigger.purpose, 'pull_request');
+  assert.equal(trigger.branch, 'develop');
+  assert.equal(trigger.pullRequest, undefined);
+});
