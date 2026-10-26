@@ -631,6 +631,31 @@ withdraws, rebuilds, or resubmits the version; it only attempts the metadata
 update while App Store Connect still permits it. Repository-managed
 `en-US/whats_new.txt` remains authoritative and is not replaced by the PR title.
 
+### Test production builds before merging
+
+Set `build.production_pr_builds: true` to choose builds by PR target. A PR to
+`repository.beta_branch` uses the `pull_request` workflow/app (configure UAT
+there). A PR to `repository.production_branch`, including the automated release
+PR, uses the managed `production` workflow/app and production marketing version.
+Retargeting queues the newly selected workflow. Production pushes reconcile
+submission instead of starting another build.
+
+Production uploads remain in TestFlight until their PR is merged. Submission
+requires the exact merged PR head and an identical Git tree to current production,
+so squash and merge commits can promote the already-tested binary. An open PR,
+a superseded head, or merge-time conflict resolution with different contents
+cannot be submitted. If the merged contents differ, build and test a new matching
+candidate; the service does not silently promote the stale preview or rebuild it.
+This gate also applies to scheduled reconciliation and completion callbacks,
+regardless of missed-build recovery settings. Direct production commits need an
+explicit matching build because this mode does not build on production pushes.
+
+The production workflow must upload App Store-eligible builds to TestFlight and
+match `automation.deploy`. Disable native push triggers on that workflow if
+configured. Existing profiles keep their previous routing until this setting is
+enabled. TestFlight testers may still need to select the resulting build in
+App Store Connect, depending on the workflow's distribution post-actions.
+
 ### Pull-only Xcode versions
 
 merge4appstore keeps the current marketing versions as small, durable state

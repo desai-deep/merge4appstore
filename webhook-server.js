@@ -91,6 +91,7 @@ export function jobEnvironment(job, baseEnvironment = process.env) {
   if (job.purpose) environment.BUILD_PURPOSE = job.purpose;
   if (job.commitSha) environment.BUILD_COMMIT_SHA = job.commitSha;
   if (job.branch) environment.BUILD_BRANCH = job.branch;
+  if (job.targetBranch) environment.BUILD_TARGET_BRANCH = job.targetBranch;
   if (job.pullRequest) environment.BUILD_PULL_REQUEST = job.pullRequest;
   if (job.deliveryId) environment.BUILD_SOURCE_DELIVERY_ID = job.deliveryId;
   if (job.installationId) {

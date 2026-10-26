@@ -508,3 +508,16 @@ test('publishes merged PR titles and test instructions through the beta refresh 
     notes: '- Freshen playback controls\n\n  Try pausing.\n  ## Offline\n  Try airplane mode.\n- #123 Improve startup',
   }]);
 });
+
+test('refreshes the selected production preview notes after its squash merge', async () => {
+  let updated = false;
+  const { asc, github } = appStoreReleaseNoteFixture({ update: async () => { updated = true; } });
+  github.productionBranch = 'main';
+  github.getBranchSnapshot = ref => ({ sha: ref === 'main' ? RELEASE_COMMIT : ref, treeSha: 'tree' });
+  github.findPRFromCommitAsync = async () => '65';
+  github.getPRDetailsAsync = async () => ({ title: 'Updated title', headRefOid: 'release-head' });
+  asc.getBuildsForWorkflowCommit = async (_workflow, sha) => sha === 'release-head' ? [{ buildId: 'build-176' }] : [];
+  const result = await refreshAppStoreReleaseNotes(asc, github, refreshReleaseOptions({ productionPullRequests: true }));
+  assert.equal(result.updated, 1);
+  assert.equal(updated, true);
+});
