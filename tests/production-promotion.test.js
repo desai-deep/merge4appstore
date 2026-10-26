@@ -33,3 +33,13 @@ test('fails closed when GitHub cannot identify the merged PR head', async () => 
   source.getPRDetailsAsync = async () => null;
   await assert.rejects(resolveProductionPromotion(source), /Could not resolve/);
 });
+
+test('historical promotions resolve against their merge commit after production advances', async () => {
+  const source = github();
+  source.getBranchSnapshot = ref => ref === 'main'
+    ? { sha: 'new-production', treeSha: 'new-tree' }
+    : { sha: ref, treeSha: 'old-tree' };
+  const promotion = await resolveProductionPromotion(source, 'older-merge');
+  assert.equal(promotion.commitSha, 'older-merge');
+  assert.equal(promotion.previewCommitSha, 'tested-head');
+});
