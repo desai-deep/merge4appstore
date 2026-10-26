@@ -649,7 +649,10 @@ so squash and merge commits can promote the already-tested binary. An open PR,
 a superseded head, or merge-time conflict resolution with different contents
 cannot be submitted. If the merged contents differ, build and test a new matching
 candidate; the service does not silently promote the stale preview or rebuild it.
-This gate also applies to scheduled reconciliation and completion callbacks,
+Once the approved production merge is already live, another build cannot be
+submitted until a new merge approves new production contents. This also prevents
+older beta builds from becoming new releases when the configured workflow changes.
+The live build source must be verifiable. This gate also applies to scheduled reconciliation and completion callbacks,
 regardless of missed-build recovery settings. Direct production commits need an
 explicit matching build because this mode does not build on production pushes.
 
