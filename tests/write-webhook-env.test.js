@@ -180,3 +180,19 @@ test('loads only the complete webhook-secret allowlist', t => {
     requireAll: true,
   }), /missing required keys: GH_WEBHOOK_SECRET/);
 });
+
+test('new app build tokens survive encoded serialization and loading without opening arbitrary environment names', t => {
+  const complete = { ...requiredWebhookEnvironment, MERGE4APPSTORE_BUILD_TOKEN_NEW_APP: 'new-private-token' };
+  const encoded = serializeWebhookEnvironment(complete);
+  assert.deepEqual(parseEnvironment(encoded), complete);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'new-app-secrets-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const file = path.join(directory, 'webhook.env');
+  fs.writeFileSync(file, encoded, { mode: 0o600 });
+  const environment = {};
+  loadWebhookEnvironment(file, { environment });
+  assert.equal(environment.MERGE4APPSTORE_BUILD_TOKEN_NEW_APP, 'new-private-token');
+  for (const key of ['NODE_OPTIONS', 'MERGE4APPSTORE_BUILD_TOKEN_bad', 'MERGE4APPSTORE_BUILD_TOKEN_']) {
+    assert.throws(() => validateWebhookEnvironment({ ...complete, [key]: 'bad' }), /unexpected keys/);
+  }
+});
