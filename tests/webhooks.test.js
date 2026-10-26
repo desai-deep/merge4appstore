@@ -2685,3 +2685,37 @@ test('recovery waits for its current receipt before claiming more work', async t
   assert.equal(dispatched, 3);
   assert.equal((await deliveryStore.queueStatus()).pending, 0);
 });
+
+function previewProfile() {
+  return { ...profile, build: { ...profile.build, production_pr_builds: true }, release_pull_request: true };
+}
+
+test('production PR preview routing follows the target, including release PRs and retargets', () => {
+  for (const [head, base, purpose] of [
+    ['hotfix', 'main', 'production'], ['develop', 'main', 'production'], ['feature', 'develop', 'pull_request'],
+  ]) {
+    for (const action of ['opened', 'reopened', 'synchronize', 'edited']) {
+      const jobs = jobsForGitHubEvent(previewProfile(), 'pull_request', {
+        action, changes: action === 'edited' ? { base: {} } : undefined,
+        repository: { full_name: 'example/ios' },
+        pull_request: { number: 147, head: { sha: 'head', ref: head }, base: { ref: base } },
+      }, 'preview');
+      assert.deepEqual(jobs, [{ mode: 'trigger', purpose, commitSha: 'head', branch: head, pullRequest: '147', targetBranch: base, deliveryId: 'preview' }]);
+    }
+  }
+});
+
+test('merging production preview PRs submits without queuing another build', () => {
+  const jobs = jobsForGitHubEvent(previewProfile(), 'push', {
+    ref: 'refs/heads/main', after: 'merge', repository: { full_name: 'example/ios' },
+  }, 'merge');
+  assert.equal(jobs.some(job => job.mode === 'trigger'), false);
+  assert.equal(jobs.some(job => job.mode === 'deploy'), true);
+});
+
+test('closing a production preview PR does not expire the reusable production build', () => {
+  assert.deepEqual(jobsForGitHubEvent(previewProfile(), 'pull_request', {
+    action: 'closed', repository: { full_name: 'example/ios' },
+    pull_request: { number: 147, head: { sha: 'head', ref: 'hotfix' }, base: { ref: 'main' } },
+  }, 'close'), []);
+});

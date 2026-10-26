@@ -855,3 +855,15 @@ test('strict expiry lookup propagates GitHub failures for durable retry', () => 
   assert.throws(() => github.findClosedPRForBuild('abc', null, 'feature', { strict: true }), /rate limit/);
   assert.equal(github.findClosedPRForBuild('abc', null, 'feature'), null);
 });
+
+test('historical preview attribution requires the exact merged head targeting production', async () => {
+  const sha = 'a'.repeat(40);
+  const github = new GitHubAPI('example', 'ios', 'main', { mirror: null });
+  github.requestJson = async () => [
+    { number: 1, head: { sha }, base: { ref: 'main' }, merged_at: null },
+    { number: 2, head: { sha }, base: { ref: 'develop' }, merged_at: 'date', merge_commit_sha: 'b'.repeat(40) },
+    { number: 3, head: { sha: 'c'.repeat(40) }, base: { ref: 'main' }, merged_at: 'date', merge_commit_sha: 'b'.repeat(40) },
+    { number: 4, head: { sha }, base: { ref: 'main' }, merged_at: 'date', merge_commit_sha: 'b'.repeat(40) },
+  ];
+  assert.deepEqual(await github.findMergedPullRequestForHeadAsync(sha), { number: '4', mergeCommitSha: 'b'.repeat(40) });
+});

@@ -127,3 +127,24 @@ test('expires published beta builds before returning for an existing release tag
 
   assert.deepEqual(expiredBuilds, ['beta-build']);
 });
+
+test('comments on a historical preview PR when a newer merge has reached main', async () => {
+  const comments = [];
+  const asc = {
+    getLiveProductionBuild: async () => ({ live: true, version: '1.4', buildNumber: '200', buildId: 'live' }),
+    getBuildSource: async () => ({ found: true, commitSha: 'preview', workflowId: 'production' }),
+  };
+  const tags = { tagExists: () => false, commitExists: () => true, getCommitMessage: () => 'Preview', createTag: () => {} };
+  const github = {
+    productionBranch: 'main',
+    findPRFromCommit: () => null,
+    findMergedPullRequestForHeadAsync: async () => ({ number: '147', mergeCommitSha: 'older-merge' }),
+    findPRFromCommitAsync: async sha => { assert.equal(sha, 'older-merge'); return '147'; },
+    getPRDetailsAsync: async () => ({ headRefOid: 'preview' }),
+    getBranchSnapshot: ref => { assert.notEqual(ref, 'main'); return { sha: ref, treeSha: 'old-tree' }; },
+    addPRComment: (...args) => { comments.push(args); return true; },
+  };
+  await runReleaseSync(asc, tags, github, false, false, { productionPullRequests: true });
+  assert.equal(comments[0][0], '147');
+  assert.match(comments[0][1], /released to the App Store/);
+});

@@ -306,6 +306,7 @@ async function main() {
         const { asc, github } = await createClients();
         await refreshAppStoreReleaseNotes(asc, github, {
           workflowId: automation.workflowId,
+          productionPullRequests: repositoryProfile?.build?.production_pr_builds === true,
           commitSha: process.env.BUILD_COMMIT_SHA,
           pullRequest: process.env.BUILD_PULL_REQUEST,
           metadataPath: automation.metadataPath,
@@ -367,6 +368,7 @@ async function main() {
       if (automation.enabled) {
         const { asc, github } = await createClients();
         await runDeployCheck(asc, github, DRY_RUN, {
+          productionPullRequests: repositoryProfile?.build?.production_pr_builds === true,
           metadataPath: automation.metadataPath,
           reconcileMetadata: process.env.RECONCILE_METADATA === 'true',
           ...versionLifecycle,
@@ -392,6 +394,7 @@ async function main() {
         await runReleaseSync(asc, tags, github, DRY_RUN, true, {
           ...versionLifecycle,
           publishedBetaBuilds,
+          productionPullRequests: repositoryProfile?.build?.production_pr_builds === true,
         });
       }
     }

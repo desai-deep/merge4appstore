@@ -806,3 +806,53 @@ test('does not resubmit a draft build with unresolved review issues when no newe
     assert.equal(submitted, false);
   });
 });
+
+function promotionGitHub({ merged = true, headTree = 'tree' } = {}) {
+  return createGitHub({
+    productionBranch: 'main',
+    getBranchSnapshot: ref => ({ sha: ref === 'main' ? 'merge' : ref, treeSha: ref === 'main' ? 'tree' : headTree }),
+    findPRFromCommitAsync: async () => merged ? '147' : null,
+    getPRDetailsAsync: async () => ({ headRefOid: 'preview' }),
+    getProductionHead: () => 'merge',
+  });
+}
+
+test('unmerged production previews stay in TestFlight even with recovery disabled', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    let selected = false;
+    const asc = createASC({
+      getTestFlightReadyBuilds: async () => [{ buildId: 'preview-build', buildNumber: '200', version: '1.4' }],
+      getBuildSource: async () => ({ found: true, commitSha: 'preview', workflowId: 'workflow-1' }),
+      selectBuildForVersion: async () => { selected = true; },
+    });
+    await runDeployCheck(asc, promotionGitHub({ merged: false }), false, { productionPullRequests: true });
+    assert.equal(selected, false);
+  });
+});
+
+test('a merge promotes the exact preview build across differing merge and head SHAs', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    const events = [];
+    const asc = createASC({
+      getTestFlightReadyBuilds: async () => [{ buildId: 'preview-build', buildNumber: '200', version: '1.4' }],
+      getBuildSource: async () => ({ found: true, commitSha: 'preview', workflowId: 'workflow-1' }),
+      selectBuildForVersion: async (_version, id) => events.push(['selected', id]),
+      submitForReview: async () => events.push(['submitted']),
+    });
+    await runDeployCheck(asc, promotionGitHub(), false, { productionPullRequests: true });
+    assert.deepEqual(events, [['selected', 'preview-build'], ['submitted']]);
+  });
+});
+
+test('merge conflict resolutions cannot promote a preview with different contents', async () => {
+  await withWorkflowId('workflow-1', async () => {
+    let submitted = false;
+    const asc = createASC({
+      getTestFlightReadyBuilds: async () => [{ buildId: 'preview-build', buildNumber: '200', version: '1.4' }],
+      getBuildSource: async () => ({ found: true, commitSha: 'preview', workflowId: 'workflow-1' }),
+      submitForReview: async () => { submitted = true; },
+    });
+    await runDeployCheck(asc, promotionGitHub({ headTree: 'other-tree' }), false, { productionPullRequests: true });
+    assert.equal(submitted, false);
+  });
+});
