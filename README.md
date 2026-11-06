@@ -865,9 +865,9 @@ with that commit. When a workflow listing includes only the ID of a deleted
 source branch or PR, the service reads that exact Apple reference to recover
 its original branch name before checking current GitHub PR state. Missing
 references remain protected; transient lookup failures fail the job for retry.
-Source history follows same-workflow pagination, with a 25-page safety limit
-that fails rather than accepting an incomplete history. Builds whose Xcode
-records have been removed still require separate operator reconciliation.
+Recovery is limited to the exact configured cleanup workflow; deploy, sync
+and notes lookups retain their existing behavior. Builds whose Xcode records
+have been removed still require separate operator reconciliation.
 Use `DRY_RUN=true
 node index.js expire --profile ...` to preview every decision.
 

@@ -31,7 +31,7 @@ test('recovers the deleted branch for exact-build and unique-number lookups and 
       return deletedRef();
     };
     for (let repeat = 0; repeat < 2; repeat += 1) {
-      assert.deepEqual(await asc.getBuildSource('build-603', '603'), {
+      assert.deepEqual(await asc.getBuildSource('build-603', '603', null, { recoverSourceBranchForWorkflow: 'pr-workflow' }), {
         found: true, commitSha: 'original-before-rebase', sourceBranch: 'codex/merged',
         workflowId: 'pr-workflow', workflowName: 'Pull Requests',
       });
@@ -43,32 +43,32 @@ test('recovers the deleted branch for exact-build and unique-number lookups and 
 test('uses included branch metadata without an extra source request', async () => {
   const asc = api(); asc.loadCIBuildRuns = async () => [record({ branch: 'refs/heads/develop' })];
   asc.request = async () => assert.fail('included branch should be sufficient');
-  assert.equal((await asc.getBuildSource('build-603', '603')).sourceBranch, 'develop');
+  assert.equal((await asc.getBuildSource('build-603', '603', null, { recoverSourceBranchForWorkflow: 'pr-workflow' })).sourceBranch, 'develop');
 });
 
 test('retains unknown branches after a missing reference and never hides transient failures', async () => {
   const asc = api(); asc.loadCIBuildRuns = async () => [record()];
   asc.request = async () => { throw Object.assign(new Error('missing'), { statusCode: 404 }); };
-  assert.equal((await asc.getBuildSource('build-603', '603')).sourceBranch, null);
+  assert.equal((await asc.getBuildSource('build-603', '603', null, { recoverSourceBranchForWorkflow: 'pr-workflow' })).sourceBranch, null);
   const retry = api(); retry.loadCIBuildRuns = asc.loadCIBuildRuns;
   retry.request = async () => { throw Object.assign(new Error('rate limited'), { statusCode: 429 }); };
-  await assert.rejects(retry.getBuildSource('build-603', '603'), /rate limited/);
+  await assert.rejects(retry.getBuildSource('build-603', '603', null, { recoverSourceBranchForWorkflow: 'pr-workflow' }), /rate limited/);
   retry.request = async () => deletedRef();
-  assert.equal((await retry.getBuildSource('build-603', '603')).sourceBranch, 'codex/merged');
+  assert.equal((await retry.getBuildSource('build-603', '603', null, { recoverSourceBranchForWorkflow: 'pr-workflow' })).sourceBranch, 'codex/merged');
 });
 
 test('rejects a mismatched reference and recovers PR-only source relationships', async () => {
   const asc = api(); const row = record();
   asc.loadCIBuildRuns = async () => [row];
   asc.request = async () => ({ data: { ...deletedRef().data, id: 'wrong' } });
-  await assert.rejects(asc.getBuildSource('build-603', '603'), /mismatched/);
+  await assert.rejects(asc.getBuildSource('build-603', '603', null, { recoverSourceBranchForWorkflow: 'pr-workflow' }), /mismatched/);
   delete row.run.relationships.sourceBranchOrTag;
   row.run.relationships.pullRequest = { data: { id: 'pr-12', type: 'scmPullRequests' } };
   asc.request = async endpoint => {
     assert.equal(endpoint, '/scmPullRequests/pr-12');
     return { data: { id: 'pr-12', type: 'scmPullRequests', attributes: { sourceBranchName: 'feature/closed' } } };
   };
-  assert.equal((await asc.getBuildSource('build-603', '603')).sourceBranch, 'feature/closed');
+  assert.equal((await asc.getBuildSource('build-603', '603', null, { recoverSourceBranchForWorkflow: 'pr-workflow' })).sourceBranch, 'feature/closed');
 });
 
 test('sparse deleted-branch metadata expires a merged PR but still protects develop and open PRs', async t => {
@@ -95,37 +95,23 @@ test('sparse deleted-branch metadata expires a merged PR but still protects deve
   }
 });
 
-test('follows history pagination only when requested and rejects another workflow or origin', async () => {
-  const asc = api(); const calls = [];
-  const next = 'https://api.appstoreconnect.apple.com/v1/ciWorkflows/workflow/buildRuns?cursor=older';
-  asc.request = async endpoint => {
-    calls.push(endpoint);
-    return endpoint.includes('cursor=older')
-      ? { data: [{ id: 'old-run' }], included: [{ id: 'old-reference' }] }
-      : { data: [{ id: 'new-run' }], included: [], links: { next } };
-  };
-  assert.deepEqual((await asc.getBuildRuns('workflow', 200)).data.map(x => x.id), ['new-run']);
-  assert.equal(calls.length, 1);
-  const history = await asc.getBuildRuns('workflow', 200, { allPages: true });
-  assert.deepEqual(history.data.map(x => x.id), ['new-run', 'old-run']);
-  assert.equal(history.included[0].id, 'old-reference');
-  for (const invalid of ['https://evil.example/v1/ciWorkflows/workflow/buildRuns', 'https://api.appstoreconnect.apple.com/v1/ciWorkflows/foreign/buildRuns']) {
-    asc.request = async () => ({ data: [], links: { next: invalid } });
-    await assert.rejects(asc.getBuildRuns('workflow', 200, { allPages: true }), /Invalid Apple/);
-  }
-  asc.request = async () => ({ data: [], links: { next } });
-  await assert.rejects(asc.getBuildRuns('workflow', 200, { allPages: true }), /repeated a page/);
+test('shared source lookups and another workflow do not request recovery metadata', async () => {
+  const asc = api(); asc.loadCIBuildRuns = async () => [record()];
+  asc.request = async () => assert.fail('shared or unrelated lookup must not fetch recovery metadata');
+  assert.equal((await asc.getBuildSource('build-603', '603')).sourceBranch, null);
+  assert.equal((await asc.getBuildSource('build-603', '603', null, { recoverSourceBranchForWorkflow: 'other-workflow' })).sourceBranch, null);
 });
 
-test('a failed history request cannot poison the cached source history', async () => {
-  const asc = api(); let first = true;
-  asc.getConfiguredCIProducts = async () => [{ id: 'app-product' }];
-  asc.getWorkflows = async () => [{ id: 'workflow-1' }, { id: 'workflow-2' }];
-  asc.getBuildRuns = async (id, _limit, options) => {
-    assert.equal(options.allPages, true);
-    if (id === 'workflow-2' && first) { first = false; throw new Error('temporary failure'); }
-    return { data: [{ id: `${id}-run` }] };
+test('completion-context recovery is restricted to the configured workflow', async () => {
+  const asc = api(); let sourceRequests = 0;
+  asc.request = async endpoint => {
+    if (endpoint === '/scmGitReferences/deleted-ref') { sourceRequests += 1; return deletedRef(); }
+    if (endpoint.includes('/builds?')) return { data: [{ id: 'build-603', attributes: { version: '603', processingState: 'VALID' } }] };
+    return { data: { ...record().run, relationships: { ...record().run.relationships, workflow: { data: { id: 'pr-workflow' } } } } };
   };
-  await assert.rejects(asc.loadCIBuildRuns(), /temporary failure/);
-  assert.equal((await asc.loadCIBuildRuns()).length, 2);
+  assert.equal((await asc.getBuildRunNotesContext('run-603')).branch, null);
+  assert.equal((await asc.getBuildRunNotesContext('run-603', { recoverSourceBranchForWorkflow: 'other-workflow' })).branch, null);
+  assert.equal(sourceRequests, 0);
+  assert.equal((await asc.getBuildRunNotesContext('run-603', { recoverSourceBranchForWorkflow: 'pr-workflow' })).branch, 'codex/merged');
+  assert.equal(sourceRequests, 1);
 });
