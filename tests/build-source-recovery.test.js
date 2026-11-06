@@ -115,3 +115,15 @@ test('completion-context recovery is restricted to the configured workflow', asy
   assert.equal((await asc.getBuildRunNotesContext('run-603', { recoverSourceBranchForWorkflow: 'pr-workflow' })).branch, 'codex/merged');
   assert.equal(sourceRequests, 1);
 });
+
+test('a failed source-history request cannot poison the cached source history', async () => {
+  const asc = api(); let first = true;
+  asc.getConfiguredCIProducts = async () => [{ id: 'app-product' }];
+  asc.getWorkflows = async () => [{ id: 'workflow-1' }, { id: 'workflow-2' }];
+  asc.getBuildRuns = async id => {
+    if (id === 'workflow-2' && first) { first = false; throw new Error('temporary failure'); }
+    return { data: [{ id: `${id}-run` }] };
+  };
+  await assert.rejects(asc.loadCIBuildRuns(), /temporary failure/);
+  assert.equal((await asc.loadCIBuildRuns()).length, 2);
+});
