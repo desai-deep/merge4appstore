@@ -864,7 +864,8 @@ drops only the source branch, cleanup requires exactly one closed PR associated
 with that commit. When a workflow listing includes only the ID of a deleted
 source branch or PR, the service reads that exact Apple reference to recover
 its original branch name before checking current GitHub PR state. Missing
-references remain protected; transient lookup failures fail the job for retry.
+references use the existing exact-commit PR check; transient lookup failures
+fail the job for retry.
 Recovery is limited to the exact configured cleanup workflow; deploy, sync
 and notes lookups retain their existing behavior. Builds whose Xcode records
 have been removed still require separate operator reconciliation.
