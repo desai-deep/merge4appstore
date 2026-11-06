@@ -861,7 +861,15 @@ a workflow other than the configured PR workflow, their PR is still open or
 ambiguous, they came from the beta or production branch, or they are selected
 for an App Store version. If Apple retains the exact commit and workflow but
 drops only the source branch, cleanup requires exactly one closed PR associated
-with that commit. Use `DRY_RUN=true
+with that commit. When a workflow listing includes only the ID of a deleted
+source branch or PR, the service reads that exact Apple reference to recover
+its original branch name before checking current GitHub PR state. Missing
+references use the existing exact-commit PR check; transient lookup failures
+fail the job for retry.
+Recovery is limited to the exact configured cleanup workflow; deploy, sync
+and notes lookups retain their existing behavior. Builds whose Xcode records
+have been removed still require separate operator reconciliation.
+Use `DRY_RUN=true
 node index.js expire --profile ...` to preview every decision.
 
 ## License
