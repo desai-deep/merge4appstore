@@ -932,8 +932,10 @@ test('owned issue recovery leaves a contributor issue open and closes the servic
     return '{}';
   };
   assert.equal(github.closeIssueByMarker(marker, 'Recovered', { ownedOnly: true }).number, 2);
-  assert.ok(calls[1].includes('repos/example/ios/issues/2/comments'));
-  assert.ok(calls[2].includes('repos/example/ios/issues/2'));
+  assert.equal(calls.length, 2);
+  assert.ok(calls[1].includes('PATCH'));
+  assert.ok(calls[1].includes('repos/example/ios/issues/2'));
+  assert.ok(calls[1].includes(`body=${marker}\nRecovered`));
 });
 
 test('untrusted markers cause a new service alert rather than overwriting another author', () => {
@@ -974,5 +976,59 @@ test('recorded issue recovery verifies ownership without scanning repository his
   assert.equal(github.closeIssueByMarker(marker, 'Recovered', { ownedOnly: true, issueNumber: 1101 }).number, 1101);
   assert.ok(!calls[0].includes('--paginate'));
   assert.ok(calls[0].includes('number=1101'));
-  assert.ok(calls[1].includes('repos/example/ios/issues/1101/comments'));
+  assert.equal(calls.length, 2);
+  assert.ok(calls[1].includes('PATCH'));
+  assert.ok(calls[1].includes('repos/example/ios/issues/1101'));
+  assert.ok(calls[1].includes(`body=${marker}\nRecovered`));
+});
+
+test('deleted recorded alerts fall back to owned discovery and can be replaced', () => {
+  for (const commandFails of [false, true]) {
+    const github = new GitHubAPI('example', 'ios');
+    const marker = '<!-- trigger:deleted -->';
+    const calls = [];
+    github.exec = args => {
+      calls.push(args);
+      if (args.includes('number=1')) {
+        const response = JSON.stringify({ data: { repository: { issue: null } }, errors: [{ type: 'NOT_FOUND', path: ['repository', 'issue'] }] });
+        if (commandFails) throw Object.assign(new Error('gh exited 1'), { stdout: response });
+        return response;
+      }
+      if (args.includes('--paginate')) return JSON.stringify([{ data: { repository: { issues: { nodes: [] } } } }]);
+      return JSON.stringify({ number: 2, html_url: 'https://github.test/2' });
+    };
+    assert.equal(github.upsertIssue(marker, 'Blocked', 'Failure', { ownedOnly: true, issueNumber: 1 }).number, 2);
+    assert.ok(calls[1].includes('--paginate'));
+    assert.ok(calls[2].includes('POST'));
+  }
+});
+
+test('transient or inaccessible recorded issues cannot fall back or mutate GitHub', () => {
+  for (const response of [
+    { data: { repository: { issue: null } }, errors: [{ type: 'FORBIDDEN', path: ['repository', 'issue'] }] },
+    { data: { repository: null }, errors: [{ type: 'NOT_FOUND', path: ['repository'] }] },
+  ]) {
+    const github = new GitHubAPI('example', 'ios');
+    const calls = [];
+    github.exec = args => { calls.push(args); throw Object.assign(new Error('gh exited 1'), { stdout: JSON.stringify(response) }); };
+    assert.equal(github.upsertIssue('<!-- trigger -->', 'Blocked', 'Failure', { ownedOnly: true, issueNumber: 1 }), false);
+    assert.equal(calls.length, 1);
+  }
+});
+
+test('retrying a failed owned recovery makes one deterministic close operation without comments', () => {
+  const github = new GitHubAPI('example', 'ios');
+  const marker = '<!-- trigger:recovery -->';
+  const mutations = [];
+  github.exec = args => {
+    if (args.includes('graphql')) return JSON.stringify({ data: { repository: { issue: { number: 1, state: 'OPEN', body: marker, viewerDidAuthor: true } } } });
+    mutations.push(args);
+    if (mutations.length === 1) throw new Error('Temporary GitHub failure');
+    return '{}';
+  };
+  assert.throws(() => github.closeIssueByMarker(marker, 'Recovered', { ownedOnly: true, issueNumber: 1 }), /Temporary/);
+  github.closeIssueByMarker(marker, 'Recovered', { ownedOnly: true, issueNumber: 1 });
+  assert.deepEqual(mutations[0], mutations[1]);
+  assert.ok(mutations.every(args => args.includes('PATCH') && args.includes('state=closed') && !args.includes('POST')));
+  assert.ok(mutations[0].includes(`body=${marker}\nRecovered`));
 });
