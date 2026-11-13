@@ -493,6 +493,9 @@ Raw provider exceptions are never copied into GitHub alerts.
 Matching alerts must be authored by the active service credential and carry
 the exact marker on their first line. Lookup paginates the full comment or
 issue history, so copied markers and older alerts do not redirect recovery.
+Durable alert records under `build-status` skip GitHub lookup for ordinary
+successful triggers. Branch alerts retain their issue number for direct retry
+and recovery lookup, with full-history discovery for an unrecorded alert.
 
 Retries update the same alert. A later trigger that starts or finds a build for
 the same source updates the PR comment or closes the issue. This confirms that

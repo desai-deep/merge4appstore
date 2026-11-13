@@ -961,3 +961,18 @@ test('ownership lookup failures cannot modify comments or issues', () => {
   assert.throws(() => github.closeIssueByMarker('<!-- trigger -->', 'Recovered', { ownedOnly: true }), /ownership/);
   assert.ok(calls.every(args => !args.includes('--method')));
 });
+
+test('recorded issue recovery verifies ownership without scanning repository history', () => {
+  const github = new GitHubAPI('example', 'ios');
+  const marker = '<!-- trigger:owned -->';
+  const calls = [];
+  github.exec = args => {
+    calls.push(args);
+    if (args.includes('graphql')) return JSON.stringify({ data: { repository: { issue: { number: 1101, body: marker, viewerDidAuthor: true, state: 'OPEN' } } } });
+    return '{}';
+  };
+  assert.equal(github.closeIssueByMarker(marker, 'Recovered', { ownedOnly: true, issueNumber: 1101 }).number, 1101);
+  assert.ok(!calls[0].includes('--paginate'));
+  assert.ok(calls[0].includes('number=1101'));
+  assert.ok(calls[1].includes('repos/example/ios/issues/1101/comments'));
+});
