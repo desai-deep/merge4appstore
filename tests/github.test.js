@@ -867,3 +867,22 @@ test('historical preview attribution requires the exact merged head targeting pr
   ];
   assert.deepEqual(await github.findMergedPullRequestForHeadAsync(sha), { number: '4', mergeCommitSha: 'b'.repeat(40) });
 });
+
+test('recovery does not create a PR comment without an existing alert', () => {
+  const github = new GitHubAPI('example', 'ios');
+  const calls = [];
+  github.exec = args => { calls.push(args); return '[[]]'; };
+  assert.equal(github.upsertPRComment(12, '<!-- trigger:1 -->', 'Recovered', { create: false }), null);
+  assert.equal(calls.length, 1);
+});
+
+test('recovery updates an existing PR alert with creation disabled', () => {
+  const github = new GitHubAPI('example', 'ios');
+  const calls = [];
+  github.exec = args => {
+    calls.push(args);
+    return args.includes('--slurp') ? JSON.stringify([[{ id: 456, body: '<!-- trigger:1 --> blocked' }]]) : '';
+  };
+  assert.equal(github.upsertPRComment(12, '<!-- trigger:1 -->', 'Recovered', { create: false }), 'updated');
+  assert.ok(calls[1].includes('PATCH'));
+});

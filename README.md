@@ -484,6 +484,21 @@ incomplete operation remains visible.
 
 ### Webhook failure recovery
 
+Managed build triggers report provider failures directly on the affected PR
+using one updatable comment per workflow and PR. Branch triggers open or update
+a GitHub issue per workflow and branch (when repository issues are enabled).
+Missing or expired Apple agreements include Account Holder recovery steps;
+other errors include the HTTP status when available and point to worker logs.
+Raw provider exceptions are never copied into GitHub alerts.
+
+Retries update the same alert. A later trigger that starts or finds a build for
+the same source updates the PR comment or closes the issue. This confirms that
+a build run exists, not that the build succeeded. Ambiguous active runs and
+superseded intents do not clear alerts. Dry runs publish nothing. Alert
+publication is best effort and logs a warning on failure, preserving the
+original provider error and retry behavior. After fixing a blocker, retry the
+managed trigger if delivery retries have exhausted.
+
 The scheduled GitHub Actions health monitor opens or updates a marked issue if
 the public endpoint is unreachable, reports `ok: false`, or has a degraded
 delivery queue. Xcode Cloud failures for pull-request, beta, and production
