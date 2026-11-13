@@ -28,7 +28,7 @@ test('provider rejection comments on the PR and preserves the exact retryable er
   assert.equal(calls[0][1], '172');
   assert.match(calls[0][3], /Account Holder/);
   assert.match(calls[0][3], /abc123/);
-  assert.deepEqual(calls[0][4], { create: true });
+  assert.deepEqual(calls[0][4], { create: true, ownedOnly: true });
 });
 
 test('retries update the same alert; different PRs and workflows have distinct markers', async () => {
@@ -46,7 +46,7 @@ test('started and existing runs recover an existing comment without creating suc
     const { github, calls } = fixture();
     const result = { action, runId: 'run-1', executionProgress: 'COMPLETE', completionStatus: 'FAILED' };
     assert.equal(await runManagedBuildTrigger({ name: 'xcode_cloud', trigger: async () => result }, github, intent), result);
-    assert.deepEqual(calls[0][4], { create: false });
+    assert.deepEqual(calls[0][4], { create: false, ownedOnly: true });
     assert.match(calls[0][3], /Build trigger recovered/);
     assert.match(calls[0][3], /may have failed/);
     assert.match(calls[0][3], /run-1/);

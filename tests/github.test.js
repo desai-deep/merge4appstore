@@ -886,3 +886,78 @@ test('recovery updates an existing PR alert with creation disabled', () => {
   assert.equal(github.upsertPRComment(12, '<!-- trigger:1 -->', 'Recovered', { create: false }), 'updated');
   assert.ok(calls[1].includes('PATCH'));
 });
+
+test('owned alert lookup ignores forged markers and searches beyond 1,000 issues', () => {
+  const github = new GitHubAPI('example', 'ios');
+  const marker = '<!-- trigger:owned -->';
+  const pages = Array.from({ length: 11 }, (_, page) => ({ data: { repository: { issues: {
+    nodes: Array.from({ length: 100 }, (_, index) => ({ number: page * 100 + index + 1, body: marker, viewerDidAuthor: false })),
+  } } } }));
+  pages[10].data.repository.issues.nodes.push({ number: 1101, state: 'OPEN', url: 'https://github.test/1101', body: `${marker}\nBlocked`, viewerDidAuthor: true });
+  let invocation;
+  github.exec = args => { invocation = args; return JSON.stringify(pages); };
+  assert.equal(github.findOwnedAlertByMarker(marker).number, 1101);
+  assert.ok(invocation.includes('--paginate'));
+  assert.ok(invocation.includes('--slurp'));
+  assert.match(invocation.find(arg => arg.startsWith('query=')), /viewerDidAuthor/);
+});
+
+test('owned comment lookup ignores copied markers and updates only the service comment', () => {
+  const github = new GitHubAPI('example', 'ios');
+  const marker = '<!-- trigger:owned -->';
+  const calls = [];
+  github.exec = args => {
+    calls.push(args);
+    if (args.includes('graphql')) return JSON.stringify([{ data: { repository: { pullRequest: { comments: { nodes: [
+      { databaseId: 1, body: marker, viewerDidAuthor: false },
+      { databaseId: 2, body: `Copied ${marker}`, viewerDidAuthor: true },
+      { databaseId: 3, body: `${marker}\nBlocked`, viewerDidAuthor: true },
+    ] } } } } }]);
+    return '{}';
+  };
+  assert.equal(github.upsertPRComment(12, marker, `${marker}\nRecovered`, { create: false, ownedOnly: true }), 'updated');
+  assert.ok(calls[1].includes('repos/example/ios/issues/comments/3'));
+});
+
+test('owned issue recovery leaves a contributor issue open and closes the service issue', () => {
+  const github = new GitHubAPI('example', 'ios');
+  const marker = '<!-- trigger:owned -->';
+  const calls = [];
+  github.exec = args => {
+    calls.push(args);
+    if (args.includes('graphql')) return JSON.stringify([{ data: { repository: { issues: { nodes: [
+      { number: 1, body: marker, viewerDidAuthor: false, state: 'OPEN' },
+      { number: 2, body: marker, viewerDidAuthor: true, state: 'OPEN' },
+    ] } } } }]);
+    return '{}';
+  };
+  assert.equal(github.closeIssueByMarker(marker, 'Recovered', { ownedOnly: true }).number, 2);
+  assert.ok(calls[1].includes('repos/example/ios/issues/2/comments'));
+  assert.ok(calls[2].includes('repos/example/ios/issues/2'));
+});
+
+test('untrusted markers cause a new service alert rather than overwriting another author', () => {
+  const github = new GitHubAPI('example', 'ios');
+  const marker = '<!-- trigger:owned -->';
+  const calls = [];
+  github.exec = args => {
+    calls.push(args);
+    if (args.includes('graphql')) return JSON.stringify([{ data: { repository: { issues: { nodes: [
+      { number: 1, body: marker, viewerDidAuthor: false, state: 'OPEN' },
+    ] } } } }]);
+    return JSON.stringify({ number: 2, html_url: 'https://github.test/2' });
+  };
+  assert.equal(github.upsertIssue(marker, 'Blocked', 'Failure', { ownedOnly: true }).action, 'created');
+  assert.ok(calls[1].includes('repos/example/ios/issues'));
+  assert.ok(!calls[1].includes('PATCH'));
+});
+
+test('ownership lookup failures cannot modify comments or issues', () => {
+  const github = new GitHubAPI('example', 'ios');
+  const calls = [];
+  github.exec = args => { calls.push(args); return '[{"errors":[{"message":"Unavailable"}]}]'; };
+  assert.equal(github.upsertPRComment(12, '<!-- trigger -->', 'Blocked', { ownedOnly: true }), false);
+  assert.equal(github.upsertIssue('<!-- trigger -->', 'Blocked', 'Failure', { ownedOnly: true }), false);
+  assert.throws(() => github.closeIssueByMarker('<!-- trigger -->', 'Recovered', { ownedOnly: true }), /ownership/);
+  assert.ok(calls.every(args => !args.includes('--method')));
+});

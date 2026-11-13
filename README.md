@@ -490,6 +490,9 @@ a GitHub issue per workflow and branch (when repository issues are enabled).
 Missing or expired Apple agreements include Account Holder recovery steps;
 other errors include the HTTP status when available and point to worker logs.
 Raw provider exceptions are never copied into GitHub alerts.
+Matching alerts must be authored by the active service credential and carry
+the exact marker on their first line. Lookup paginates the full comment or
+issue history, so copied markers and older alerts do not redirect recovery.
 
 Retries update the same alert. A later trigger that starts or finds a build for
 the same source updates the PR comment or closes the issue. This confirms that
