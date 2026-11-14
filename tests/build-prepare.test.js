@@ -125,7 +125,7 @@ test('keeps the pull request description before commits for its first build', as
 
   const result = await generateTestFlightNotes({ profile, build, payload, asc, github });
 
-  assert.equal(result.text, 'Please verify playback and lock-screen controls.\n\nCommits in this pull request:\n\n• Add playback state\n• Fix lock screen');
+  assert.equal(result.text, 'Target branch: develop\n\nPlease verify playback and lock-screen controls.\n\nCommits in this pull request:\n\n• Add playback state\n• Fix lock screen');
   assert.deepEqual(result.warnings, ['No ancestor published build found; using all pull-request commits']);
 });
 
@@ -160,7 +160,7 @@ test('recovers pull request notes for an exact branch-fallback build', async () 
   });
 
   assert.deepEqual(lookups, [{ commit: COMMIT, base: 'preview', head: 'feature' }]);
-  assert.equal(result.text, 'Verify the pinned controls.\n\nCommits in this pull request:\n\n• Pin playback controls\n• Polish player spacing');
+  assert.equal(result.text, 'Target branch: preview\n\nVerify the pinned controls.\n\nCommits in this pull request:\n\n• Pin playback controls\n• Polish player spacing');
   assert.deepEqual(result.warnings, ['No ancestor published build found; using all pull-request commits']);
 });
 
@@ -224,7 +224,7 @@ test('uses the pull request target branch when finding a title fallback', async 
 
   const result = await generateTestFlightNotes({ profile, build, payload, asc, github });
   assert.equal(titleBranch, 'develop');
-  assert.equal(result.text, 'Improve playback');
+  assert.equal(result.text, 'Target branch: develop\n\nImprove playback');
 });
 
 test('classifies an inaccessible commit as a bad request', async () => {
@@ -238,4 +238,23 @@ test('classifies an inaccessible commit as a bad request', async () => {
     generateTestFlightNotes({ profile, build, payload, asc, github }),
     error => error.statusCode === 400 && /Commit is not accessible/.test(error.message),
   );
+});
+
+
+test('puts the build target first, falling back to current PR details for note refreshes', async () => {
+  for (const purpose of ['pull_request', 'production']) {
+    for (const target of ['feature/clashfinder-v2', undefined]) {
+      const result = await generateTestFlightNotes({
+        build: { purpose, includeCommits: false },
+        payload: { commit: COMMIT, pull_request: 173, target_branch: target },
+        asc: {},
+        github: {
+          getCommitSubject: () => 'Day picker',
+          getPRDetails: () => ({ headRefOid: COMMIT, baseRefName: 'develop', body: 'x'.repeat(4100) }),
+        },
+      });
+      assert.ok(result.text.startsWith(`Target branch: ${target || 'develop'}\n\n`));
+      assert.ok(result.text.length <= 4000);
+    }
+  }
 });

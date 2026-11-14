@@ -1957,3 +1957,22 @@ test('recovery cleanup follows all build pages and rejects unsafe pagination', a
   asc.request = async () => ({ data: [], links: { next: 'https://attacker.invalid/v1/builds' } });
   await assert.rejects(asc.getTestFlightCleanupCandidates(), /Invalid Apple cleanup pagination/);
 });
+
+
+test('retargets ignore older same-commit runs but reuse the fresh run on retry', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  const makeRun = (id, createdDate, commit = 'head') => ({
+    id, attributes: { createdDate, sourceCommit: { commitSha: commit }, executionProgress: 'COMPLETE' },
+  });
+  const runs = [makeRun('old', '2026-11-14T09:00:00Z')];
+  asc.getBuildRuns = async () => ({ data: runs });
+  const lookup = () => asc.getWorkflowRunStatus('workflow', 'head', 'feature', null, null, null, {
+    createdAfter: '2026-11-14T10:00:00Z',
+  });
+  assert.equal((await lookup()).found, false);
+  runs.unshift(makeRun('fresh', '2026-11-14T10:00:01Z'));
+  assert.equal((await lookup()).runId, 'fresh');
+  assert.equal((await lookup()).runId, 'fresh');
+  runs[0].attributes.createdDate = undefined;
+  await assert.rejects(lookup(), /Cannot verify build creation date/);
+});
