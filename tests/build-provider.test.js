@@ -426,3 +426,19 @@ test('carries retarget cutoff from job environment into the run lookup', async (
   });
   assert.equal((await provider.trigger(rebuilt, { dryRun: true })).action, 'would_start');
 });
+
+test('waits past the edit timestamp second before starting a retarget build', async () => {
+  const cutoff = new Date().toISOString().replace(/\.\d{3}Z$/, '.000Z');
+  let started = false;
+  const provider = new XcodeCloudBuildProvider({
+    getWorkflowBranchReference: async () => ({ id: 'branch' }),
+    getWorkflowRunStatus: async () => ({ found: false }),
+    startWorkflowBuild: async () => {
+      assert.ok(Date.now() >= Date.parse(cutoff) + 1000);
+      started = true;
+      return { runId: 'fresh' };
+    },
+  });
+  await provider.trigger({ ...intent(), rebuildAfter: cutoff });
+  assert.equal(started, true);
+});

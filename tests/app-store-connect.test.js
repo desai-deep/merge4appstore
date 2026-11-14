@@ -1976,3 +1976,32 @@ test('retargets ignore older same-commit runs but reuse the fresh run on retry',
   runs[0].attributes.createdDate = undefined;
   await assert.rejects(lookup(), /Cannot verify build creation date/);
 });
+
+test('excludes the entire retarget second and preserves fresh-run retry reuse', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  const runs = [0, 900].map(ms => ({
+    id: `old-${ms}`, attributes: { createdDate: new Date(Date.parse('2026-11-14T10:00:00Z') + ms).toISOString(), sourceCommit: { commitSha: 'head' } },
+  }));
+  asc.getBuildRuns = async () => ({ data: runs });
+  const lookup = () => asc.getWorkflowRunStatus('workflow', 'head', 'feature', null, null, null, { createdAfter: '2026-11-14T10:00:00Z' });
+  assert.equal((await lookup()).found, false);
+  runs.unshift({ id: 'fresh', attributes: { createdDate: '2026-11-14T10:00:01Z', sourceCommit: { commitSha: 'head' } } });
+  assert.equal((await lookup()).runId, 'fresh');
+  assert.equal((await lookup()).runId, 'fresh');
+});
+
+test('does not reuse another PR run with the same commit but allows exact branch fallback', async () => {
+  const asc = createASCWithVersions({ data: [] });
+  const run = { id: 'other-pr', attributes: { sourceCommit: { commitSha: 'head' }, isPullRequestBuild: true }, relationships: { pullRequest: { data: { id: 'pr-other' } } } };
+  asc.getBuildRuns = async () => ({ data: [run] });
+  const lookup = () => asc.getWorkflowRunStatus('workflow', 'head', 'feature', '173', 'pr-173', 'branch-feature');
+  assert.equal((await lookup()).found, false);
+  run.relationships.pullRequest.data.id = 'pr-173';
+  assert.equal((await lookup()).runId, 'other-pr');
+  run.attributes.isPullRequestBuild = false;
+  delete run.relationships.pullRequest;
+  run.relationships.sourceBranchOrTag = { data: { id: 'branch-feature' } };
+  assert.equal((await lookup()).runId, 'other-pr');
+  run.relationships.sourceBranchOrTag.data.id = 'other-branch';
+  assert.equal((await lookup()).found, false);
+});

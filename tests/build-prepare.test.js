@@ -278,3 +278,17 @@ test('recovers a feature-target PR after Apple falls back to a branch build', as
   });
   assert.equal(result.text, 'Target branch: feature/clashfinder-v2\n\nTest day selection');
 });
+
+test('does not attach the release PR to an internal beta-branch push', async () => {
+  const result = await generateTestFlightNotes({
+    profile: { build: { production_pr_builds: true }, repository: { beta_branch: 'develop' } },
+    build: { purpose: 'pull_request', includeCommits: false },
+    payload: { commit: COMMIT, branch: 'develop' }, asc: {},
+    github: {
+      getCommitSubject: () => 'Internal changes',
+      findOpenPullRequestForCommit: () => { throw new Error('Must not recover release PR'); },
+      findPullRequestTitleForCommit: () => null,
+    },
+  });
+  assert.equal(result.text, 'Internal changes');
+});
