@@ -1032,3 +1032,19 @@ test('retrying a failed owned recovery makes one deterministic close operation w
   assert.ok(mutations.every(args => args.includes('PATCH') && args.includes('state=closed') && !args.includes('POST')));
   assert.ok(mutations[0].includes(`body=${marker}\nRecovered`));
 });
+
+test('recovers a unique exact-head PR without assuming its target branch', async () => {
+  const github = new GitHubAPI('example', 'ios');
+  const pulls = [{ number: 173, headRefOid: 'sha', headRefName: 'fix/day-picker-menu', baseRefName: 'feature/clashfinder-v2' }];
+  const lookup = args => {
+    assert.equal(args.includes('--base'), false);
+    return JSON.stringify(pulls);
+  };
+  github.exec = lookup;
+  github.execAsync = async args => lookup(args);
+  assert.equal(github.findOpenPullRequestForCommit('sha', null, 'fix/day-picker-menu').baseBranch, 'feature/clashfinder-v2');
+  assert.equal((await github.findOpenPullRequestForCommitAsync('sha', null, 'fix/day-picker-menu')).number, '173');
+  pulls.push({ ...pulls[0], number: 174, baseRefName: 'develop' });
+  assert.equal(github.findOpenPullRequestForCommit('sha', null, 'fix/day-picker-menu'), null);
+  assert.equal(await github.findOpenPullRequestForCommitAsync('sha', null, 'fix/day-picker-menu'), null);
+});

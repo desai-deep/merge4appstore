@@ -258,3 +258,23 @@ test('puts the build target first, falling back to current PR details for note r
     }
   }
 });
+
+
+test('recovers a feature-target PR after Apple falls back to a branch build', async () => {
+  const result = await generateTestFlightNotes({
+    profile: { build: { production_pr_builds: true } },
+    build: { purpose: 'pull_request', includeCommits: false },
+    payload: { commit: COMMIT, branch: 'fix/day-picker-menu' },
+    asc: {},
+    github: {
+      getCommitSubject: () => 'Day picker',
+      findOpenPullRequestForCommit: (sha, base, head) => {
+        assert.equal(base, null);
+        assert.equal(head, 'fix/day-picker-menu');
+        return { number: '173' };
+      },
+      getPRDetails: () => ({ headRefOid: COMMIT, baseRefName: 'feature/clashfinder-v2', body: 'Test day selection' }),
+    },
+  });
+  assert.equal(result.text, 'Target branch: feature/clashfinder-v2\n\nTest day selection');
+});
