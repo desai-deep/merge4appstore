@@ -434,7 +434,7 @@ test('waits past the edit timestamp second before starting a retarget build', as
     getWorkflowBranchReference: async () => ({ id: 'branch' }),
     getWorkflowRunStatus: async () => ({ found: false }),
     startWorkflowBuild: async () => {
-      assert.ok(Date.now() >= Date.parse(cutoff) + 1000);
+      assert.ok(Date.now() >= Date.parse(cutoff) + 3000);
       started = true;
       return { runId: 'fresh' };
     },

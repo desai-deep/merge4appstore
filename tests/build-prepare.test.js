@@ -292,3 +292,22 @@ test('does not attach the release PR to an internal beta-branch push', async () 
   });
   assert.equal(result.text, 'Internal changes');
 });
+
+test('reserves the branch header before sizing commits so manual notes keep their ending', async () => {
+  const manual = 'x'.repeat(3700) + ' Verify the final accessibility behavior.';
+  const result = await generateTestFlightNotes({
+    build: { purpose: 'pull_request', includeCommits: true, workflowId: 'wf' },
+    payload: { commit: COMMIT, pull_request: 173, target_branch: 'feature/clashfinder-v2' },
+    asc: { getPublishedWorkflowCommits: async () => [] },
+    github: {
+      getCommitSubject: () => 'Day picker',
+      getPRDetails: () => ({ headRefOid: COMMIT, body: manual }),
+      getCommitSubjectsSince: () => ({ baseBuildNumber: '123', subjects: Array(10).fill('A'.repeat(80)) }),
+    },
+  });
+  assert.ok(result.text.startsWith('Target branch: feature/clashfinder-v2\n\n'));
+  assert.ok(result.text.endsWith(manual));
+  assert.ok(result.text.length <= 4000);
+  assert.doesNotMatch(result.text, /truncated/);
+  assert.ok(result.warnings.some(w => w.includes('commits omitted')));
+});
