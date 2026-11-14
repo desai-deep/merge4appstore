@@ -119,7 +119,7 @@ test('publishes notes to the exact successful run build and excludes it from his
   assert.equal(asc.appId, 'app-1');
   assert.deepEqual(updated, [{
     buildId: 'build-current',
-    notes: 'Commits since 1.4 (101):\n\n• Current subject\n\nManual tester instructions',
+    notes: 'Target branch: develop\n\nCommits since 1.4 (101):\n\n• Current subject\n\nManual tester instructions',
   }]);
 });
 
