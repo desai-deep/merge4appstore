@@ -2692,7 +2692,7 @@ function previewProfile() {
 
 test('production PR preview routing follows the target, including release PRs and retargets', () => {
   for (const [head, base, purpose] of [
-    ['hotfix', 'main', 'production'], ['develop', 'main', 'production'], ['feature', 'develop', 'pull_request'],
+    ['hotfix', 'main', 'production'], ['develop', 'main', 'production'], ['feature', 'develop', 'pull_request'], ['fix/day-picker-menu', 'feature/clashfinder-v2', 'pull_request'],
   ]) {
     for (const action of ['opened', 'reopened', 'synchronize', 'edited']) {
       const jobs = jobsForGitHubEvent(previewProfile(), 'pull_request', {
@@ -2729,4 +2729,22 @@ test('target routing uses internal testing for beta branch pushes too', () => {
   assert.equal(trigger.purpose, 'pull_request');
   assert.equal(trigger.branch, 'develop');
   assert.equal(trigger.pullRequest, undefined);
+});
+
+
+test('base edits take priority over body edits and preserve the rebuild cutoff through the job environment', () => {
+  const updatedAt = '2026-11-14T10:00:00Z';
+  const jobs = jobsForGitHubEvent(previewProfile(), 'pull_request', {
+    action: 'edited', changes: { base: { ref: { from: 'develop' } }, body: { from: 'Old notes' } },
+    repository: { full_name: 'example/ios' },
+    pull_request: {
+      number: 173, updated_at: updatedAt,
+      head: { sha: 'head', ref: 'fix/day-picker-menu' }, base: { ref: 'feature/clashfinder-v2' },
+    },
+  }, 'retarget');
+  assert.deepEqual(jobs, [{
+    mode: 'trigger', purpose: 'pull_request', commitSha: 'head', branch: 'fix/day-picker-menu',
+    pullRequest: '173', targetBranch: 'feature/clashfinder-v2', rebuildAfter: updatedAt, deliveryId: 'retarget',
+  }]);
+  assert.equal(jobEnvironment(jobs[0], {}).BUILD_REBUILD_AFTER, updatedAt);
 });

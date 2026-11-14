@@ -125,7 +125,7 @@ test('keeps the pull request description before commits for its first build', as
 
   const result = await generateTestFlightNotes({ profile, build, payload, asc, github });
 
-  assert.equal(result.text, 'Please verify playback and lock-screen controls.\n\nCommits in this pull request:\n\n• Add playback state\n• Fix lock screen');
+  assert.equal(result.text, 'Target branch: develop\n\nPlease verify playback and lock-screen controls.\n\nCommits in this pull request:\n\n• Add playback state\n• Fix lock screen');
   assert.deepEqual(result.warnings, ['No ancestor published build found; using all pull-request commits']);
 });
 
@@ -160,7 +160,7 @@ test('recovers pull request notes for an exact branch-fallback build', async () 
   });
 
   assert.deepEqual(lookups, [{ commit: COMMIT, base: 'preview', head: 'feature' }]);
-  assert.equal(result.text, 'Verify the pinned controls.\n\nCommits in this pull request:\n\n• Pin playback controls\n• Polish player spacing');
+  assert.equal(result.text, 'Target branch: preview\n\nVerify the pinned controls.\n\nCommits in this pull request:\n\n• Pin playback controls\n• Polish player spacing');
   assert.deepEqual(result.warnings, ['No ancestor published build found; using all pull-request commits']);
 });
 
@@ -224,7 +224,7 @@ test('uses the pull request target branch when finding a title fallback', async 
 
   const result = await generateTestFlightNotes({ profile, build, payload, asc, github });
   assert.equal(titleBranch, 'develop');
-  assert.equal(result.text, 'Improve playback');
+  assert.equal(result.text, 'Target branch: develop\n\nImprove playback');
 });
 
 test('classifies an inaccessible commit as a bad request', async () => {
@@ -238,4 +238,76 @@ test('classifies an inaccessible commit as a bad request', async () => {
     generateTestFlightNotes({ profile, build, payload, asc, github }),
     error => error.statusCode === 400 && /Commit is not accessible/.test(error.message),
   );
+});
+
+
+test('puts the build target first, falling back to current PR details for note refreshes', async () => {
+  for (const purpose of ['pull_request', 'production']) {
+    for (const target of ['feature/clashfinder-v2', undefined]) {
+      const result = await generateTestFlightNotes({
+        build: { purpose, includeCommits: false },
+        payload: { commit: COMMIT, pull_request: 173, target_branch: target },
+        asc: {},
+        github: {
+          getCommitSubject: () => 'Day picker',
+          getPRDetails: () => ({ headRefOid: COMMIT, baseRefName: 'develop', body: 'x'.repeat(4100) }),
+        },
+      });
+      assert.ok(result.text.startsWith(`Target branch: ${target || 'develop'}\n\n`));
+      assert.ok(result.text.length <= 4000);
+    }
+  }
+});
+
+
+test('recovers a feature-target PR after Apple falls back to a branch build', async () => {
+  const result = await generateTestFlightNotes({
+    profile: { build: { production_pr_builds: true } },
+    build: { purpose: 'pull_request', includeCommits: false },
+    payload: { commit: COMMIT, branch: 'fix/day-picker-menu' },
+    asc: {},
+    github: {
+      getCommitSubject: () => 'Day picker',
+      findOpenPullRequestForCommit: (sha, base, head) => {
+        assert.equal(base, null);
+        assert.equal(head, 'fix/day-picker-menu');
+        return { number: '173' };
+      },
+      getPRDetails: () => ({ headRefOid: COMMIT, baseRefName: 'feature/clashfinder-v2', body: 'Test day selection' }),
+    },
+  });
+  assert.equal(result.text, 'Target branch: feature/clashfinder-v2\n\nTest day selection');
+});
+
+test('does not attach the release PR to an internal beta-branch push', async () => {
+  const result = await generateTestFlightNotes({
+    profile: { build: { production_pr_builds: true }, repository: { beta_branch: 'develop' } },
+    build: { purpose: 'pull_request', includeCommits: false },
+    payload: { commit: COMMIT, branch: 'develop' }, asc: {},
+    github: {
+      getCommitSubject: () => 'Internal changes',
+      findOpenPullRequestForCommit: () => { throw new Error('Must not recover release PR'); },
+      findPullRequestTitleForCommit: () => null,
+    },
+  });
+  assert.equal(result.text, 'Internal changes');
+});
+
+test('reserves the branch header before sizing commits so manual notes keep their ending', async () => {
+  const manual = 'x'.repeat(3700) + ' Verify the final accessibility behavior.';
+  const result = await generateTestFlightNotes({
+    build: { purpose: 'pull_request', includeCommits: true, workflowId: 'wf' },
+    payload: { commit: COMMIT, pull_request: 173, target_branch: 'feature/clashfinder-v2' },
+    asc: { getPublishedWorkflowCommits: async () => [] },
+    github: {
+      getCommitSubject: () => 'Day picker',
+      getPRDetails: () => ({ headRefOid: COMMIT, body: manual }),
+      getCommitSubjectsSince: () => ({ baseBuildNumber: '123', subjects: Array(10).fill('A'.repeat(80)) }),
+    },
+  });
+  assert.ok(result.text.startsWith('Target branch: feature/clashfinder-v2\n\n'));
+  assert.ok(result.text.endsWith(manual));
+  assert.ok(result.text.length <= 4000);
+  assert.doesNotMatch(result.text, /truncated/);
+  assert.ok(result.warnings.some(w => w.includes('commits omitted')));
 });

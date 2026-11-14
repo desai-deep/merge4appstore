@@ -654,14 +654,16 @@ update while App Store Connect still permits it. Repository-managed
 
 ### Test production builds before merging
 
-Set `build.production_pr_builds: true` to choose builds by PR target. PRs and pushes to
-`repository.beta_branch` use the `pull_request` workflow/app: configure your
+Set `build.production_pr_builds: true` to choose builds by PR target. PRs targeting
+any branch other than `repository.production_branch` use the `pull_request` workflow/app: configure your
 internal-testing workflow there, with or without a separate UAT app. A PR to
 `repository.production_branch`, including the automated release PR, uses the
 managed `production` route and production marketing version. Point that route
 at your public-testing workflow (for example, `workflow: beta`); the purpose
 name does not require a workflow named production.
-Retargeting queues the newly selected workflow. Production pushes reconcile
+Beta-branch pushes also use the internal-testing route.
+Retargeting queues a fresh build in the newly selected workflow even when the head
+commit is unchanged. TestFlight PR notes start with the target branch. Production pushes reconcile
 submission instead of starting another build.
 
 Production uploads remain in TestFlight until their PR is merged. Submission
